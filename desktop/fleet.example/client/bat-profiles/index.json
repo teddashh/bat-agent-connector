@@ -1,0 +1,13 @@
+{
+  "profiles": [
+    {
+      "id": "example-profile",
+      "type": "remote",
+      "remoteHost": "127.0.0.2",
+      "remotePort": 19001,
+      "remoteProfileId": "default",
+      "remoteFingerprint": "REPLACE_WITH_TRUSTED_SHA256_FINGERPRINT"
+    }
+  ],
+  "activeProfileIds": []
+}

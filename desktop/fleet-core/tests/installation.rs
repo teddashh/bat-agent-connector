@@ -7,6 +7,8 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
+#[path = "support/public_installation.rs"]
+mod public_installation;
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -48,7 +50,7 @@ fn legacy_config_binds_actual_client_root_and_explicit_backend_changes_invalidat
         old.client_root(),
         canonical_local(&f.0.join("kit/client")).unwrap()
     );
-    assert_eq!(old.script().parent(), Some(old.client_root()));
+    assert_eq!(old.script().unwrap().parent(), Some(old.client_root()));
     let original = std::fs::read(f.path()).unwrap();
     old.verify_current().unwrap();
     assert_eq!(std::fs::read(f.path()).unwrap(), original);
@@ -122,6 +124,55 @@ fn missing_or_replaced_required_installation_paths_refuse() {
     assert!(Snapshot::load(&f.path()).is_err());
     std::fs::create_dir(f.0.join("kit/client/fleet-desktop.ps1")).unwrap();
     assert_eq!(snapshot.verify_current(), Err("INSTALLATION_CHANGED"));
+    assert!(Snapshot::load(&f.path()).is_err());
+}
+
+#[test]
+fn public_rust_layout_needs_no_legacy_scripts_but_keeps_data_validation() {
+    use bat_fleet_core::configuration::{Configuration, Paths};
+    let f = Fixture::new();
+    let root = f.0.join("public");
+    public_installation::write(&root, false);
+    let snapshot = Snapshot::load(&root.join("fleet.json")).unwrap();
+    assert_eq!(snapshot.backend(), Backend::Rust);
+    assert_eq!(snapshot.script(), Err("POWERSHELL_ADAPTER_UNAVAILABLE"));
+    for name in ["fleet-desktop.ps1", "bat-connect.ps1", "Open BAT.vbs"] {
+        assert!(!snapshot.client_root().join(name).exists());
+    }
+    let paths = Paths::new(snapshot.client_root(), &f.0, None, None).unwrap();
+    assert!(!Configuration::load(paths.clone())
+        .unwrap()
+        .issues
+        .is_empty());
+    public_installation::write(&root, true);
+    assert!(Configuration::load(paths.clone())
+        .unwrap()
+        .issues
+        .is_empty());
+    snapshot.verify_current().unwrap();
+    snapshot.backend_payload(Backend::Rust).unwrap();
+    assert!(snapshot.backend_payload(Backend::Powershell).is_err());
+    std::fs::remove_file(snapshot.client_root().join("ssh-config")).unwrap();
+    assert!(Configuration::load(paths).is_err());
+    std::fs::rename(root.join("client"), root.join("changed")).unwrap();
+    assert_eq!(snapshot.verify_current(), Err("INSTALLATION_CHANGED"));
+}
+
+#[test]
+fn explicit_rust_does_not_adopt_or_execute_unvalidated_legacy_script() {
+    let f = Fixture::new();
+    f.write(json!({"kit_root": f.0.join("kit"), "backend":"rust"}));
+    let snapshot = Snapshot::load(&f.path()).unwrap();
+    assert_eq!(snapshot.script(), Err("POWERSHELL_ADAPTER_UNAVAILABLE"));
+    std::fs::remove_file(f.0.join("kit/client/fleet-desktop.ps1")).unwrap();
+    snapshot.verify_current().unwrap();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(f.path()).unwrap()).unwrap();
+    legacy["backend"] = json!("powershell");
+    assert!(snapshot
+        .validate_payload(&serde_json::to_vec(&legacy).unwrap(), Backend::Powershell)
+        .is_err());
+    f.write(legacy);
     assert!(Snapshot::load(&f.path()).is_err());
 }
 
