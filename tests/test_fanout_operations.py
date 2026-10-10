@@ -488,9 +488,18 @@ async def test_new_runtime_identity_never_authorizes_planner_stop(daemon, mock, 
     op, _ = daemon.ops.create(P, **intent(target={'host': 'h1', 'session_id': SID}, params={}))
     oid = op['operation_id']
     if boundary == 'reopen':
-        await settle_operations(daemon.ops)
-        child = next(o for o in daemon.ops.list()['operations'] if o['action'] == 'session.start')
+        # Stop at the durable child boundary, regardless of how long BAT takes.
+        # Draining all due work can also run the parent's one-second retry and
+        # retire the still-original planner before the replacement below exists.
+        await daemon.ops._execute(oid)
+        saved = fanout.relay.receipt(daemon.ops, oid, 'fanout.child.1')
+        assert saved is not None
+        await daemon.ops._execute(saved['operation_id'])
+        child = daemon.ops.get(saved['operation_id'])
         assert child['status'] == 'succeeded'
+        parent = daemon.ops.get(oid)
+        assert parent['status'] == 'waiting_external'
+        assert not any(step['name'] == 'planner.stop' for step in parent['steps'])
         replacement()
         daemon.journal.close()
         daemon.journal = Journal(daemon.journal.path)
