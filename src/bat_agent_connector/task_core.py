@@ -41,12 +41,12 @@ class TaskAdapter(Protocol):
 
 
 def initial_prompt(task: dict) -> str:
-    """Only Ted's original text may be relayed as a request; a lead plans in repo."""
+    """Only the user's original text may be relayed as a request; a lead plans in repo."""
     return (
         "You are the repository-aware lead coding session. Plan/decompose from the repo, then implement. "
-        "Ted's exact request is the source of truth. End each turn with BAT-STATUS: MILESTONE, "
+        "The user's exact request is the source of truth. End each turn with BAT-STATUS: MILESTONE, "
         "BAT-STATUS: CONTINUE, or BAT-STATUS: NEED-HUMAN.\n\n"
-        "Ted's original words (verbatim):\n" + task["original_words"]
+        "The user's original words (verbatim):\n" + task["original_words"]
     )
 
 
@@ -55,11 +55,11 @@ def reviewer_prompt(task: dict, candidate: str, tree: str) -> str:
                           "findings": [{"severity": "high|medium|low", "summary": "..."}]})
     return (
         "REVIEW-CANDIDATE: " + candidate + " " + tree + "\n"
-        "Independently review the candidate against Ted's original request and acceptance criteria. "
+        "Independently review the candidate against the user's original request and acceptance criteria. "
         "Do not edit. Your final message must end with exactly one JSON verdict object:\n" + verdict + "\n"
         "Use \"reject\" for any high-severity finding. Only your final message is read; a missing, "
         "malformed, conflicting or commit/tree-mismatched verdict counts as a rejection.\n\n"
-        "Ted's original words (verbatim):\n" + task["original_words"] +
+        "The user's original words (verbatim):\n" + task["original_words"] +
         "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
         json.dumps((task.get("acceptance") or "")[:1000], ensure_ascii=False)
     )
@@ -327,7 +327,7 @@ class TaskCoordinator:
 
     @staticmethod
     def _pick_agent(role: str, task: dict, available: frozenset[str]) -> tuple[str, str]:
-        """The BAT agent a session really runs, by Ted's order.
+        """The BAT agent a session really runs, by the user's order.
 
         Review: Claude Opus 5.5, then Codex (AGY is not a BAT runtime), from a
         different family than the lead when possible. Lead: the task's
@@ -415,7 +415,7 @@ class TaskCoordinator:
         if task["state"] == "verifying":
             return await self._verify_and_review(task)
         if task["state"] == "quota_limited":
-            # No mid-task failover. Goose (or Ted) picks another model; the service stops.
+            # No mid-task failover. Goose (or the user) picks another model; the service stops.
             return self.journal.change(task["task_id"], "needs_ted", fields={
                 "result": "Provider quota exhausted; not failing over inside the service"})
         if task["state"] == "accepted" and task["session_id"] and not any(
@@ -830,7 +830,7 @@ class TaskCoordinator:
                 return self.journal.change(task["task_id"], "needs_ted")
             self.journal.change(task["task_id"], "accepted", fields={"continuations": task["continuations"] + 1})
             return await self._send(self.journal.get(task["task_id"]), sid,
-                                    "Continue toward Ted's acceptance criteria. Report a blocker or milestone.",
+                                    "Continue toward the user's acceptance criteria. Report a blocker or milestone.",
                                     "continue")
         if decision == "verifying":
             return self.journal.change(task["task_id"], "verifying")
@@ -1096,7 +1096,7 @@ class TaskCoordinator:
 
         Missing dependencies get one lockfile install per candidate and a
         retry; code/test failures go back to the lead within a bounded budget;
-        permission, login and unclear environment problems go to Ted.
+        permission, login and unclear environment problems go to the user.
         """
         task_id = task["task_id"]
         classify = getattr(self.adapter, "verification_failure", None)

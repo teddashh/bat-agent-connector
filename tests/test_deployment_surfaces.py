@@ -197,9 +197,9 @@ async def test_capabilities_missing_runtime_verification_disables_deploys(make_d
     d = make_daemon()
     cfg = d.ops.context["github_config"]
     cfg.recipes["prod"] = replace(cfg.recipes["prod"], verification=None)
-    from tests.test_delivery import TED
+    from tests.test_delivery import OPERATOR
 
-    _, caps = await d.api.capabilities(principal=TED)
+    _, caps = await d.api.capabilities(principal=OPERATOR)
     assert not caps["features"]["deploy"]
     assert caps["features"]["deployment_history"]
     assert caps["deploy_recipes"][0]["readiness"]["missing"] == ["verification"]

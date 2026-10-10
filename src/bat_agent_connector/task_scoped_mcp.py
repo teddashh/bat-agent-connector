@@ -36,7 +36,7 @@ def build(task_id: str) -> MCPServer:
 
     async def task_request_ted(reason: str, idempotency_key: str | None = None,
                                control_version: int | None = None) -> dict:
-        """Stop automatic dispatch and ask Ted for a concrete decision."""
+        """Stop automatic dispatch and ask the user for a concrete decision."""
         return await asyncio.to_thread(request, "task_request_ted", timeout=40, entry="mcp", task_id=task_id, reason=reason,
                                        **({"idempotency_key": idempotency_key} if idempotency_key is not None else {}),
                                        **({"control_version": control_version} if control_version is not None else {}))

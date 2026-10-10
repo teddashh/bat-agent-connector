@@ -665,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--command-id", required=True)
     p.add_argument("--outcome", required=True, choices=["delivered", "not_delivered", "superseded"])
     p.add_argument("--actor", required=True, choices=["operator", "ted"])
-    p.add_argument("--source", required=True, help="operator ticket or Ted message reference")
+    p.add_argument("--source", required=True, help="operator ticket or user message reference")
     p.add_argument("--evidence", required=True, help="what was inspected; never a guessed result")
     p.add_argument("--observed-result", default="none", choices=["none", "milestone", "review_pass"])
     p.add_argument("--turn-ref", help="BAT turn/message reference required for observed result")
@@ -703,7 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sp.add_parser("api-token", help="manage /api/v1 tokens on the local task daemon (admin)")
     tsp = p.add_subparsers(dest="api_token_cmd", required=True)
     t = tsp.add_parser("issue", help="issue a token for an actor (printed once)")
-    t.add_argument("--actor", required=True, help="e.g. ted-dashboard, hermes, grokbot")
+    t.add_argument("--actor", required=True, help="e.g. operator-dashboard, hermes, grokbot")
     t.add_argument("--scope", action="append", required=True,
                    choices=list(api_auth.SCOPES))
     t.add_argument("--ttl-days", type=float)

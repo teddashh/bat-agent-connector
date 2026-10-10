@@ -2631,7 +2631,7 @@ async def test_a07_resume_transport_loss_rejects_command_without_uncertain_task(
         assert d.journal.get(tid) == prior
     assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
     if door == "coordinator":
-        return  # Ted must explicitly intervene; a terminal local refusal does not permit another control.
+        return  # the user must explicitly intervene; a terminal local refusal does not permit another control.
     # The failed resume must not leave a pending task command blocking later controls.
     await service.session_interrupt(d.fleet, "h1", SID, confirm=True)
     assert d.journal.commands(tid)[-1]["status"] == "settled"

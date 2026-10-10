@@ -7,7 +7,7 @@ from bat_agent_connector.errors import BatError
 from bat_agent_connector.relay import build_relay, parse_fanout, parse_status
 
 NOW_MS = 1_790_000_000_000
-TED = "幫我把登入頁改成支援 passkey，順便看一下\n  錯字   和 `code` 格式?!"
+REQUEST = "幫我把登入頁改成支援 passkey，順便看一下\n  錯字   和 `code` 格式?!"
 
 
 def msg(i, role, text):
@@ -36,11 +36,11 @@ def test_parse_status_absent():
 
 def test_relay_is_verbatim_with_labeled_brief():
     brief = {"goal": "Add passkey login", "constraints": ["no new deps"], "acceptance": "tests pass"}
-    t = build_relay(TED, host="host1", workspace="web", channel="host1-web", thread="passkey",
+    t = build_relay(REQUEST, host="host1", workspace="web", channel="host1-web", thread="passkey",
                     earlier=["先做後端"], brief=brief, human_name="Ted", relay_name="Hermes")
     begin = "----- BEGIN MESSAGE FROM TED (verbatim, unedited) -----\n"
     body = t.split(begin, 1)[1].split("\n----- END MESSAGE FROM TED -----", 1)[0]
-    assert body == TED  # byte-for-byte
+    assert body == REQUEST  # byte-for-byte
     assert "先做後端" in t and "#host1-web" in t and "host1/web" in t and "thread: passkey" in t
     brief_part = t.split("----- BEGIN HERMES BRIEF (Hermes's interpretation, not Ted's words) -----", 1)[1]
     assert "Goal: Add passkey login" in brief_part and "- no new deps" in brief_part
@@ -84,21 +84,21 @@ async def test_relay_dry_run_targets_managed_session_never_a_bat_session(fleet_f
     from bat_agent_connector import orchestrate
 
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
-    d = await lifecycle.session_relay(f, "h1", TED, workspace="demo-project", dry_run=True)
-    assert d["no_session"] and d["session_id"] is None  # Ted's BAT sessions are not relay targets
+    d = await lifecycle.session_relay(f, "h1", REQUEST, workspace="demo-project", dry_run=True)
+    assert d["no_session"] and d["session_id"] is None  # the user's BAT sessions are not relay targets
     r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
-    d = await lifecycle.session_relay(f, "h1", TED, workspace="demo-project", dry_run=True, brief="goal: x")
-    assert d["sent"] is False and TED in d["text"] and d["session_id"] == r["session_id"]
-    s = await lifecycle.session_relay(f, "h1", TED, session_id=r["session_id"], confirm=True)
+    d = await lifecycle.session_relay(f, "h1", REQUEST, workspace="demo-project", dry_run=True, brief="goal: x")
+    assert d["sent"] is False and REQUEST in d["text"] and d["session_id"] == r["session_id"]
+    s = await lifecycle.session_relay(f, "h1", REQUEST, session_id=r["session_id"], confirm=True)
     assert s["sent"] is True
     await f.close()
 
 
 async def test_relay_to_bat_session_starts_a_new_worktree_instead(fleet_factory, mock):
     f = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined", safety={"write_min_interval_s": 0})
-    n = await lifecycle.session_relay(f, "h1", TED, session_id="sess-claude-0001", confirm=True)
+    n = await lifecycle.session_relay(f, "h1", REQUEST, session_id="sess-claude-0001", confirm=True)
     assert n["sent"] is False and n["read_only"] and n["read_only_code"] == "MANUAL_READ_ONLY"
-    s = await lifecycle.session_relay(f, "h1", TED, session_id="sess-claude-0001", confirm=True,
+    s = await lifecycle.session_relay(f, "h1", REQUEST, session_id="sess-claude-0001", confirm=True,
                                       start_if_missing=True)
     assert s["result"]["write_scope"] == "confined"
     assert s["result"]["confinement"]["level"] == "os_sandbox"
@@ -116,11 +116,11 @@ async def test_relay_without_session(fleet_factory, mock, monkeypatch):
 
     monkeypatch.setattr(lifecycle, "main_session", none)
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
-    d = await lifecycle.session_relay(f, "h1", TED, workspace="other", dry_run=True)
-    assert d["no_session"] and d["session_id"] is None and TED in d["text"]
-    n = await lifecycle.session_relay(f, "h1", TED, workspace="other", confirm=True)
+    d = await lifecycle.session_relay(f, "h1", REQUEST, workspace="other", dry_run=True)
+    assert d["no_session"] and d["session_id"] is None and REQUEST in d["text"]
+    n = await lifecycle.session_relay(f, "h1", REQUEST, workspace="other", confirm=True)
     assert n["sent"] is False and n["no_session"]
-    s = await lifecycle.session_relay(f, "h1", TED, workspace="other", confirm=True, start_if_missing=True)
+    s = await lifecycle.session_relay(f, "h1", REQUEST, workspace="other", confirm=True, start_if_missing=True)
     assert s["sent"] and s["started"] and s["session_id"]
     await f.close()
 
@@ -214,9 +214,9 @@ async def test_relay_to_a_managed_session_with_a_stale_binding_starts_a_replacem
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
     r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
     mock.metas[r["session_id"]]["cwd"] = "/srv/demo"  # BAT now runs it in the human checkout
-    n = await lifecycle.session_relay(f, "h1", TED, session_id=r["session_id"], confirm=True)
+    n = await lifecycle.session_relay(f, "h1", REQUEST, session_id=r["session_id"], confirm=True)
     assert n["sent"] is False and n["read_only_code"] == "BINDING_MISMATCH"
-    s = await lifecycle.session_relay(f, "h1", TED, session_id=r["session_id"], confirm=True,
+    s = await lifecycle.session_relay(f, "h1", REQUEST, session_id=r["session_id"], confirm=True,
                                       start_if_missing=True)
     assert s["started"] and s["session_id"] != r["session_id"]
     assert s["replaced"] == {"session_id": r["session_id"], "read_only_code": "BINDING_MISMATCH",

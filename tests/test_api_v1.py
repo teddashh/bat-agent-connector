@@ -95,17 +95,17 @@ def test_task_events_project_into_the_api_cursor_and_old_journals_backfill(tmp_p
 def test_api_tokens_are_hashed_scoped_and_revocable(tmp_path):
     j = Journal(tmp_path / "j.db")
     with j.tx():
-        tok = api_auth.issue(j.db, "ted-dashboard", ["observe", "operate"], label="laptop")
+        tok = api_auth.issue(j.db, "operator-dashboard", ["observe", "operate"], label="laptop")
     assert tok not in json.dumps([dict(r) for r in j.db.execute("SELECT * FROM api_principals")])
     p = api_auth.authenticate(j.db, tok, "admin-token-" + "x" * 30)
-    assert p.actor == "ted-dashboard" and p.allows("operate") and not p.allows("merge")
+    assert p.actor == "operator-dashboard" and p.allows("operate") and not p.allows("merge")
     assert api_auth.authenticate(j.db, "admin-token-" + "x" * 30, "admin-token-" + "x" * 30).admin
     assert api_auth.authenticate(j.db, "nope", "admin-token-" + "x" * 30) is None
     for bad in (("local-admin", ["observe"]), ("x", ["root"]), ("x", []), ("bad actor!", ["observe"])):
         with pytest.raises(ValueError):
             api_auth.issue(j.db, *bad)
     with j.tx():
-        assert api_auth.revoke(j.db, "ted-dashboard") == 1
+        assert api_auth.revoke(j.db, "operator-dashboard") == 1
     assert api_auth.authenticate(j.db, tok, "admin-token-" + "x" * 30) is None
     with j.tx():
         short = api_auth.issue(j.db, "temp", ["observe"], ttl_s=60)
@@ -115,12 +115,12 @@ def test_api_tokens_are_hashed_scoped_and_revocable(tmp_path):
 
 
 # --------------------------------------------------------------------------- operations
-def ted(*scopes):
-    return api_auth.Principal("ted-dashboard", frozenset(scopes or ("observe", "operate")))
+def dashboard_principal(*scopes):
+    return api_auth.Principal("operator-dashboard", frozenset(scopes or ("observe", "operate")))
 
 
 def send_op(daemon, key="k1", sid=MANUAL, text="hello", principal=None):
-    return daemon.ops.create(principal or ted(), action="session.send",
+    return daemon.ops.create(principal or dashboard_principal(), action="session.send",
                              target={"host": "h1", "session_id": sid}, params={"text": text},
                              idempotency_key=key)
 
@@ -131,12 +131,12 @@ async def test_operation_idempotency_scope_and_bat_sessions(daemon, mock):
     assert e.value.status == 403 and e.value.code == "UNKNOWN_READ_ONLY"
     await daemon.inventory.refresh_host("h1")
     with pytest.raises(OperationError) as e:
-        send_op(daemon)  # Ted's BAT session: refused before anything is stored
+        send_op(daemon)  # the user's BAT session: refused before anything is stored
     assert e.value.status == 403 and e.value.code == "MANUAL_READ_ONLY"
     assert daemon.journal.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 0
     adopt(MANUAL)  # now a connector-created session in a managed root
     with pytest.raises(OperationError) as e:
-        send_op(daemon, principal=ted("observe"))
+        send_op(daemon, principal=dashboard_principal("observe"))
     assert e.value.status == 403 and e.value.code == "FORBIDDEN"
     op, created = send_op(daemon)
     again, created_again = send_op(daemon)
@@ -147,7 +147,7 @@ async def test_operation_idempotency_scope_and_bat_sessions(daemon, mock):
     other, other_created = send_op(daemon, principal=api_auth.Principal("hermes", frozenset({"operate"})))
     assert other_created and other["operation_id"] != op["operation_id"]  # keys are scoped by actor
     with pytest.raises(OperationError) as e:
-        daemon.ops.create(ted(), action="session.delete", target={}, idempotency_key="x")
+        daemon.ops.create(dashboard_principal(), action="session.delete", target={}, idempotency_key="x")
     assert e.value.status == 422
     assert write_frames(mock) == []  # nothing ran yet
 
@@ -159,7 +159,7 @@ async def test_standalone_operation_records_no_task_refs(daemon, mock, kind):
     if kind == "answer":
         mock.states[MANUAL]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
         params = {"answers": ["yes"], "tool_use_id": "ask-1"}
-    op, _ = daemon.ops.create(ted(), action="session." + kind, target={"host": "h1", "session_id": MANUAL},
+    op, _ = daemon.ops.create(dashboard_principal(), action="session." + kind, target={"host": "h1", "session_id": MANUAL},
                               params=params, idempotency_key="standalone")
     try:
         await settle_operations(daemon.ops)
@@ -270,7 +270,7 @@ async def test_restart_replays_finished_steps_and_reconciles_unfinished_ones(dae
 async def test_cancel_before_start_never_runs(daemon, mock):
     adopt(MANUAL)
     op, _ = send_op(daemon)
-    cancelled = daemon.ops.cancel(ted(), op["operation_id"])
+    cancelled = daemon.ops.cancel(dashboard_principal(), op["operation_id"])
     assert cancelled["status"] == "cancelled"
     await settle_operations(daemon.ops)
     assert write_frames(mock) == []
@@ -424,7 +424,7 @@ async def test_http_auth_host_origin_and_reads(served, mock):
 
 async def test_http_operations_end_to_end(served, mock):
     d, port = served
-    operator = token(d, "ted-dashboard", "observe", "operate")
+    operator = token(d, "operator-dashboard", "observe", "operate")
     viewer = token(d, "viewer", "observe")
     await d.inventory.refresh_host("h1")
     req = {"action": "session.send", "target": {"host": "h1", "session_id": MANUAL}, "params": {"text": "hi"}}
@@ -548,7 +548,7 @@ async def test_dashboard_serves_only_its_static_files_with_strict_headers(served
 
 # --------------------------------------------------------------------------- review follow-ups
 def answer_op(daemon, key="a1", **params):
-    return daemon.ops.create(ted(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
+    return daemon.ops.create(dashboard_principal(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
                              params={"permission": "allow", "tool_use_id": "tu1", **params}, idempotency_key=key)
 
 
@@ -584,7 +584,7 @@ async def test_a_failed_read_back_keeps_the_operation_uncertain(daemon, mock, mo
 async def test_answers_name_the_exact_prompt(daemon, mock):
     adopt(MANUAL)
     with pytest.raises(OperationError) as e:
-        daemon.ops.create(ted(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
+        daemon.ops.create(dashboard_principal(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
                           params={"permission": "allow"}, idempotency_key="no-tuid")
     assert e.value.code == "INVALID_PARAMS" and "tool_use_id" in e.value.message
 
@@ -604,7 +604,7 @@ async def test_a_lost_send_reply_is_settled_from_the_bat_transcript(daemon, mock
     await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
     # A cancel arriving now must not hide the delivered message: the read-back runs first.
-    assert daemon.ops.cancel(ted(), op["operation_id"])["status"] == "uncertain"
+    assert daemon.ops.cancel(dashboard_principal(), op["operation_id"])["status"] == "uncertain"
     await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["settled_by"] == "bat_transcript"
@@ -627,14 +627,14 @@ async def test_needs_attention_can_be_cancelled_or_resumed(daemon, mock, monkeyp
         due_now(daemon, op["operation_id"])
         await settle_operations(daemon.ops)
         assert daemon.ops.get(op["operation_id"])["status"] == "needs_attention"
-    cancelled = daemon.ops.cancel(ted(), ops[0]["operation_id"])  # its worker already finished
+    cancelled = daemon.ops.cancel(dashboard_principal(), ops[0]["operation_id"])  # its worker already finished
     assert cancelled["status"] == "cancelled" and "never proven" in cancelled["status_reason"]
-    resumed = daemon.ops.resume(ted(), ops[1]["operation_id"])
+    resumed = daemon.ops.resume(dashboard_principal(), ops[1]["operation_id"])
     assert resumed["status"] == "running" and resumed["uncertain_tries"] == 0
     await settle_operations(daemon.ops)
     assert daemon.ops.get(ops[1]["operation_id"])["status"] == "uncertain"  # read back again, never re-sent
     with pytest.raises(OperationError) as e:
-        daemon.ops.resume(ted(), ops[0]["operation_id"])
+        daemon.ops.resume(dashboard_principal(), ops[0]["operation_id"])
     assert e.value.code == "NOT_RESUMABLE"
 
 
@@ -656,7 +656,7 @@ async def test_waiting_does_not_use_up_the_read_back_budget(daemon, monkeypatch)
         return await ctx.step("call", lost)
 
     daemon.ops.register(ActionDef("test.poll", "operate", "test", run))
-    op, _ = daemon.ops.create(ted(), action="test.poll", idempotency_key="poll")
+    op, _ = daemon.ops.create(dashboard_principal(), action="test.poll", idempotency_key="poll")
     for _ in range(7):
         due_now(daemon, op["operation_id"])
         await settle_operations(daemon.ops)
@@ -666,14 +666,14 @@ async def test_waiting_does_not_use_up_the_read_back_budget(daemon, monkeypatch)
 
 async def test_http_edges(served, mock, monkeypatch):
     d, port = served
-    ted_tok = token(d, "ted-dashboard", "observe", "operate")
+    operator_tok = token(d, "operator-dashboard", "observe", "operate")
     adopt(MANUAL)
     await d.inventory.refresh_host("h1")
-    status, body = await http(port, "POST", "/api/v1/operations?wait=soon", tok=ted_tok,
+    status, body = await http(port, "POST", "/api/v1/operations?wait=soon", tok=operator_tok,
                               body={"action": "session.send", "target": {"host": "h1", "session_id": MANUAL},
                                     "params": {"text": "x"}}, headers={"Idempotency-Key": "w1"})
     assert status == 422 and d.ops.list()["operations"] == []  # refused before anything was stored
-    status, _ = await http(port, "POST", "/api/v1/operations", tok=ted_tok,
+    status, _ = await http(port, "POST", "/api/v1/operations", tok=operator_tok,
                            raw_headers=["Content-Length: -5"])
     assert status == 400
     writer_only = token(d, "writer", "operate")

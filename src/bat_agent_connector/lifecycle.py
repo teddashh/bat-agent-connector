@@ -366,7 +366,7 @@ def build_handoff_prompt(
     lines = [
         f"You are taking over a coding task from a Claude Code session that {why}. "
         + (
-            ("Continue Ted's complete authoritative request described under 'Scope source' below."
+            ("Continue the user's complete authoritative request described under 'Scope source' below."
              if authoritative_original else "Do the job described under 'Your job' below; nothing beyond it.")
             if instructions
             else "Continue the work from where it stopped."
@@ -378,7 +378,7 @@ def build_handoff_prompt(
     if note:
         lines.append(f"NOTE: {note}")
     if instructions:
-        label = ("Scope source (Ted's original request remains authoritative):" if authoritative_original
+        label = ("Scope source (the user's original request remains authoritative):" if authoritative_original
                  else "Your job (this overrides the original task's scope):")
         lines += ["", label, instructions.strip()]
     else:
