@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- **Candidate PR #81:** Implementation of bundled managed runtime, auto personal identity generation, browser one-use ticket, setup BAT profiles/GitHub binding, and verification commands.
+- Implemented Windows file locks and isolated private storage.
+- Added adjustable tree, unread and model preferences, skills catalog, direct result links, repair workflows, and honest limits instructions to the shared frontend.
+- Note: Skills saved selection has a verified source digest but `selected_not_applied`, not automatic runtime activation. Instruction queued status (`true`) is historical, not current queue position, with no per-BAT message cancel. Existing task project verification exact `argv` is saved (no execute on save).
+
 - Backport the official GLib iterator fix for RUSTSEC-2024-0429 into the Linux
   desktop dependency graph. Preserve the original crate version/license and exact
   source inventory; require resolved-source verification, an optimized iterator

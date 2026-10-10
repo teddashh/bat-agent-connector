@@ -8,7 +8,7 @@ Better Agent Dashboard brings together **Windows Fleet connectivity and startup,
 
 You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
-> **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but automatic provisioning is still being built. Today's validation installers require a configured central service and API identity. [Installation status and trial paths →](docs/getting-started.md)
+> **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but is pending final validation (draft PR #81). The candidate source now implements the bundled managed runtime, auto personal identity, and a browser one-use ticket. [Installation status and trial paths →](docs/getting-started.md)
 
 ![Select work in the project tree and keep its conversation, reply controls and results together.](site/images/workspace-en.png)
 
@@ -119,11 +119,11 @@ The **desktop client** and **central service** have different platform requireme
 
 Download validation packages under **Artifacts** in a successful [desktop workflow run](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml). Match the source commit and central compatibility. GitHub may require sign-in, and artifacts expire; this is not a stable release channel.
 
-The [2026-10-10 candidate run](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) includes Windows, Mac ARM64 / x64 and Linux packages. Its tested source tree matches merged `15b2048`. There was no public GitHub Release at this documentation baseline; check [Releases](https://github.com/teddashh/bat-agent-connector/releases) for subsequent distribution.
+The [2026-10-10 candidate CI build](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) provides source-implemented candidate artifacts. The integration is pending final PR #81 merge. Final full gates and native fixtures are still running. Note that the current installed release assets remain historical client validation and do not automatically bundle the new runtime. No new version number, tag, or release has been invented yet; mark final validation pending for root to finalize.
 
 ## Start using it
 
-**The intended normal path** is install → background service ready → guided BAT / GitHub connection → open Dashboard. You should not need to install Python, hand-edit JSON or invent an API actor. Account sign-in and authorization still require your participation. This is the product requirement, not a claim about the current installers.
+**The intended normal path** is install → background service ready → guided BAT / GitHub connection → open Dashboard. The candidate source implements a bundled managed runtime, auto personal identity generation, browser one-use ticket, and setup BAT profiles/GitHub binding, but final validation is pending. Account sign-in and authorization still require your participation.
 
 For a **supervised trial today**, use one of these documented paths:
 
@@ -155,7 +155,7 @@ A native BAT `worktree.merge` with a fully unknown ACK and insufficient positive
 
 ## Current evidence and remaining work
 
-Baseline: **2026-10-10, merged `15b2048` / PR #74**. Evidence below describes that candidate.
+Baseline: **2026-10-10, draft PR #81 (unmerged)**. The candidate source is implemented, but final validation is pending.
 
 | Evidence | What it establishes |
 | --- | --- |

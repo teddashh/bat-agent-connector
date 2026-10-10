@@ -103,7 +103,7 @@ parts.append(
     '</aside></div><div class="release-note">'
     + bi("Development preview", "開發預覽", "strong")
     + bi(
-        "The shared Dashboard is available for configured trials. Automatic environment setup in the desktop installer is still in development.",
+        "The shared Dashboard and candidate automated environment setup are implemented but pending final validation (draft PR #81).",
         "共用 Dashboard 可在已配置環境試用；桌面安裝包自動建立環境的流程仍在開發。",
     )
     + link("#status", "See readiness", "查看交付現況")
@@ -391,7 +391,7 @@ parts.append(
         "Windows Fleet 與資源",
         "Choose what connects. Choose what opens.",
         "選要連的主機，選要開的視窗。",
-        "These native controls are integrated today for configured Windows installations. Full automatic environment provisioning and live Fleet acceptance are separate remaining work.",
+        "These native controls are integrated today for configured Windows installations. Full automatic environment provisioning is implemented in candidate but pending final validation.",
         "以下原生控制已整合，可用於已配置的 Windows 環境；完整自動建立環境與 Fleet 實機驗收，是另外仍須完成的工作。",
     )
     + '<div class="feature-list">'
@@ -430,7 +430,7 @@ parts.append(
         "正在完成的安裝體驗",
         "Install. Connect. Open Dashboard.",
         "安裝、連接，打開就能管理。",
-        "The desktop package should prepare the environment. You should not have to install Python or understand an API actor before using the product.",
+        "The candidate source implements bundled managed runtime, auto personal identity, and one-use ticket, pending final validation (draft PR #81).",
         "桌面包應替你準備好環境，不該要求你先裝 Python，或理解 API actor 才能使用。",
     )
     + '<ol class="install-steps">'
@@ -460,7 +460,7 @@ parts.append(
     '</ol><div class="install-current">'
     + bi("Available today: configured trials", "目前可用：已配置環境試用", "h3")
     + bi(
-        "The current installers contain the desktop client, not the complete automatic setup above. An operator can prepare central for a supervised trial. Joining an existing central remains an advanced path.",
+        "The current historical installers contain the desktop client, not the complete automatic setup. The candidate build implements this, but joining an existing central remains an advanced path.",
         "目前安裝包提供桌面 client，尚未完成上述自動設定。操作者可先準備中央進行有人監督的試用；加入既有中央保留為進階路徑。",
         "p",
     )
