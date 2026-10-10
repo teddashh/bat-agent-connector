@@ -37,7 +37,6 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 | S：[#43](https://github.com/teddashh/bat-agent-connector/pull/43) skills | [`f43f3c2`](https://github.com/teddashh/bat-agent-connector/tree/f43f3c2237d4c5092326a67fd5c7b90e6979f680)：canonical workflow `.3`、generator、principal-only MCP | 該 head 四個 Python CI jobs 各 1851 passed/33 skipped，已合併；installer 已改 pin 最終整合候選 `.4`，未實際安裝。 |
 | U：[#44](https://github.com/teddashh/bat-agent-connector/pull/44) desktop foundation | [`5bccb63`](https://github.com/teddashh/bat-agent-connector/tree/5bccb63594b10fe61a772e45f3198e8b3969415e)：shared frontend、Rust bridge/main、capabilities、desktop design | 已合併；該 head 四個 Python jobs 各 1878/33，packaging 通過；保留 Linux WebKit N 證據。Windows install/tray/跨登入尚缺。 |
 | F：[#45](https://github.com/teddashh/bat-agent-connector/pull/45) Fleet desktop | [`69f94d2`](https://github.com/teddashh/bat-agent-connector/tree/69f94d2719ba4c428392f087782e7ae4d290924e)：`fleet.rs`、`fleet.spec.ts` | 已合併；該 head 四個 Python jobs 各 1878/33、Windows 固定 PS subprocess/packaging 通過，候選整組另列。Rust supervisor parity、installed Kit 合驗尚缺。 |
-| K：Fleet Kit [#8](https://github.com/teddashh/bat-fleet-kit/pull/8) | [merge `d3697dc`](https://github.com/teddashh/bat-fleet-kit/commit/d3697dc)，[reviewed head `2ec4b11`](https://github.com/teddashh/bat-fleet-kit/tree/2ec4b11bc010bfd669040e942648c741b63d0b7c)：`client/fleet-desktop.ps1`、`tests/fleet-*.tests.ps1` | 已合併；Windows PS 5.1／7、Linux PS 7 CI；所有環境均為合成 fixtures 或自有測試程序，未安裝。 |
 | A：[#46](https://github.com/teddashh/bat-agent-connector/pull/46) artifacts Part A | [`560870b`](https://github.com/teddashh/bat-agent-connector/tree/560870b568ffa202d01501c3e553fbc3011c3561)：store/host、exact replica cleanup、binary upload bridge | 已合併；該 head 四個 Python jobs 各 1982/33，admission/fixture 修正與 peer 證據已含。跨 host Git、完整 native file/save/download 尚缺。 |
 | D：[#47](https://github.com/teddashh/bat-agent-connector/pull/47) Delivery Part B | [`9874eae`](https://github.com/teddashh/bat-agent-connector/tree/9874eae4ae2c6622a866a792dff45d010dd16dd7)：deployment/store/verifier、owner/scope/history、shared UI | `831d670` CI 兩項舊 fixture 假設已修（canonical UI source、latest data step）；14 受影響 tests 兩版本通過。該 head full CI 四版各 2141/33，已合併且 issue #32 關閉；無真 deployed version 證據。 |
 | O：[#48](https://github.com/teddashh/bat-agent-connector/pull/48) R04 UI | [`90e2392`](https://github.com/teddashh/bat-agent-connector/tree/90e2392bb8409c1d37cb76f27c8caae72af8e00c)：observation UI、pending/linked events、`desktop/tests/observation*` | 經 #51 合併；browser/native IPC mock/真中央加 MockBat 的 F 證據，最終整組 CI 綠；不是 M1。 |
@@ -136,9 +135,9 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | --- | --- | --- |
 | E01 混合人工／unknown／active／completed 工作樹 | C `test_cleanup.py`、`test_cleanup_task_authority.py`、`test_cleanup_resource_ids.py`；U `desktop/tests/cleanup.spec.ts`／`cleanup-integration.mjs`。 | #61 已合併 Task Service reviewed cleanup/finalization 與 automatic receipts，見 `test_task_cleanup*.py`；仍需同 RC 真樹 preview/apply/receipts/tombstones。 |
 | E02 共用 worktree/artifact、squash、remove 後讀回失敗 | C `test_cleanup.py` squash/pick exact receipts、`test_cleanup_uncertainty.py`／`test_cleanup_protocol.py`；A `test_artifact_cleanup.py` readable-original／resume gate。 | 同 RC 真 shared consumer／唯一內容與故障恢復；不重 remove，不把 metadata 存在當原 bytes 尚可讀。 |
-| E03 選兩台、零 BAT profiles、Dashboard、一台 auth 卡住 | K `tests/fleet-client.tests.ps1` 的 E03、`fleet-readiness.tests.ps1`；F `desktop/tests/fleet.spec.ts` selection/readback。 | Installed app＋Kit＋真中央、Dashboard-only 的完整組合；不開 BAT、不停中央工作，故障 host 不拖累其他項目。 |
-| E04 重開／crash／tray quit／其他登入／PID reuse | K `fleet-lifecycle.tests.ps1`、`fleet-desktop.tests.ps1` ownership/budget；F Rust subprocess timeout 只終止自有 facade。 | 真同/跨 Windows login session、foreign listener 與 crash；#64 Rust supervisor 已實作、最終 Windows CI 待收斂；不能以 Tauri single-instance 代替跨登入 owner。 |
-| E05 TCP 通但 identity/auth/version/workspace/contract 不符 | K `fleet-readiness.tests.ps1`、`fleet-desktop.tests.ps1` applied generation；F typed DTO；U central actor/contract refusal。 | 真 host 各 readiness 層、舊 generation、修配置後 budget；blocked/degraded 不標 Ready，不擅自重啟。 |
+| E03 選兩台、零 BAT profiles、Dashboard、一台 auth 卡住 | F `desktop/tests/fleet.spec.ts` selection/readback。 | Installed app＋Kit＋真中央、Dashboard-only 的完整組合；不開 BAT、不停中央工作，故障 host 不拖累其他項目。 |
+| E04 重開／crash／tray quit／其他登入／PID reuse | F Rust subprocess timeout 只終止自有 facade。 | 真同/跨 Windows login session、foreign listener 與 crash；#64 Rust supervisor 已實作、最終 Windows CI 待收斂；不能以 Tauri single-instance 代替跨登入 owner。 |
+| E05 TCP 通但 identity/auth/version/workspace/contract 不符 | F typed DTO；U central actor/contract refusal。 | 真 host 各 readiness 層、舊 generation、修配置後 budget；blocked/degraded 不標 Ready，不擅自重啟。 |
 | E06 新舊 skill/client/backend 混用 | S generator/version checks、`test_agent_skills.py`／`test_mcp_principal.py`；canonical pin/digest 檢查。 | 同 RC 實際安裝、升級／不相容拒絕；顯示 repo、installed、server contract、skill version，兩個 agent 各用自身 actor。 |
 
 ### T：真正桌面產品
@@ -146,15 +145,15 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | ID／情境 | 已有實作與測試來源 | 尚缺／完成條件 |
 | --- | --- | --- |
 | T01 安裝並啟動打包 app | U Vite packaged assets、Rust bridge、`desktop/tests/native-smoke.mjs`；F Windows NSIS／Linux deb CI。 | Windows 實際 install/launch、真中央資料；正式 runtime 無 Vite。Linux N 只接 fixture，不能算此項已通過。 |
-| T02 Close-to-tray、同/跨登入重開、草稿/event 接續 | U `main.rs`、single-instance、Linux N close/handoff；F/K other-session owner DTO。 | 實體 Windows tray、同 session focus、跨 session app fence/owner 說明；未完成跨登入 app 行為，不承諾聚焦另一桌面。 |
+| T02 Close-to-tray、同/跨登入重開、草稿/event 接續 | U `main.rs`、single-instance、Linux N close/handoff；F other-session owner DTO。 | 實體 Windows tray、同 session focus、跨 session app fence/owner 說明；未完成跨登入 app 行為，不承諾聚焦另一桌面。 |
 | T03 未安裝 BAT 的 Dashboard-only | U desktop 不啟動 BAT/daemon；F Fleet missing/configured 狀態與中央分離。 | 真乾淨 Windows 帳號可管理中央；候選已有明確 profile 的 BAT open 入口，只在該功能提示缺 BAT；不能推測 host/profile 對應或直接定位 session。 |
-| T04 PS→Rust supervisor 遷移／回退 | F 固定 PS facade；K 唯一 monitor owner，現有 frontend 不另啟 tunnel loop。 | #64 已實作 Rust supervisor、新舊 Startup 遷移及回退，待最終 Windows CI 與真升級／回退時單一 owner 證據。 |
-| T05 PID/SID/inventory/args 不符或外部 listener | K `fleet-lifecycle.tests.ps1`、`fleet-desktop.tests.ps1`；F `fleet.rs` DTO／固定 quit epoch。 | Installed Kit＋native bridge 真負例，零 foreign kill／零搶占；不以 fixture process adapter 代替實機。 |
+| T04 PS→Rust supervisor 遷移／回退 | F 固定 PS facade；唯一 monitor owner，現有 frontend 不另啟 tunnel loop。 | #64 已實作 Rust supervisor、新舊 Startup 遷移及回退，待最終 Windows CI 與真升級／回退時單一 owner 證據。 |
+| T05 PID/SID/inventory/args 不符或外部 listener | F `fleet.rs` DTO／固定 quit epoch。 | Installed Kit＋native bridge 真負例，零 foreign kill／零搶占；不以 fixture process adapter 代替實機。 |
 | T06 非法 native 參數／外部內容 | U Rust bridge/main/capabilities 的 allowlist/origin/size/credential tests；F `fleet.rs` 固定 script/環境、無 arbitrary PID/path/URL。 | Windows 真 WebView navigation/IPC 負例；整合後所有新增 commands 重查，不暴露 shell、任意檔案或帶 token URL。 |
 | T07 Pending、linked operation、parent archive 即時更新 | O `desktop/tests/observation.spec.ts`、`observation-integration.mjs`；U refresh barrier、D history sibling read barrier。 | 真中央＋Windows mounted view，另一 client 改狀態；草稿不丟、舊 pending identity 不能誤送。 |
 | T08 原生選檔／拖放／上下傳中斷／同名目的地 | A `desktop/tests/artifacts.spec.ts`、`artifact-integration.mjs`、Rust operation-bound binary upload；`test_artifacts.py` download API。 | #61 已合併 native file/save/download adapter、拖放與不覆寫同名目的地；仍需實機真 bytes/digest、重試與人工來源不變。WebView upload fixture 不等於整項通過。 |
 | T09 Client 更新／睡眠／crash／切網路 | U `desktop/tests/recovery.spec.ts`／`account-switch.spec.ts`／`dashboard.spec.ts` 的 lost reply/drafts；M durable operations。 | 真 Windows suspend/network/crash 與安裝更新；原 ID 查回、中央 task 不停。#64 已有簽章與 signed-version 驗證、durable installer intent；正式 keys/feed 與真安裝仍未提供。 |
-| T10 Tailscale 未登入、中央停止、固定 bootstrap | K 分層 readiness；U/F 顯示連線／配置失敗，native 不自動建中央 journal。 | #64/#66 實作 native credentials、固定 ensure bootstrap、Tailscale bounded status 與明確開啟 vendor tray app；登入由 vendor UI 完成。待 installed 登入／返回／recipe 驗收，有限恢復、零第二 owner／空 journal。 |
+| T10 Tailscale 未登入、中央停止、固定 bootstrap | U/F 顯示連線／配置失敗，native 不自動建中央 journal。 | #64/#66 實作 native credentials、固定 ensure bootstrap、Tailscale bounded status 與明確開啟 vendor tray app；登入由 vendor UI 完成。待 installed 登入／返回／recipe 驗收，有限恢復、零第二 owner／空 journal。 |
 | T11 帳號／backend 切換與 scope 隔離 | U `test_dashboard_sync.py` T11、`desktop/tests/account-switch.spec.ts`；F local DTO 不含中央 token；S principal-only；#59 候選 `credentials.rs`／`native-credentials.spec.ts` 增加 Windows vault 與身分驗證。 | Windows 原生對話框／Credential Manager 真保存、切換／重啟隔離與 Fleet observe 身分待驗；Linux 尚用 native-memory adapter。 |
 | T12 Canonical desktop/browser、build/update/signature | U `desktop/src`＋`build:all`／`check:browser`、locked dependencies；S generator/version checks；F packaging CI。#67 修正 GLib，source/pin 與 optimized regression 已通過，[#53](https://github.com/teddashh/bat-agent-connector/issues/53) 已關閉。 | 正式簽章、installed updater 相容／回退、release feed 及固定版本 readback；unsigned packages 與 disposable Windows 安裝 fixture 均不是正式發行或使用者實機驗收。 |
 
@@ -189,8 +188,8 @@ npm run test:observation
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-Windows 打包／Linux native smoke 的具體入口見 U `docs/design/desktop.md`；Kit 的固定 modules 與
-`tests/run-tests.ps1` 見 K `.github/workflows/client-tests.yml`。這些測試各有 fixture 邊界，不提供任意真 host write 指令。
+Windows 打包／Linux native smoke 的具體入口見 U `docs/design/desktop.md`。
+這些測試各有 fixture 邊界，不提供任意真 host write 指令。
 
 每次 run 的最小記錄：`RC manifest / acceptance IDs / layer(F,N,I,L) / scenario + fault / expected / actual / result(pass,fail,blocked,not-run) / log或artifact引用 / operation與receipt IDs / remaining gap`。
 敏感環境名稱、tokens、fingerprints、完整檔案與原始日誌留在私有證據位置；公開表只放去識別摘要與可取用的證據引用。

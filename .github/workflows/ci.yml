@@ -28,6 +28,8 @@ jobs:
         run: uv run ruff check .
       - name: Generated agent skills
         run: uv run python scripts/generate_agent_skills.py --check
+      - name: Public content boundaries
+        run: uv run python scripts/check_public_content.py
       - name: Tests (mock server only; live tests are skipped without BATC_LIVE)
         run: uv run pytest -q
 
