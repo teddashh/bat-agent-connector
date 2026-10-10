@@ -733,11 +733,10 @@ fn main() {
                     .show(|_| {});
             }
             #[cfg(windows)]
-            if !update_pending && matches!(login_options, Some(Ok((false, _)))) {
-                control.start_login();
-            }
-            #[cfg(windows)]
-            if !update_pending && managed_login && managed_status.ready {
+            if !update_pending
+                && (matches!(login_options, Some(Ok((false, _))))
+                    || managed_login && managed_status.ready)
+            {
                 control.start_login();
             }
             let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
