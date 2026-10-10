@@ -1,6 +1,7 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    managed_browser_connected: "已連線至本機 Connector", managed_browser_help: "此瀏覽器沿用桌面的個人身分。登出後，可從桌面選單重新開啟 Dashboard。",
     workspace_navigation: "專案與工作", workspace_search: "搜尋已載入的專案與工作", workspace_manage: "新增／管理專案",
     workspace_all_sessions: "所有工作階段", workspace_tools: "管理工具", workspace_connection: "連線 / Fleet",
     workspace_expand: "展開 {name}", workspace_collapse: "收合 {name}", workspace_needs_you: "待你處理",
@@ -776,6 +777,7 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    managed_browser_connected: "Connected to your local Connector", managed_browser_help: "This browser uses your desktop identity. After signing out, reopen Dashboard from the desktop menu.",
     workspace_navigation: "Projects and work", workspace_search: "Search loaded projects and work", workspace_manage: "Add / manage projects",
     workspace_all_sessions: "All sessions", workspace_tools: "Tools", workspace_connection: "Connection / Fleet",
     workspace_expand: "Expand {name}", workspace_collapse: "Collapse {name}", workspace_needs_you: "Needs you",

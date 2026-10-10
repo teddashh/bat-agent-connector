@@ -1,4 +1,5 @@
 import {workspaceNavigation} from "./workspace-nav.js";
+import {restoreBrowserSession, browserSessionToken, forgetBrowserSession} from "./transport/index.ts";
 import {attentionView} from "./attention.js";
 import {parsePullRequest} from "./delivery-input.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
@@ -66,6 +67,7 @@ function saveCursor() {
   }
 }
 function disconnect() {
+  if (state.token === browserSessionToken) forgetBrowserSession()?.catch(() => {});
   state.epoch++; clearToken(); state.token = null; state.caps = null; state.lastEvent = 0;
   state.online = false; state.viewReady = false; state.sync = null;
 }
@@ -2066,6 +2068,14 @@ function mergeRecovery(op) {
 
 function viewSettings(main) {
   if (nativeDesktop) return viewNativeSettings(main);
+  if (state.token === browserSessionToken) {
+    main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel"},
+      h("h2", {}, t("managed_browser_connected")),
+      h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
+      h("p", {class: "muted"}, t("managed_browser_help")),
+      h("button", {class: "secondary", onclick: () => {disconnect(); route();}}, t("disconnect"))));
+    return mountTailscale(main, {h, t});
+  }
   const input = h("input", { type: "password", autocomplete: "off", placeholder: "batc_…" });
   const remember = h("input", { type: "checkbox" });
   const info = h("p", { class: "muted" });
@@ -3280,7 +3290,9 @@ async function start() {
       }
     } finally { if (attempt === state.nativeAttempt) state.nativeBusy = false; }
   } else {
-    state.token = loadToken();
+    const browserSession = await restoreBrowserSession().catch(() => false);
+    if (browserSession) clearToken();
+    state.token = browserSession ? browserSessionToken : loadToken();
     if (state.token) {
       try { await activate(await api("GET", "/capabilities")); }
       catch { state.token = null; }
