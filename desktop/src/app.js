@@ -2153,7 +2153,7 @@ async function viewNativeSettings(main) {
         review.disabled = true;
         return nativeTransition("configure", {endpoint: endpoint.value.trim(), expected_actor: actor.value.trim(), contract_version: "2026-10-08"});
       }}, h("p", {}, t("desktop_setup_help")),
-        h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor),
+        h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)),
         h("p", {class: "muted"}, t("desktop_setup_origin")), h("div", {class: "actions"}, review));
       setup.append(form);
     }
