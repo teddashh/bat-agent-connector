@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth, registry
+from bat_agent_connector import api_auth, integration, registry
 from bat_agent_connector.config import parse_config
 from bat_agent_connector.errors import InvokeTimeout
 from bat_agent_connector.task_daemon import TaskDaemon
@@ -46,6 +46,9 @@ async def main():
         await mock.start()
         gh.start()
         def provide(method, path, _):
+            if method == 'GET' and path == '/repos/o/r/pulls/1' and 1 in gh.pulls:
+                # GitHub updates this read-only ref after a normal push to the PR branch.
+                git(remote, 'update-ref', 'refs/pull/1/head', git(remote, 'rev-parse', 'refs/heads/project-pr'))
             if method == 'GET' and path == '/repos/o/r/git/ref/heads/main':
                 gh.script.append(('GET', re.escape(path) + '$', 200, {},
                                   {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': sha}}))
@@ -54,6 +57,7 @@ async def main():
                'writes': True, 'orchestrate': True, 'orchestrate_register_tabs': False, 'orchestrate_max_sessions': 4,
                'managed_roots': [str(managed)]}}, 'safety': {'write_min_interval_s': 0},
                'github': {'token_ref': 'env:REPO_FAKE_TOKEN', 'api_url': gh.url, 'repos': [{'repository': 'o/r',
+               'integrate': {'hosts': ['h1'], 'remote_url': str(remote)},
                'sync': {'remote_url': str(remote), 'bindings': [{'host': 'h1', 'workspace_id': 'ws-1'}]}}]}}
         mock.ws_doc['workspaces'][0]['folderPath'] = str(human)
         mock.git_logs = RealGitLog()
@@ -62,7 +66,7 @@ async def main():
         original_workspace = copy.deepcopy(mock.ws_doc)
         daemon = TaskDaemon(parse_config(raw), root / 'journal.db')
         daemon.ops.context['git_runner'] = Runner()
-        token = api_auth.issue(daemon.journal.db, 'published-browser', ['observe', 'start'])
+        token = api_auth.issue(daemon.journal.db, 'published-browser', ['observe', 'start', 'integrate'])
         server = await asyncio.start_server(daemon._handle, '127.0.0.1', 0)
         worker = asyncio.create_task(daemon.ops.loop(0.1))
         print(json.dumps({'port': server.sockets[0].getsockname()[1], 'token': token, 'sha': sha}), flush=True)
@@ -73,6 +77,36 @@ async def main():
                     break
                 if command['action'] == 'writes':
                     daemon.fleet.config.host('h1').writes = command['enabled']
+                elif command['action'] == 'prepare-delivery':
+                    git(remote, 'update-ref', 'refs/heads/project-pr', sha)
+                    git(remote, 'update-ref', 'refs/pull/1/head', sha)
+                    gh.add_pr(1, sha, head_ref='project-pr')
+                    gh.track_remote(1, str(remote))
+                    results = []
+                    for oid in command['operations']:
+                        op = daemon.ops.get(oid)
+                        path = Path(op['result']['worktree_path'])
+                        name = 'result-' + oid[3:15] + '.txt'
+                        (path / name).write_text('result of ' + oid + '\n')
+                        git(path, 'add', name)
+                        git(path, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Managed result')
+                        mock.metas[op['result']['session_id']]['isStreaming'] = False
+                        results.append({'operation_id': oid, 'sha': git(path, 'rev-parse', 'HEAD')})
+                    await daemon.inventory.refresh_host('h1')
+                    print(json.dumps({'results': results}), flush=True)
+                    continue
+                elif command['action'] == 'verify-delivery':
+                    for result in command['results']:
+                        rows = integration.candidates(daemon.ops, 'h1', source_kind='execution', source_id=result['operation_id'])
+                        selected = rows['selected']
+                        assert selected['result']['status'] == 'unverified'
+                        assert selected['delivered_to'][0]['pinned_sha'] == result['sha']
+                        assert selected['delivered_to'][0]['pull_number'] == 1
+                        assert git(remote, 'merge-base', '--is-ancestor', result['sha'], 'refs/heads/project-pr') == ''
+                    assert snapshot(human) == before
+                    assert not daemon.journal.db.execute('SELECT 1 FROM tasks').fetchone()
+                    assert len([f for f in bat_writes(mock) if f['channel'] == 'claude:start-session']) == 2
+                    assert all(method == 'GET' for method, _, _ in gh.requests)
                 elif command['action'] == 'prepare-project':
                     project = await action(daemon, 'project.create', params={'name': 'Dispatch fixture', 'repositories': ['o/r']})
                     project_id = project['result']['project_id']

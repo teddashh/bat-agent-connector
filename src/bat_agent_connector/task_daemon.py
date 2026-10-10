@@ -331,7 +331,7 @@ class TaskDaemon:
         if method == "inventory_session":
             return self.inventory.session_document(str(params.get("host")), str(params.get("session_id")))
         if method == "inventory_worktree":
-            return {"worktree": self.inventory.observation.resource("worktree", params.get("worktree_id"))}
+            return (await self.api.worktree(params.get("worktree_id")))[1]
         if method in {"resource_history", "resource_relations"}:
             keys = ("cursor", "limit", "order", "kind", "since", "until") if method == "resource_history" else ("cursor", "limit", "execution_id", "include_closed")
             read = self.inventory.observation.history if method == "resource_history" else self.inventory.observation.relations
@@ -368,7 +368,8 @@ class TaskDaemon:
             host = str(params.get("host"))
             if host not in self.fleet.config.hosts:
                 raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
-            return integration.candidates(self.ops, host, int(params.get("limit") or 50))
+            return integration.candidates(self.ops, host, int(params.get("limit") or 50),
+                                           source_kind=params.get("source_kind"), source_id=params.get("source_id"))
         if method == "integration_preview_get":
             return {"preview": integration.preview_document(self.journal.db, str(params.get("preview_id")))}
         if method == "integration_get":
@@ -388,7 +389,7 @@ class TaskDaemon:
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
         if method == "project_get":
             return work_items.project_get(self.journal.db, str(params.get("project_id")),
-                                          include_archived=bool(params.get("include_archived")))
+                                          include_archived=bool(params.get("include_archived")), ops=self.ops)
         if method == "work_items_list":
             from .dashboard_sync import identity
             pending = params.get("pending")

@@ -1,5 +1,5 @@
 import {test, expect} from '@playwright/test';
-import {mkdir} from 'node:fs/promises';
+import {mkdir, readFile} from 'node:fs/promises';
 
 async function setup(page: any, options: any = {}) {
   await page.addInitScript((options: any) => {
@@ -9,12 +9,18 @@ async function setup(page: any, options: any = {}) {
       connected: false, cancel: false, fail: false, delay: false, release: null as any, wrongBootstrap: false, ...options};
     Object.assign(window, {__credentialFixture: fixture, isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any) => {
       fixture.calls.push({command, args: args ?? null});
-      if (command === 'native_status') return {endpoint: fixture.endpoint ?? 'https://central.example/', expected_actor: 'fixture-operator',
+      if (command === 'native_status') return {endpoint: fixture.setup ? null : fixture.endpoint ?? 'https://central.example/', expected_actor: fixture.setup ? null : 'fixture-operator',
+        configuration_setup: !!fixture.setup,
         credential_available: fixture.available, credential_saved: fixture.saved, enrollment_supported: fixture.supported,
         configuration_reload: true, configuration_file: fixture.configPath ?? 'C:\\Users\\fixture\\AppData\\Roaming\\io.betteragent.dashboard\\central.json',
         credential_source: fixture.available ? fixture.saved ? fixture.store ?? 'windows_credential_manager' : 'launch_environment' : null,
         connected: fixture.connected};
       if (command === 'connector_connect') {if (fixture.delayConnect) await new Promise(resolve => {fixture.releaseConnect = resolve;}); if (!fixture.available) throw new Error('Fixture credential unavailable'); fixture.connected = true; return caps(fixture.principal);}
+      if (command === 'connector_setup_configuration') {
+        if (fixture.cancel) return null;
+        if (fixture.fail) throw new Error('Fixture configuration appeared during review');
+        fixture.setup = false; fixture.endpoint = args.config.endpoint + '/'; return {endpoint: fixture.endpoint};
+      }
       if (command === 'connector_enroll') {
         if (fixture.delay) await new Promise(resolve => {fixture.release = resolve;});
         if (fixture.cancel) return null;
@@ -50,6 +56,45 @@ async function setup(page: any, options: any = {}) {
   }, options);
   await page.goto('/dashboard/#/settings');
   await expect(page.getByRole('region', {name: /Desktop central connection|桌面中央連線/})).toBeVisible();
+}
+
+for (const locale of ['en-US', 'zh-TW']) for (const width of [390, 768, 1440]) {
+  test(`first connection preserves native-reviewed settings ${locale} ${width}`, async ({browser}) => {
+    const context = await browser.newContext({locale, viewport: {width, height: 900}});
+    const page = await context.newPage(); const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+    if (process.env.SETUP_BASELINE_ASSET) await page.route('**/dashboard/app.js', async route => route.fulfill({
+      contentType: 'application/javascript', body: await readFile(process.env.SETUP_BASELINE_ASSET!, 'utf8')}));
+    await setup(page, {setup: true, cancel: true});
+    const shots = process.env.SETUP_SCREENSHOTS || 'test-results/first-connection';
+    await mkdir(shots, {recursive: true});
+    await page.screenshot({path: `${shots}/initial-${locale}-${width}.png`, fullPage: true});
+    if (process.env.SETUP_BASELINE_ASSET) {await context.close(); return;}
+    const form = page.locator('[data-native-setup]');
+    await expect(form).toBeVisible();
+    await form.locator('input').nth(0).fill('https://first.example');
+    await form.locator('input').nth(1).fill('fixture-operator');
+    await form.getByRole('button').click();
+    await expect(page.getByText(locale === 'en-US' ? 'Saving cancelled; your inputs are preserved.' : '已取消儲存；輸入內容仍保留。')).toBeVisible();
+    await expect(form.locator('input').nth(0)).toHaveValue('https://first.example');
+    await expect(form.locator('input').nth(1)).toHaveValue('fixture-operator');
+    await page.evaluate(() => {const f = (window as any).__credentialFixture; f.cancel = false; f.fail = true;});
+    await form.getByRole('button').click();
+    await expect(page.getByText('Fixture configuration appeared during review', {exact: false})).toBeVisible();
+    await expect(form.locator('input').nth(0)).toHaveValue('https://first.example');
+    await page.screenshot({path: `${shots}/refused-${locale}-${width}.png`, fullPage: true});
+    await page.evaluate(() => {(window as any).__credentialFixture.fail = false;});
+    await form.getByRole('button').click();
+    await expect(form).toBeHidden();
+    await expect(page.getByRole('button', {name: locale === 'en-US' ? 'Connect' : '連線', exact: true})).toBeDisabled();
+    const calls = await page.evaluate(() => (window as any).__credentialFixture.calls);
+    expect(calls.filter((c: any) => c.command === 'connector_setup_configuration')).toEqual(Array(3).fill({
+      command: 'connector_setup_configuration', args: {locale, config: {endpoint: 'https://first.example', expected_actor: 'fixture-operator', contract_version: '2026-10-08'}}}));
+    expect(calls.some((c: any) => ['connector_connect', 'connector_enroll', 'connector_request'].includes(c.command))).toBe(false);
+    await page.getByRole('button', {name: locale === 'en-US' ? 'Add credential' : '新增憑證', exact: true}).click();
+    await expect(page.getByText(/Connected as fixture-operator|已連線：fixture-operator/)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]); await context.close();
+  });
 }
 
 for (const locale of ['en-US', 'zh-TW']) for (const width of [390, 768, 1440]) {

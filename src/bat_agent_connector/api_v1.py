@@ -432,6 +432,7 @@ class ApiV1:
                                      for name in fleet.config.hosts]},
                       "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
                                   "project_dispatch": {"version": 1, "artifacts": True, "model": True},
+                                  "execution_delivery": {"version": 1, "source_kinds": ["execution", "task_command"]},
                                   "work_item_reads": {"version": 1},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
@@ -545,7 +546,11 @@ class ApiV1:
         return 200, self._relations(query, "execution", task)
 
     async def worktree(self, wid, **_):
-        return 200, {"worktree": self.daemon.inventory.observation.resource("worktree", wid)}
+        from . import execution_sources
+        resource = self.daemon.inventory.observation.resource("worktree", wid)
+        facts = execution_sources.for_worktree(self.daemon.ops, resource)
+        facts["work"] = [integration.candidate_evidence(self.daemon.ops, item) for item in facts["work"]]
+        return 200, {"worktree": {**resource, **facts}, "cleanup_receipts": cleanup.lookup(self.daemon.journal.db, wid)}
 
     async def worktree_history(self, query, wid, **_):
         return 200, self._history(query, "worktree", wid)
@@ -659,7 +664,8 @@ class ApiV1:
     async def integration_candidates(self, query, **_):
         host = self._q(query, "host")
         self._known_host(host or "")
-        return 200, integration.candidates(self.daemon.ops, host, self._int(query, "limit", 50))
+        return 200, integration.candidates(self.daemon.ops, host, self._int(query, "limit", 50),
+                                           source_kind=self._q(query, "source_kind"), source_id=self._q(query, "source_id"))
 
     async def integration_preview(self, pv, **_):
         return 200, {"preview": integration.preview_document(self.daemon.journal.db, pv)}
@@ -698,7 +704,7 @@ class ApiV1:
 
     async def project(self, query, prj, **_):
         return 200, work_items.project_get(self.daemon.journal.db, prj,
-                                           include_archived=bool(self._bool(query, "include_archived")))
+                                           include_archived=bool(self._bool(query, "include_archived")), ops=self.daemon.ops)
 
     async def work_items(self, query, principal, **_):
         return 200, work_items.work_items_list(

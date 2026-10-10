@@ -155,9 +155,14 @@ try {
     assert.ok(req.body.preconditions.expected_recipe_digest);
     assert.equal(typeof req.body.preconditions.expected_environment_generation, 'number');
     assert.ok(req.key);
+    // The accepted response is asynchronous. Until it renders, the drawer can still
+    // contain the previous refused intent's receipt; wait for this operation first.
+    const acceptedOperation = drawer.locator('[aria-live] > p > a[href^="#/op/"]');
+    await acceptedOperation.waitFor({state: 'visible'});
+    const operationId = (await acceptedOperation.getAttribute('href')).split('/').at(-1);
     const receipt = drawer.locator('details').last();
     await receipt.locator(':scope > summary').click();
-    await waitFor(async () => (await receipt.innerText()).includes('op_'), 'operation receipt missing');
+    await waitFor(async () => (await receipt.innerText()).includes(operationId), 'accepted operation receipt missing');
     await clean(page);
     await drawer.getByRole('button', { name: label(lang, 'Close', '關閉'), exact: true }).click();
     // dashboard_retry_fixed_identity: deploy-only intent, with saved identity and preview preconditions.

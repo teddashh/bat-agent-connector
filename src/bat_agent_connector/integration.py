@@ -18,7 +18,7 @@ import re
 import shlex
 import time
 
-from . import checkpoints, resource_policy
+from . import checkpoints, execution_sources, resource_policy
 from .api_auth import Principal
 from .checkpoints import _read_fleet, start_in_worktree
 from .config import GitHubRepo
@@ -41,7 +41,7 @@ from .operations import (
 SHA = re.compile(r"[0-9a-f]{40}")
 PREVIEW_ID = re.compile(r"ipv_[0-9a-f]{32}")
 OP_ID = re.compile(r"op_[0-9a-f]{32}")
-KINDS = ("checkpoint", "checkpoint_run", "branch")
+KINDS = ("checkpoint", "checkpoint_run", "execution", "task_command", "branch")
 PREVIEW_TTL_S = 3600.0
 MAX_SOURCES = 10
 MAX_PICKS = 50
@@ -146,6 +146,10 @@ def resolve_sources(ops: OperationService, host: str, raw) -> list[dict]:
             item.update(host=row["host"], location=row["clone_path"], ref=row["branch"], pin=None,
                         start=row["commit_sha"], label=row["branch"], worktree=row["worktree_path"],
                         session_id=row["session_id"])
+        elif kind in execution_sources.KINDS:
+            if not sid or len(sid) > 256 or (kind == "execution" and not OP_ID.fullmatch(sid)):
+                raise OperationError("INVALID_PARAMS", f"source {seq}: malformed execution id", 422)
+            item.update(execution_sources.resolve(ops, kind, sid))
         else:
             if not resource_policy.HEAD_REF.fullmatch(sid):
                 raise OperationError("INVALID_PARAMS", f"source {seq}: {sid!r} is not a branch name", 422)
@@ -153,7 +157,8 @@ def resolve_sources(ops: OperationService, host: str, raw) -> list[dict]:
         if item["host"] != host:
             raise OperationError("SOURCE_ON_OTHER_HOST", f"source {seq} lives on {item['host']}, not {host}", 422)
         try:
-            item["location_class"], _ = resource_policy.classify_integration_source(hc, kind, item["location"])
+            if kind not in execution_sources.KINDS:
+                item["location_class"], _ = resource_policy.classify_integration_source(hc, kind, item["location"])
         except ResourceReadOnly as e:
             raise OperationError(e.code, f"source {seq}: {e}", 409) from None
         out.append(item)
@@ -321,7 +326,14 @@ def _live_tip(src: dict) -> str:
         return f"live={_sha(src['pin'])}\n"
     where = '"$url"' if src["kind"] == "branch" else _q(src["location"])
     ref = _q("refs/heads/" + src["ref"])
-    return (f'set +e; l=$(gn ls-remote --exit-code {where} {ref} 2>/dev/null); r=$?; '
+    binding = ""
+    if src["kind"] in execution_sources.KINDS:
+        read = f'env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C {where} -c core.fsmonitor=false'
+        binding = (f'[ "$(cd {where} 2>/dev/null && pwd -P)" = {where} ] && '
+                   f'[ "$({read} rev-parse --show-toplevel 2>/dev/null)" = {where} ] && '
+                   f'[ "$({read} symbolic-ref -q HEAD 2>/dev/null)" = {ref} ] || '
+                   f'{{ echo "source {i} binding_changed"; return 0; }}\n')
+    return (binding + f'set +e; l=$(gn ls-remote --exit-code {where} {ref} 2>/dev/null); r=$?; '
             f'set -e\ncase $r in 0) live=$(printf "%s\\n" "$l" | exact {ref});; 2) echo "source {i} missing_ref"; '
             f'return 0;; *) echo unreadable; exit 0;; esac\n'
             f'sha_ok "$live" || {{ echo "source {i} missing_ref"; return 0; }}\n')
@@ -741,15 +753,18 @@ def _digest(doc: dict, sources: list[dict]) -> str:
         "pull_number": doc["pull_number"], "head_ref": doc["target"]["head_ref"], "head_sha": doc["target"]["head_sha"],
         "remote_url": doc["remote_url"], "predicted_tree": doc["predicted_tree"],
         "sources": [{"kind": s["kind"], "id": s["id"], "mode": s["mode"], "commits": s["commits"],
-                     "pinned_sha": s["pin"]} for s in sources]}).encode()).hexdigest()
+                     "pinned_sha": s["pin"], **({"lineage": s["lineage"], "registry_identity": s["registry_identity"], "worktree_id": s.get("worktree_id")}
+                                              if s["kind"] in execution_sources.KINDS else {})} for s in sources]}).encode()).hexdigest()
 
 
 async def _run_preview(ctx: OpContext) -> dict:
     ops = ctx.service
     repo, host, number = _admit_target(ops, ctx.target)
     gh = _gh(ops)
-    sources = resolve_sources(ops, host, ctx.params["sources"])
     refs = ctx.op.get("external_refs") or {}
+    sources = refs.get("source_bindings") or resolve_sources(ops, host, ctx.params["sources"])
+    if "source_bindings" not in refs:
+        ctx.set_refs(source_bindings=sources)
     pr = refs.get("pr")
     if pr is None:  # read once; replays use the same facts
         pr = _pr_facts(await _read(gh.pull(repo.repository, number), "read the pull request"))
@@ -791,6 +806,7 @@ async def _run_preview(ctx: OpContext) -> dict:
                "sources": [{"seq": s["seq"], "kind": s["kind"], "id": s["id"]} for s in sources]}
 
         async def prepare() -> dict:
+            execution_sources.revalidate(ops, sources)
             lines = await area.run(preview_prepare_script(area, tag, head_ref, number, sources), long=True)
             return {"lines": lines}
 
@@ -839,7 +855,7 @@ async def _run_preview(ctx: OpContext) -> dict:
     doc["digest"] = _digest(doc, sources)
     journal = ops.journal
     stored = [{k: s.get(k) for k in ("seq", "kind", "id", "host", "location", "location_class", "ref", "pin", "mode",
-                                     "commits", "start", "label")} for s in sources]
+                                     "commits", "start", "label", "session_id", "workspace", "worktree_id", "lineage", "registry_identity")} for s in sources]
     with journal.tx():
         cur = ops.db.execute("""INSERT OR IGNORE INTO integration_previews(preview_id,operation_id,actor,host,
             repository,repository_id,pull_number,head_ref,head_sha,base_ref,base_sha,remote_url,area_path,sources,
@@ -868,6 +884,7 @@ def _describe(ops, doc: dict, sources: list[dict], analysis: dict | None, pr: di
     """Turn the analysis into the preview document: per-source commits and files, overlaps, warnings, blocking."""
     per = (analysis or {}).get("sources") or {}
     own_by_seq = {s["seq"]: (per.get(s["seq"], {}).get("own") if s["start"] else
+                             set() if s["kind"] in execution_sources.KINDS else
                              {c["sha"] for c in per.get(s["seq"], {}).get("commits", [])}) for s in sources}
     git_version = tuple(int(x) for x in str((analysis or {}).get("git_version") or "0.0").split(".")[:2])
     if any(s["mode"] == "pick" for s in sources) and analysis and git_version < PICK_GIT_MIN:
@@ -881,6 +898,7 @@ def _describe(ops, doc: dict, sources: list[dict], analysis: dict | None, pr: di
         a = per.get(s["seq"], {})
         item = {"seq": s["seq"], "kind": s["kind"], "id": s["id"], "label": s["label"],
                 "location_class": s["location_class"], "ref": s["ref"], "pinned_sha": s.get("pin"),
+                "session_id": s.get("session_id"), "lineage": s.get("lineage"),
                 "mode": s["mode"], "picked_commits": s["commits"], "commits": [], "commits_total": a.get("total", 0),
                 "files": a.get("files", []), "files_total": a.get("files_total", len(a.get("files", []))),
                 "pr_side_files": a.get("pr_files", []), "predicted": a.get("predicted"),
@@ -903,8 +921,8 @@ def _describe(ops, doc: dict, sources: list[dict], analysis: dict | None, pr: di
         if s.get("session_id"):
             inv = ops.context.get("inventory")
             row = inv.get_session(doc["host"], s["session_id"]) if inv is not None else None
-            if row and row.get("streaming"):
-                item["warnings"].append(_block("SESSION_STILL_WORKING", f"the agent is still working; only commits "
+            if row and row.get("streaming") is True and not row.get("stale") and not row.get("fields_stale"):
+                item["warnings"].append(_block("SESSION_STILL_WORKING", f"the session was observed streaming; only commits "
                                                f"up to {str(s.get('pin'))[:12]} are included"))
         delivered = ops.db.execute("""SELECT operation_id, pull_number FROM integration_receipts WHERE repository=?
             AND head_ref=? AND source_key=? AND status='delivered' ORDER BY delivered_at DESC LIMIT 1""",
@@ -1051,6 +1069,7 @@ async def _run_apply(ctx: OpContext) -> dict:
         return RERUN  # deterministic and compare-and-swap: a re-run gives the same result
 
     async def prepare() -> dict:
+        execution_sources.revalidate(ops, sources)
         return {"lines": await area.run(apply_prepare_script(area, tag, head_ref, base, sources), long=True)}
 
     lines = (await ctx.step("prepare", prepare, request={"base": base, "pins": {s["seq"]: s["pin"] for s in sources}},
@@ -1222,6 +1241,7 @@ async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, 
         n = no_effect + 1
 
         async def push() -> dict:
+            execution_sources.revalidate(ops, sources)
             return parse_push(await area.run(push_script(area, tag, head_ref, base, head)), head, head_ref, base)
 
         async def readback(_request: dict) -> dict | None:
@@ -1391,14 +1411,21 @@ def integrations_list(ops: OperationService, repository: str, number: int, limit
     return {"integrations": [{**ops.get(i, steps=False), "receipts": receipts(ops.db, i)} for i in ids]}
 
 
-def candidates(ops: OperationService, host: str, limit: int = 50) -> dict:
+def candidates(ops: OperationService, host: str, limit: int = 50, *, source_kind=None, source_id=None) -> dict:
     """What can go into a PR from this host, from the journal and inventory only (no host I/O)."""
     db = ops.db
     limit = max(1, min(200, int(limit)))
     inv = ops.context.get("inventory")
+    selected = None
+    if source_kind is not None or source_id is not None:
+        if source_kind not in execution_sources.KINDS or not isinstance(source_id, str) or not 1 <= len(source_id) <= 256:
+            raise OperationError("INVALID_PARAMS", "select an exact execution or task_command source", 422)
+        selected = candidate_evidence(ops, execution_sources.describe(ops, source_kind, source_id))
+        if selected["host"] != host:
+            raise OperationError("SOURCE_ON_OTHER_HOST", "the selected execution is on another host", 422)
 
     def delivered(kind: str, sid: str) -> list[dict]:
-        return [dict(r) for r in db.execute("""SELECT pull_number, operation_id, delivered_sha, delivered_at
+        return [dict(r) for r in db.execute("""SELECT repository, pull_number, operation_id, pinned_sha, delivered_sha, delivered_at
             FROM integration_receipts WHERE source_kind=? AND source_id=? AND status='delivered'
             ORDER BY delivered_at DESC""", (kind, sid))]
     runs = []
@@ -1407,16 +1434,45 @@ def candidates(ops: OperationService, host: str, limit: int = 50) -> dict:
         WHERE r.host=? ORDER BY r.created_at DESC LIMIT ?""", (host, limit)):
         row = inv.get_session(host, r["session_id"]) if inv is not None else None
         runs.append({**dict(r), "kind": "checkpoint_run", "id": r["operation_id"],
-                     "streaming": bool(row and row.get("streaming")),
+                     "streaming": row.get("streaming") if row else None,
+                     "session": candidate_session(row),
+                     "result": {"status": "unverified", "commit_sha": None},
                      "delivered_to": delivered("checkpoint_run", r["operation_id"])})
+    for candidate in execution_sources.candidates(ops, host, limit):
+        row = inv.get_session(host, candidate["session_id"]) if inv is not None and candidate["session_id"] else None
+        runs.append({**candidate, "session": candidate_session(row), "streaming": row.get("streaming") if row else None,
+                     "result": {"status": "unverified", "commit_sha": None},
+                     "delivered_to": delivered(candidate["kind"], candidate["id"])})
+    runs.sort(key=lambda row: (row["created_at"], row["id"]), reverse=True)
     cps = []
     for r in db.execute("""SELECT checkpoint_id, commit_sha, branch, dirty, captured_at, source_session_id, note
         FROM checkpoints WHERE host=? ORDER BY captured_at DESC LIMIT ?""", (host, limit)):
         d = dict(r)
         d["dirty"] = None if d["dirty"] is None or d["dirty"] < 0 else d["dirty"]
         cps.append({**d, "kind": "checkpoint", "id": r["checkpoint_id"],
+                    "result": {"status": "unverified", "commit_sha": r["commit_sha"]},
                     "delivered_to": delivered("checkpoint", r["checkpoint_id"])})
-    return {"host": host, "agent_results": runs, "checkpoints": cps}
+    return {"host": host, "agent_results": runs[:limit], "checkpoints": cps, "selected": selected}
+
+
+def candidate_session(row: dict | None) -> dict:
+    """Keep observation uncertainty; inactivity and accepted sends never prove task completion."""
+    keys = ("streaming", "pending", "observed_at", "gone_at", "stale", "fields_stale", "stale_reason", "state")
+    out = {key: (row or {}).get(key) for key in keys}
+    activity = ((row or {}).get("state") or {}).get("evidence", {}).get("activity")
+    if activity is not None:
+        out["observed_at"] = activity.get("observed_at")
+    return out
+
+
+def candidate_evidence(ops, item):
+    inv = ops.context.get("inventory")
+    row = inv.get_session(item["host"], item["session_id"]) if inv is not None and item.get("host") in ops.context["fleet"].config.hosts and item.get("session_id") else None
+    delivered = [dict(r) for r in ops.db.execute("""SELECT repository,pull_number,operation_id,pinned_sha,
+        delivered_sha,delivered_at FROM integration_receipts WHERE source_kind=? AND source_id=?
+        AND status='delivered' ORDER BY delivered_at DESC""", (item["kind"], item["id"]))]
+    return {**item, "session": candidate_session(row), "result": {"status": "unverified", "commit_sha": None},
+            "delivered_to": delivered}
 
 
 async def pr_card(ops: OperationService, repository: str, number: int, method: str | None = None,
@@ -1469,6 +1525,8 @@ def _conflict_of(ops: OperationService, apply_id: str) -> tuple[dict, dict, dict
 
 def _handoff_workspace(ops: OperationService, repo: GitHubRepo, src: dict) -> str | None:
     """The BAT workspace for the resolving session: the conflicting source's own, else integrate.workspace."""
+    if src["kind"] in execution_sources.KINDS:
+        return src.get("workspace") or repo.integrate.workspace
     row = None
     if src["kind"] == "checkpoint":
         row = ops.db.execute("SELECT workspace_id, workspace_name FROM checkpoints WHERE checkpoint_id=?",
