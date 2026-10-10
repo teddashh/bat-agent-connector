@@ -126,6 +126,8 @@ class ApiV1:
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("GET", r"/api/v1/managed/setup", self.managed_setup_state, "manage"),
+            ("POST", r"/api/v1/managed/setup/secrets", self.managed_setup_secret, "manage"),
             ("POST", r"/api/v1/approval-previews", self.approval_preview, "observe"),
             ("POST", r"/api/v1/repository-previews", self.repository_preview, "observe"),
             ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
@@ -184,6 +186,7 @@ class ApiV1:
             ("GET", r"/api/v1/projects", self.projects, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})", self.project, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})/skills", self.project_skills, "observe"),
+            ("GET", r"/api/v1/work-items/(?P<wid>wi_[0-9a-f]{20})/result-sources", self.work_item_results, "observe"),
             ("GET", r"/api/v1/work-items", self.work_items, "observe"),
             ("GET", r"/api/v1/work-items/(?P<wi>wi_[0-9a-f]{20})", self.work_item, "observe"),
         ]
@@ -494,6 +497,7 @@ class ApiV1:
                                   "session_reading": {"version": 1, "counts": "observed_history"},
                                   "host_preferences": {"version": 1, "model_catalog": True, "usage": True, "personal_models": True},
                                   "project_skills": {"version": 1, "pinned_selection": True, "application": False},
+                                  "work_item_results": {"version": 1},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
@@ -521,6 +525,25 @@ class ApiV1:
 
     async def repository_preview(self, principal, body, **_):
         return 200, {"preview": await repository_sync.preview(self.daemon.ops, principal, body)}
+
+    async def managed_setup_state(self, principal, query, **_):
+        from . import managed_setup
+        if query:
+            raise ApiError(422, "INVALID_REQUEST", "setup accepts no query")
+        return 200, managed_setup.state(self.daemon, principal)
+
+    async def managed_setup_secret(self, principal, query, body, **_):
+        from . import managed_setup
+        if query:
+            raise ApiError(422, "INVALID_REQUEST", "secret staging accepts no query")
+        return 200, managed_setup.stage_secret(self.daemon, principal, body)
+
+    async def work_item_results(self, principal, wid, query, **_):
+        from . import work_item_results
+        if set(query) - {"after", "limit"}:
+            raise ApiError(422, "INVALID_REQUEST", "unknown result source query")
+        return 200, work_item_results.read(self.daemon.ops, principal, wid,
+            limit=self._int(query, "limit", 50), after=self._q(query, "after"))
 
     async def approval_preview(self, principal, body, **_):
         from .bulk_approval import preview
@@ -670,9 +693,16 @@ class ApiV1:
     async def create_operation(self, principal, query, body, headers, **_):
         key = headers.get("idempotency-key") or body.get("idempotency_key")
         wait = parse_wait(self._q(query, "wait"))  # before anything is stored: a 422 must mean nothing happened
-        op, created = self.daemon.ops.create(
-            principal, action=body.get("action"), target=body.get("target"), params=body.get("params"),
-            preconditions=body.get("preconditions"), idempotency_key=key, entry="http")
+        try:
+            op, created = self.daemon.ops.create(
+                principal, action=body.get("action"), target=body.get("target"), params=body.get("params"),
+                preconditions=body.get("preconditions"), idempotency_key=key, entry="http")
+        except OperationError as error:
+            if body.get("action") not in {"setup.host", "setup.repository"}:
+                raise
+            # This boundary is before a new durable setup operation exists. The UI
+            # may review invalid input again; lost transport replies still keep the key.
+            return error.status, {"error": {"code": error.code, "message": str(error), "admission_refused": True}}
         if wait > 0:
             op = await self.daemon.ops.wait(op["operation_id"], wait)
         return (202 if created else 200), {"operation": op, "created": created}
