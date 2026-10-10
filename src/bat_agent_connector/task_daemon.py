@@ -331,7 +331,7 @@ class TaskDaemon:
         if method == "inventory_session":
             return self.inventory.session_document(str(params.get("host")), str(params.get("session_id")))
         if method == "inventory_worktree":
-            return {"worktree": self.inventory.observation.resource("worktree", params.get("worktree_id"))}
+            return (await self.api.worktree(params.get("worktree_id")))[1]
         if method in {"resource_history", "resource_relations"}:
             keys = ("cursor", "limit", "order", "kind", "since", "until") if method == "resource_history" else ("cursor", "limit", "execution_id", "include_closed")
             read = self.inventory.observation.history if method == "resource_history" else self.inventory.observation.relations
