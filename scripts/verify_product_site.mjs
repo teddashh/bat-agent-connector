@@ -43,14 +43,14 @@ try {
     await page.screenshot({ path: resolve(output, `hero-${lang}-${width}.png`) });
     await page.locator('#product').scrollIntoViewIfNeeded();
     await page.locator('[data-view="dispatch"]').click();
-    assert.equal(await page.locator('#view-attention').isVisible(), false);
+    assert.equal(await page.locator('#view-workspace').isVisible(), false);
     assert.equal(await page.locator('#view-dispatch').isVisible(), true);
     await page.locator('#view-dispatch img:visible').evaluate(img => img.decode());
     await page.screenshot({ path: resolve(output, `dispatch-${lang}-${width}.png`) });
-    await page.locator('[data-view="attention"]').focus();
+    await page.locator('[data-view="workspace"]').focus();
     await page.keyboard.press('Enter');
-    assert.equal(await page.locator('#view-attention').isVisible(), true);
-    await page.locator('#view-attention img:visible').evaluate(img => img.decode());
+    assert.equal(await page.locator('#view-workspace').isVisible(), true);
+    await page.locator('#view-workspace img:visible').evaluate(img => img.decode());
     await page.screenshot({ path: resolve(output, `page-${lang}-${width}.png`), fullPage: true });
     for (const section of ['architecture', 'windows']) {
       await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
@@ -92,7 +92,7 @@ try {
   const noJS = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 390, height: 844 } });
   const fallback = await noJS.newPage();
   await fallback.goto(base);
-  assert.equal(await fallback.locator('#view-attention').isVisible(), true);
+  assert.equal(await fallback.locator('#view-workspace').isVisible(), true);
   assert.equal(await fallback.locator('#view-dispatch').isVisible(), true);
   assert.equal(await fallback.locator('h1:visible').count(), 1);
   assert.equal(await fallback.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

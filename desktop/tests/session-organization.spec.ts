@@ -68,10 +68,10 @@ for (const native of [false, true]) {
     await page.getByRole('searchbox', {name: 'Search loaded sessions'}).fill('build-west');
     await expect(page.getByText('Showing 0 · 24 loaded', {exact: true})).toBeVisible();
     await expect(page.getByText('More pages are available. Load more, or adjust your search and filters.')).toBeVisible();
-    await page.getByRole('button', {name: 'Load more', exact: true}).click();
+    await page.locator('#main').getByRole('button', {name: 'Load more', exact: true}).click();
     await expect(page.getByText('Showing 8 · 32 loaded', {exact: true})).toBeVisible();
     await expect(west).toHaveAttribute('href', '#/host/build-west');
-    await page.getByRole('searchbox').fill('');
+    await page.locator('#main').getByRole('searchbox').fill('');
     await page.locator('.session-workspaces button').filter({hasText: 'Dashboard'}).click();
     await expect(page.getByText('Showing 8 · 32 loaded', {exact: true})).toBeVisible();
     await expect(page.locator('[data-resource-id]')).toHaveCount(8);
@@ -84,7 +84,7 @@ for (const native of [false, true]) {
   });
   test(`event refresh retains pages, row anchor and expanded evidence; failed read cannot acknowledge (${name})`, async ({page}) => {
     const {data, dispatch} = fixture(); await mount(page, native, dispatch); await page.goto('/dashboard/#/sessions');
-    await page.getByRole('button', {name: 'Load more', exact: true}).click();
+    await page.locator('#main').getByRole('button', {name: 'Load more', exact: true}).click();
     const row = page.locator('[data-resource-id="build-east/session-009"]');
     await row.locator('summary').first().click();
     await expect(row.getByText('session-009', {exact: true})).toBeVisible();
@@ -96,7 +96,7 @@ for (const native of [false, true]) {
     await expect(row.locator('details').first()).toHaveAttribute('open', '');
     expect(Math.abs(await row.evaluate(el => el.getBoundingClientRect().top) - top)).toBeLessThan(3);
     data.fail = true; data.cursor = 2;
-    await expect(page.getByText('UNAVAILABLE Inventory unavailable')).toBeVisible();
+    await expect(page.locator('#main').getByText('UNAVAILABLE Inventory unavailable')).toBeVisible();
     expect(await saved(page)).toEqual(cp(1));
     data.fail = false;
     await expect.poll(() => saved(page), {timeout: 10000}).toEqual(cp(2));
@@ -107,7 +107,8 @@ for (const native of [false, true]) {
     let hold = false, held = false, release!: () => void;
     const gate = new Promise<void>(resolve => {release = resolve;});
     await mount(page, native, async input => {
-      if (hold && input.path.startsWith('/sessions?') && !input.path.includes('host=')) {
+      // Hold the inventory view read, independently of the persistent sidebar read.
+      if (hold && input.path.startsWith('/sessions?limit=') && !input.path.includes('host=')) {
         const result = await dispatch(input); hold = false; held = true; await gate; return result;
       }
       return dispatch(input);
@@ -118,7 +119,7 @@ for (const native of [false, true]) {
     await expect.poll(() => held).toBe(true);
     await page.getByRole('combobox', {name: 'Host', exact: true}).selectOption('build-west');
     data.fail = true; release();
-    await expect(page.getByText('UNAVAILABLE Inventory unavailable')).toBeVisible();
+    await expect(page.locator('#main').getByText('UNAVAILABLE Inventory unavailable')).toBeVisible();
     expect(await saved(page)).not.toEqual(cp(1));
     data.fail = false;
     await expect.poll(() => saved(page), {timeout: 10000}).toEqual(cp(1));
@@ -128,13 +129,13 @@ for (const native of [false, true]) {
   });
   test(`scope preferences cannot leak into another central principal (${name})`, async ({page}) => {
     const {data, dispatch} = fixture(); await mount(page, native, dispatch); await page.goto('/dashboard/#/sessions');
-    await page.getByRole('searchbox').fill('parser');
+    await page.locator('#main').getByRole('searchbox').fill('parser');
     await page.locator('.session-workspaces button').filter({hasText: 'Dashboard'}).click();
     data.principal = 'two'; await page.reload();
-    await expect(page.getByRole('searchbox')).toHaveValue('');
+    await expect(page.locator('#main').getByRole('searchbox')).toHaveValue('');
     await expect(page.locator('.session-workspaces button[aria-pressed="true"]')).toContainText('All loaded sessions');
     data.principal = 'one'; await page.reload();
-    await expect(page.getByRole('searchbox')).toHaveValue('parser');
+    await expect(page.locator('#main').getByRole('searchbox')).toHaveValue('parser');
     await expect(page.locator('.session-workspaces button[aria-pressed="true"]')).toContainText('Dashboard');
     expect(data.writes).toEqual([]);
   });

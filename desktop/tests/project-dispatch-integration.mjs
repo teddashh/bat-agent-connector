@@ -48,11 +48,14 @@ try {
     }
   }}), {caps, origin});
   await desktop.route('**/api/v1/**', () => {throw Error('Desktop must use IPC');});
-  let lose = true;
+  let lose = true, lostOperation;
   await web.route('**/api/v1/operations?wait=3', async route => {
     const req = route.request(); posts.push({method: req.method(), path: '/operations?wait=3', body: req.postDataJSON(), idempotency_key: req.headers()['idempotency-key']});
     const response = await route.fetch();
-    if (lose) {lose = false; await route.abort('failed');} else await route.fulfill({response});
+    if (lose) {
+      lostOperation = (await response.json()).operation.operation_id;
+      lose = false; await route.abort('failed');
+    } else await route.fulfill({response});
   });
   const original = '  Keep the project request.\nUse the attached bytes.  ';
   let count = 0;
@@ -75,13 +78,18 @@ try {
     await expect(form.locator('.attachment-list')).toContainText('notes.txt');
     await form.getByRole('button', {name: 'Start from this version', exact: true}).click();
     if (page === web) {
-      await expect(form.locator('.error')).toBeVisible();
+      await expect(form.locator('.error')).toBeVisible({timeout: 30000});
+      // The response wait limit is not a completion barrier. Archive only after
+      // the original dispatch settles, then replay its receipt with the same key.
+      await expect.poll(async () => (await central({method: 'GET', path: '/operations/' + lostOperation})).data.operation.status,
+        {timeout: 30000}).toBe('succeeded');
       await control({action: 'archive-project', project_id: project.project_id, archived: true});
       await control({action: 'writes', enabled: false}); await page.reload();
       await form.getByRole('button', {name: 'Retry original request'}).click();
       assert.deepEqual(posts[0], posts[1]);
     }
     await expect(form).toContainText('Start confirmed', {timeout: 30000});
+    await expect(form).toContainText('Initial instructions were accepted', {timeout: 30000});
     const id = (await form.locator('a[href^="#/op/"]').getAttribute('href')).split('/').at(-1);
     operations.push(id);
     await page.reload(); await expect(form).toContainText('Start confirmed');
@@ -97,7 +105,10 @@ try {
   const delivered = await control({action: 'prepare-delivery', operations});
   for (const [index, page] of [web, desktop].entries()) {
     await page.goto(origin+'/dashboard/#/project/'+project.project_id);
-    const work = page.locator('[data-project-work="'+operations[index]+'"]');
+    await page.locator('.workspace-tree a[href="#/work/'+project.project_id+'/execution/'+operations[index]+'"]').click();
+    await expect(page.locator('.workspace-conversation')).toBeVisible();
+    await expect(page.locator('.workspace-nav')).toBeVisible();
+    const work = page.locator('[data-workspace-result] [data-project-work="'+operations[index]+'"]');
     await expect(work).toContainText('Result unverified');
     await expect(work).not.toContainText('done');
     await work.getByRole('link', {name: 'Review result and add to PR'}).click();
@@ -119,7 +130,7 @@ try {
   await control({action: 'verify-delivery', results: delivered.results});
   assert.equal(await desktop.evaluate(() => JSON.stringify({...localStorage, ...sessionStorage}).includes('batc.dashboard.token')), false);
   assert.deepEqual(errors, []);
-  console.log('Real central project creation/dispatch/delivery passed: a new project selects its configured repository in the UI; HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR using a pasted PR link with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
+  console.log('Real central project tree/conversation/creation/dispatch/delivery passed: a new project selects its configured repository in the UI; HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR using a pasted PR link with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
 } finally {
   await browser.close();
   if (child.exitCode === null && child.signalCode === null) child.stdin.end(JSON.stringify({action: 'stop'})+'\n');
