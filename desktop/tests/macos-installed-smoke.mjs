@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { bundleManifest, sha256 } from "./macos-bundle.mjs";
+import { probeManaged, stopManaged } from "./managed-installed-probe.mjs";
 
 assert.equal(process.platform, "darwin", "macOS runner required");
 assert.equal(process.env.GITHUB_ACTIONS, "true", "GitHub Actions required");
@@ -72,11 +73,24 @@ async function stopApplication() {
   await until(() => JSON.parse(native("inspect")).terminated, "Owned application did not terminate");
 }
 async function until(check, message) {
-  for (let count = 0; count < 150; count++) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
     if (await check()) return;
     await delay(100);
   }
   throw new Error(`${message}\n${diagnostic}`);
+}
+async function waitManagedView(name) {
+  let state = {};
+  try {
+    await until(() => {
+      state = JSON.parse(native("managed-view"));
+      return ["webContent", "authenticated", "setup", "configurationLoaded", "saveEnabled", "bounded"]
+        .every(key => state[key] === true);
+    }, "Managed WKWebView did not render authenticated first-run configuration");
+  } finally {
+    await writeFile(join(evidence, `${name}-readiness.json`), JSON.stringify(state, null, 2));
+  }
 }
 async function stopOwned(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
@@ -180,6 +194,27 @@ try {
     assert(requests.some(item => item.path === path), `Missing ${path}`);
   }
   steps.push("Normal system Quit and relaunch preserved configuration and resumed WebView polling");
+  await rm(join(statePaths[0], "central.json"));
+  app = JSON.parse(run(helper, ["launch-managed", installed]));
+  const managedIdentity = await probeManaged(statePaths[0], { wait: true });
+  await until(() => JSON.parse(native("inspect")).windows.length === 1, "Managed first-run window missing");
+  await waitManagedView("managed-first-run");
+  run("screencapture", ["-x", "-l", String(JSON.parse(native("inspect")).windows[0].id), join(evidence, "managed-first-run.png")]);
+  native("close");
+  await until(() => JSON.parse(native("inspect")).windows.length === 0, "Managed close did not hide window");
+  assert.deepEqual(await probeManaged(statePaths[0]), managedIdentity);
+  native("quit");
+  await until(() => JSON.parse(native("inspect")).terminated, "Managed Dashboard Quit did not terminate UI");
+  assert.deepEqual(await probeManaged(statePaths[0]), managedIdentity, "Central must survive native UI Quit");
+  app = JSON.parse(run(helper, ["launch-managed", installed]));
+  assert.deepEqual(await probeManaged(statePaths[0], { wait: true }), managedIdentity);
+  await until(() => JSON.parse(native("inspect")).windows.length === 1, "Reopened managed window missing");
+  await waitManagedView("managed-reopened");
+  run("screencapture", ["-x", "-l", String(JSON.parse(native("inspect")).windows[0].id), join(evidence, "managed-reopened.png")]);
+  native("quit");
+  await until(() => JSON.parse(native("inspect")).terminated, "Reopened managed UI did not quit");
+  await stopManaged(statePaths[0]);
+  steps.push("Clean managed first-run and relaunch rendered authenticated, enabled setup in WKWebView via Accessibility; same identity survived close and Quit; owned service stopped");
   receipt = { status: "passed", evidence_level: "native-installed-fixture", live_accepted: false,
     hide_request_reported_success: hideRequest.reportedSuccess,
     launch_method: "NSWorkspace Launch Services", quit_method: "NSRunningApplication normal terminate request and observed termination",
@@ -189,6 +224,7 @@ try {
   await writeFile(join(evidence, "bundle-proof.json"), JSON.stringify(expected, null, 2));
 } finally {
   await stopApplication();
+  if (ownsState) await stopManaged(statePaths[0]);
   server.closeAllConnections();
   server.close();
   if (mounted) run("hdiutil", ["detach", mount]);

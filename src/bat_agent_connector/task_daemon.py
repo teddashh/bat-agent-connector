@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
 import hmac
 import json
@@ -29,10 +28,12 @@ from . import (
     delivery,
     deployment,
     integration,
+    platform_files,
     pr_delivery,
     registry,
     service,
     session_metadata,
+    session_reading,
     task_actions,
     task_control,
     work_item_reads,
@@ -138,14 +139,13 @@ class TaskDaemon:
         self.journal.owner_valid = self._owns_fleet
         self.admin_token_path = self.journal.path.parent / "task-admin.token"
         try:
-            fd = os.open(self.admin_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = platform_files.open_private_file(self.admin_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
             with os.fdopen(fd, "w") as fh:
                 fh.write(secrets.token_urlsafe(48))
         except FileExistsError:
             pass
-        if self.admin_token_path.stat().st_mode & 0o077:
-            raise ValueError("task admin token file must be mode 0600")
-        self._admin_token = self.admin_token_path.read_text().strip()
+        platform_files.check_private(self.admin_token_path)
+        self._admin_token = platform_files.read_private(self.admin_token_path, max_bytes=4096).decode().strip()
         if len(self._admin_token) < 32:
             raise ValueError("task admin token is invalid")
         self.fleet = Fleet(config, actor="task-service")
@@ -185,7 +185,7 @@ class TaskDaemon:
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
                                     + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS
-                                    + session_metadata.ACTIONS + work_item_reads.ACTIONS)
+                                    + session_metadata.ACTIONS + work_item_reads.ACTIONS + session_reading.ACTIONS)
         self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:
@@ -222,9 +222,12 @@ class TaskDaemon:
         secret = ""
         if settings.event_webhook_secret_file:
             path = Path(settings.event_webhook_secret_file).expanduser()
-            if path.stat().st_mode & 0o077:
+            if platform_files.WINDOWS:
+                platform_files.check_private(path)
+            elif path.stat().st_mode & 0o077:
                 raise ValueError("event webhook secret file must be mode 0600")
-            secret = path.read_text().strip()
+            secret = (platform_files.read_private(path, max_bytes=4096).decode()
+                      if platform_files.WINDOWS else path.read_text()).strip()
             if len(secret) < 32:
                 raise ValueError("event webhook secret is too short")
         return EventWebhook(settings.event_webhook_url, secret)
@@ -321,15 +324,16 @@ class TaskDaemon:
                                            resource_id=params.get("resource_id"), kind=params.get("kind"),
                                            related_resource_type=params.get("related_resource_type"), related_resource_id=params.get("related_resource_id"))
         if method == "inventory_sessions":
-            return self.inventory.list_sessions(
+            return session_reading.decorate(self.journal, principal, self.inventory.list_sessions(
                 host=params.get("host"), provenance=params.get("provenance"), api_access=params.get("access"),
                 attention=params.get("attention"), include_gone=bool(params.get("include_gone")),
                 order=params.get("order") or "activity", cursor=params.get("cursor"),
-                limit=int(params.get("limit") or 50), **{k: params[k] for k in ("profile_id", "project_id", "work_item_id", "execution_id", "provider", "has_tab", "loaded", "streaming", "lifecycle", "stale", "relation_scope") if k in params and params[k] is not None})
+                limit=int(params.get("limit") or 50), **{k: params[k] for k in ("profile_id", "project_id", "work_item_id", "execution_id", "provider", "has_tab", "loaded", "streaming", "lifecycle", "stale", "relation_scope") if k in params and params[k] is not None}))
         if method == "inventory_hosts":
             return self.inventory.hosts_document(host=params.get("host"), discovery=params.get("discovery", False), after=params.get("after", 0), limit=params.get("limit", 20))
         if method == "inventory_session":
-            return self.inventory.session_document(str(params.get("host")), str(params.get("session_id")))
+            return session_reading.decorate(self.journal, principal,
+                self.inventory.session_document(str(params.get("host")), str(params.get("session_id"))))
         if method == "inventory_worktree":
             return (await self.api.worktree(params.get("worktree_id")))[1]
         if method in {"resource_history", "resource_relations"}:
@@ -388,8 +392,9 @@ class TaskDaemon:
         if method == "projects_list":
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
         if method == "project_get":
-            return work_items.project_get(self.journal.db, str(params.get("project_id")),
-                                          include_archived=bool(params.get("include_archived")), ops=self.ops)
+            return session_reading.decorate(self.journal, principal,
+                work_items.project_get(self.journal.db, str(params.get("project_id")),
+                                       include_archived=bool(params.get("include_archived")), ops=self.ops))
         if method == "work_items_list":
             from .dashboard_sync import identity
             pending = params.get("pending")
@@ -1059,10 +1064,10 @@ class TaskDaemon:
             return
         # One fleet/registry has one owner, even when candidates name different journals.
         path = registry.registry_path().parent / "task-daemon.lock"
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        platform_files.ensure_private_directory(path.parent)
+        fd = platform_files.open_private_file(path, os.O_RDWR | os.O_CREAT)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            platform_files.lock(fd, blocking=False)
         except BlockingIOError:
             os.close(fd)
             try:
@@ -1099,18 +1104,12 @@ class TaskDaemon:
 
     def _write_owner_pointer(self):
         pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
-        tmp = pointer.with_suffix("." + secrets.token_hex(8) + ".tmp")
-        try:
-            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as fh:
-                json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid(),
-                           "owner_id": self._owner_id, "endpoint": self._endpoint,
-                           "lease_path": str(pointer.parent / "task-daemon.lock")}, fh)
-            os.replace(tmp, pointer)
-        finally:
-            tmp.unlink(missing_ok=True)
+        platform_files.atomic_write(pointer, json.dumps({"db_path": str(self.journal.path.resolve()), "pid": os.getpid(),
+                               "owner_id": self._owner_id, "endpoint": self._endpoint,
+                               "lease_path": str(pointer.parent / "task-daemon.lock")}).encode())
 
     def release_owner(self):
         if self._lease_fd is not None:
-            fcntl.flock(self._lease_fd, fcntl.LOCK_UN)
+            platform_files.unlock(self._lease_fd)
             os.close(self._lease_fd)
             self._lease_fd = None

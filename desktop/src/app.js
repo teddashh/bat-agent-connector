@@ -1,9 +1,23 @@
+import {prSelector} from "./pr-selector.js";
 import {workspaceNavigation} from "./workspace-nav.js";
+import {managedSetupPanel} from "./managed-setup.js";
+import {managedControl} from "./transport/index.ts";
+import {restoreBrowserSession, browserSessionToken, forgetBrowserSession} from "./transport/index.ts";
+import {setupSidebarResizer, setupMobileSessionLayout} from "./workspace-layout.js";
 import {attentionView} from "./attention.js";
 import {parsePullRequest} from "./delivery-input.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
 import {conversationPanel} from "./conversation.js";
+import {composerShortcut} from "./composer-shortcut.js";
+import {treeInteractions} from "./tree-interactions.js";
+import {modelPreferencesPanel} from "./model-preferences.js";
+import {projectSkillsPanel} from "./project-skills.js";
+import {resultSourcesPanel} from "./result-sources.js";
+import {repairPanel, repairWorkItemPanel} from "./repair-panel.js";
+import {repairDispatchSeed, validateRepairRecord} from "./repair-intent.js";
+import {instructionReceiptPanel} from "./instruction-receipts.js";
+import {createRecordForm} from "./create-record.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -66,6 +80,7 @@ function saveCursor() {
   }
 }
 function disconnect() {
+  if (state.token === browserSessionToken) forgetBrowserSession()?.catch(() => {});
   state.epoch++; clearToken(); state.token = null; state.caps = null; state.lastEvent = 0;
   state.online = false; state.viewReady = false; state.sync = null;
 }
@@ -165,7 +180,11 @@ async function api(method, path, body, key) {
   const epoch = state.epoch;
   const { status, data } = await connectorRequest(method, path, body, key, state.token);
   if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while the request was in flight");
-  if (status < 200 || status >= 300) throw new ApiError(status, data.error?.code, data.error?.message);
+  if (status < 200 || status >= 300) {
+    const error = new ApiError(status, data.error?.code, data.error?.message);
+    error.admissionRefused = data.error?.admission_refused === true;
+    throw error;
+  }
   return data;
 }
 function errorBox(e) {
@@ -212,23 +231,54 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
   saved.attachments = saved.attachments.filter(a => a && typeof a === "object");
   for (const a of saved.attachments) delete a.busy;
   if (typeof saved.text === "string") text.value = saved.text;
-  const files = new Map(), rows = h("div", {class: "attachment-list"});
+  const files = new Map(), previews = new Map(), rows = h("div", {class: "attachment-list"});
+  const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+  const generateThumbnail = (file, onReady) => {
+    if (!ALLOWED_IMAGE_TYPES.has(file.type) || file.size > 16 * 1024 * 1024) return;
+    try {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const maxDim = 96;
+            let w = img.width, h = img.height;
+            if (w <= 0 || h <= 0) return;
+            if (w > maxDim || h > maxDim) {
+              if (w > h) { h = Math.max(1, Math.round((h * maxDim) / w)); w = maxDim; }
+              else { w = Math.max(1, Math.round((w * maxDim) / h)); h = maxDim; }
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.drawImage(img, 0, 0, w, h);
+            onReady(canvas.toDataURL("image/png"));
+          } catch { /* canvas error */ }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    } catch { /* reader error */ }
+  };
   let pendingSelections = 0;
   const changed = () => queueMicrotask(() => {if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();});
   const status = h("p", {class: "muted", role: "status"});
+  const promptHint = h("p", {class: "muted", hidden: true}, t("dispatch_attachment_prompt", {request: t("dispatch_inspect_images")}));
   const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
   const nativeUploadAllowed = state.caps?.actions?.some(a => a.action === "artifact.upload" && a.allowed === true);
   let native;
   const choose = nativeFiles ? h("button", {class: "secondary", disabled: !supported || !may("manage") || !nativeUploadAllowed, onclick: () => native.pick()}, t("files_choose")) : h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
   const box = h("div", {class: "attachments", hidden: !supported}, nativeFiles ? h("div", {class: "actions"}, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose),
-    h("p", {class: "muted"}, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
+    h("p", {class: "muted"}, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, promptHint, status);
   const guard = (mounted = false) => {
     assertView(connection);
     if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
   };
-  const persist = () => {
+  const persist = (required = false) => {
     guard(); saved.text = text.value;
-    try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* keep the in-memory intent */ }
+    try { localStorage.setItem(key, JSON.stringify(saved)); } catch (error) { if (required === true) throw error; }
+    promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some(a => a.ref);
     changed();
   };
   const removeStored = () => { guard(); try { localStorage.removeItem(key); } catch { /* ignore */ } };
@@ -237,7 +287,8 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
   const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
   const ready = () => pendingSelections === 0 && saved.attachments.every(a => a.ref);
-  const render = () => {changed(); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row"},
+  const render = () => {changed(); promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some(a => a.ref); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row attachment-row"},
+    previews.has(a) ? h("img", {class: "attachment-thumb", src: previews.get(a), alt: a.name || t("attachments")}) : null,
     h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
       : h("div", {class: "muted"}, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))),
     a.ref && roles ? h("select", {"aria-label": t("attachment_role"), onchange: e => {guard(); a.ref.role = e.target.value; persist();}},
@@ -246,7 +297,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     !a.ref && files.has(a) && !a.busy ? h("button", {class: "secondary", onclick: () => upload(a)}, t("retry")) : null,
     h("button", {class: "secondary", disabled: a.busy, onclick: () => {
       guard(); if (a.native_handle) {saved.native_ignored ||= []; saved.native_ignored.push(a.native_handle);}
-      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
+      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); previews.delete(a); persist(); render();
     }}, t("remove")))));};
   if (nativeFiles) {
     if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
@@ -287,13 +338,13 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
       const bytes = await file.arrayBuffer(); guard(true);
       const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(x => x.toString(16).padStart(2, "0")).join("");
       guard(true);
-      const request = {action: "artifact.upload", target: {}, params: {display_name: file.name,
+      const request = {action: "artifact.upload", target: {}, params: {display_name: a.name || file.name,
         media_type: file.type || "application/octet-stream", size_bytes: file.size, expected_digest: digest}, preconditions: {}};
       if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
-      a.request ||= request; a.key ||= crypto.randomUUID(); persist();
+      a.request ||= request; a.key ||= crypto.randomUUID(); persist(true);
       let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
       guard(true);
-      if (op && ["failed", "cancelled"].includes(op.status)) {op = null; a.key = crypto.randomUUID(); delete a.operation_id; persist();}
+      if (op && ["failed", "cancelled"].includes(op.status)) {op = null; a.key = crypto.randomUUID(); delete a.operation_id; persist(true);}
       if (!op) op = (await api("POST", "/operations?wait=3", a.request, a.key)).operation;
       guard(true); a.operation_id = op.operation_id; persist();
       const deadline = Date.now() + 60000;
@@ -328,10 +379,121 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     for (const file of choose.files) {
       let a = saved.attachments.find(x => !x.ref && !files.has(x) && x.name === file.name);
       if (!a) {a = {name: file.name}; saved.attachments.push(a);}
-      files.set(a, file); upload(a);
+      files.set(a, file);
+      if (ALLOWED_IMAGE_TYPES.has(file.type)) {
+        generateThumbnail(file, thumb => { if (box.isConnected && saved.attachments.includes(a)) {previews.set(a, thumb); render();} });
+      }
+      upload(a);
     }
     choose.value = ""; persist(); render();
   };
+  const handleIncomingFile = file => {
+    guard();
+    fill(status);
+    const limit = Math.min(state.caps?.artifacts?.limits?.max_file_bytes || 16 * 1024 * 1024,
+      nativeDesktop ? 16 * 1024 * 1024 : Number.MAX_SAFE_INTEGER);
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      fill(status, errorBox(new Error(t("attachment_unsupported_image"))));
+      return;
+    }
+    if (file.size > limit) {
+      fill(status, errorBox(new Error(`ARTIFACT_TOO_LARGE (${limit})`)));
+      return;
+    }
+    let name = file.name;
+    const ext = file.type === "image/jpeg" ? ".jpg" : file.type === "image/webp" ? ".webp" : ".png";
+    if (!name || name === "image.png" || name === "blob") {
+      name = `pasted-image-${Date.now()}${ext}`;
+    }
+    name = name.replace(/[^\w.-]/g, "_").replace(/^(\.+)/, "image_");
+    let uniqueName = name;
+    let counter = 1;
+    while (saved.attachments.some(x => x.name === uniqueName)) {
+      const dot = name.lastIndexOf(".");
+      uniqueName = dot > 0 ? `${name.slice(0, dot)}-${counter}${name.slice(dot)}` : `${name}-${counter}`;
+      counter++;
+    }
+    const a = {name: uniqueName};
+    saved.attachments.push(a);
+    files.set(a, file);
+    generateThumbnail(file, thumb => {
+      if (box.isConnected && saved.attachments.includes(a)) {previews.set(a, thumb); render();}
+    });
+    upload(a);
+    persist();
+    render();
+  };
+  const onPaste = e => {
+    if (e.isComposing) return;
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const items = cd.items ? Array.from(cd.items) : [];
+    const cdFiles = cd.files ? Array.from(cd.files) : [];
+    const imageCandidates = [];
+    if (cdFiles.length > 0) {
+      for (const f of cdFiles) {
+        if (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name)) {
+          imageCandidates.push(f);
+        }
+      }
+    } else if (items.length > 0) {
+      for (const it of items) {
+        if (it.kind === "file") {
+          const f = it.getAsFile();
+          if (f && (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name) || it.type.startsWith("image/"))) {
+            imageCandidates.push(f);
+          }
+        }
+      }
+    }
+    if (!imageCandidates.length) return;
+    e.preventDefault();
+    if (!supported || !may("manage") || (nativeFiles && !nativeUploadAllowed) || !state.online || !state.viewReady) {
+      fill(status, errorBox(new Error(t("offline_actions_paused"))));
+      return;
+    }
+    for (const file of imageCandidates) {
+      handleIncomingFile(file);
+    }
+  };
+  const onDragOver = e => {
+    if (nativeFiles) return; // native handle/spool owns OS drag-and-drop
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      box.classList.add("drag-over");
+      if (text && text.classList) text.classList.add("drag-over");
+    }
+  };
+  const onDragLeave = e => {
+    if (!box.contains(e.relatedTarget) && e.target !== text) {
+      box.classList.remove("drag-over");
+      if (text && text.classList) text.classList.remove("drag-over");
+    }
+  };
+  const onDrop = e => {
+    box.classList.remove("drag-over");
+    if (text && text.classList) text.classList.remove("drag-over");
+    if (nativeFiles || !e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    if (!supported || !may("manage") || (nativeFiles && !nativeUploadAllowed) || !state.online || !state.viewReady) {
+      fill(status, errorBox(new Error(t("offline_actions_paused"))));
+      return;
+    }
+    for (const file of e.dataTransfer.files) {
+      handleIncomingFile(file);
+    }
+  };
+  text.addEventListener("paste", onPaste);
+  box.addEventListener("paste", onPaste);
+  box.addEventListener("dragover", onDragOver);
+  box.addEventListener("dragleave", onDragLeave);
+  box.addEventListener("drop", onDrop);
+  if (text && text.addEventListener) {
+    text.addEventListener("dragover", onDragOver);
+    text.addEventListener("dragleave", onDragLeave);
+    text.addEventListener("drop", onDrop);
+  }
   const existing = h("select", {"aria-label": t("existing_artifact")}, h("option", {value: ""}, t("existing_artifact")));
   box.append(h("div", {class: "actions"}, existing, h("button", {class: "secondary", onclick: async () => {
     if (!existing.value) return;
@@ -389,6 +551,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     }
     const intent = saved.submission;
     try {
+      persist(true); // freeze request/key on disk before any central submission
       const op = intent.operation_id ? (await api("GET", `/operations/${intent.operation_id}`)).operation
         : (await api("POST", "/operations?wait=3", intent.request, intent.key)).operation;
       guard(true); intent.operation_id = op.operation_id; persist(); settleSubmission(op); return op;
@@ -435,7 +598,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     if (!ready()) throw new Error(t("attachments_not_ready"));
     const ignored = [...(saved.native_ignored || []), ...saved.attachments.map(a => a.native_handle).filter(Boolean)];
     saved = {text: "", attachments: [], native_draft: saved.native_draft, native_ignored: ignored};
-    text.value = ""; files.clear(); persist(); render();
+    text.value = ""; files.clear(); previews.clear(); persist(); render();
   }};
 }
 
@@ -1006,12 +1169,18 @@ async function viewHostDiscovery(main, host) {
   const head = h("div", {class: "panel"});
   main.append(h("h1", {}, host, " · ", t("obs_discovery")), h("p", {class: "note"}, t("obs_discovery_note")), head);
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const profile = state.caps?.hosts?.find(item => item.host === host)?.profile_id;
+  const repair = profile && state.caps?.features?.managed_repairs?.version === 1 ? repairPanel({h, t, api,
+    caps: () => state.caps, guard: () => assertView(connection), namespace: connection.namespace,
+    source: {kind: "discovery", host, profile_id: profile}, errorBox, opStatus}) : null;
+  if (repair) main.append(repair.box);
   const load = async () => {
     try {const data = await api("GET", `/hosts/${encodeURIComponent(host)}/discovery`); assertView(connection); head.replaceChildren(discoveryEvidence(data.scopes));}
     catch (error) {head.append(errorBox(error));}
   };
   await load(); const reload = debounceRefresh(load, 500);
-  return onEvents(event => {if (event.resource_type === "host" && event.resource_id === host) return reload();});
+  const off = onEvents(event => {if (event.resource_type === "host" && event.resource_id === host) return reload();});
+  return () => {off(); repair?.dispose();};
 }
 
 async function viewSession(main, host, sid, context = null) {
@@ -1020,7 +1189,20 @@ async function viewSession(main, host, sid, context = null) {
   const head = h("div", { class: "workspace-session-heading" });
   const metadata = h("div", {class: "workspace-metadata"});
   const result = h("section", {class: "workspace-result", "data-workspace-result": ""});
-  const conversation = conversationPanel({h, t, when, guard: () => assertView(connection)});
+  let messageOffset = 0, nextMessageOffset = null, firstMessages = true, messageRequest = 0;
+  const readingSupported = state.caps?.features?.session_reading?.version === 1;
+  const saveReading = async (action, params, preconditions = {}) => {
+    const op = await submit(action, {host, session_id: sid}, params, preconditions, `${action}.${host}.${sid}`);
+    assertView(connection);
+    await loadMessages();
+    if (op.status !== "succeeded") throw new Error(op.status_reason || t("conversation_pending"));
+  };
+  const conversation = conversationPanel({h, t, when, guard: () => assertView(connection), readingActions: readingSupported ? {
+    mark: messages => saveReading("session.read", {messages}),
+    remember: (position, version) => saveReading("session.position", position, {expected_version: version}),
+    older: () => loadMessages(nextMessageOffset, false),
+    latest: () => loadMessages(0, true),
+  } : null});
   const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
   const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
   const box = h("textarea", { placeholder: t("send_placeholder") });
@@ -1044,6 +1226,7 @@ async function viewSession(main, host, sid, context = null) {
       status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
       if (op.status === "succeeded" && box.value === submitted) {
         box.value = ""; try { localStorage.removeItem(draftKey); } catch { /* unavailable */ }
+        mobileLayout?.updateDraft();
       }
     } catch (e) { status.replaceChildren(errorBox(e)); }
     finally { sending = false; send.disabled = !allowed("session.send"); }
@@ -1055,8 +1238,10 @@ async function viewSession(main, host, sid, context = null) {
       assertView(connection); status.replaceChildren(opStatus(op));
     } catch (e) { status.replaceChildren(errorBox(e)); }
   } }, t("interrupt"));
-  const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
-    h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+  const shortcut = composerShortcut({h, t, input: box, button: send,
+    storageKey: `batc.composer-shortcut.${connection.namespace}`, guard: () => assertView(connection)});
+  const composer = h("div", {hidden: true, id: "workspace-message-input"}, box, h("div", { class: "actions" }, send, stop,
+    h("label", { class: "muted" }, queue, " ", t("queue_behind"))), shortcut.box);
   const readonly = h("p", { class: "note" }, t("session_access_unknown"));
   let capture, permissions, batHandoff;
   const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
@@ -1065,11 +1250,15 @@ async function viewSession(main, host, sid, context = null) {
     target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
+  const instructions = state.caps?.features?.session_instructions?.version === 1 ? instructionReceiptPanel({h, t, when, api,
+    guard: () => assertView(connection), host, sessionId: sid, errorBox}) : null;
+  instructions?.box.addEventListener("toggle", () => {if (instructions.box.open) instructions.refresh();});
   const inspector = h("details", {class: "workspace-inspector", open: true},
     h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot,
     h("details", {class: "workspace-evidence"}, h("summary", {}, t("sessions_details")), metadata),
-    labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
+    instructions?.box, labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
   const lane = h("section", {class: "workspace-conversation", "aria-label": t("messages")}, conversation.box, controls);
+  const mobileLayout = setupMobileSessionLayout({ head, composer: controls, textarea: box, t, guard: () => assertView(connection) });
   if (context?.picker) main.append(context.picker);
   main.append(head, h("div", {class: "workspace-session"}, lane, inspector));
   const renderPending = () => {
@@ -1139,6 +1328,7 @@ async function viewSession(main, host, sid, context = null) {
         chip(t(activity.key), activity.tone), h("span", {class: "muted"}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
         h("a", {class: "muted", href: `#/host/${encodeURIComponent(host)}`}, row.host),
         chip(t(row.api_access === "managed" ? "managed" : "read_only"), row.api_access === "managed" ? "managed" : "readonly")));
+    mobileLayout?.updateInfo();
     metadata.replaceChildren(h("div", {class: "actions"}, ...sessionBadges(row)),
       h("dl", { class: "kv" },
         h("dt", {}, t("host")), h("dd", {}, h("a", {href: `#/host/${encodeURIComponent(host)}`}, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""),
@@ -1200,9 +1390,20 @@ async function viewSession(main, host, sid, context = null) {
       data.work_items?.length ? linkedItems(data.work_items) : null,
       !work.some(item => item.worktree_id === row.worktree_id) && row.worktree_id ? h("p", {}, observationLink("worktree", row.worktree_id)) : null);
   };
-  const loadMessages = async () => {
-    const read = await api("GET", `${path}/messages?last_n=30`); assertView(connection);
-    conversation.update(read.messages);
+  const loadMessages = async (offset = messageOffset, latest = false) => {
+    if (offset == null) return;
+    const request = ++messageRequest;
+    const get = offset => api("GET", `${path}/messages?last_n=30&include_tools=true&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
+    let read = await get(offset); assertView(connection);
+    if (request !== messageRequest) return;
+    const restore = firstMessages && readingSupported ? read.reading?.position : null;
+    if (restore && Number.isInteger(restore.page_offset) && restore.page_offset >= 0) {
+      const savedOffset = Math.max(0, restore.page_offset - 15);
+      if (savedOffset !== offset) {offset = savedOffset; read = await get(offset); assertView(connection);}
+      if (request !== messageRequest) return;
+    }
+    messageOffset = offset; nextMessageOffset = read.next_offset; firstMessages = false;
+    conversation.update(read.messages, readingSupported ? {...read, restore, latest, olderWindow: offset > 0} : null);
   };
   const refresh = async (fromEvent = false) => {
     if (refreshInFlight) {
@@ -1233,9 +1434,10 @@ async function viewSession(main, host, sid, context = null) {
       || context?.project && ["project", "operation", "task", "execution"].includes(ev.resource_type)) ? reload() : Promise.resolve(),
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
-    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
+    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve(),
+    instructions?.box.open && (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? instructions.refresh() : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose();};
+  return () => {clearInterval(retry); off(); instructions?.dispose(); batHandoff?.dispose(); conversation.dispose(); mobileLayout?.dispose(); shortcut.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
@@ -1257,13 +1459,14 @@ function checkpointPanel(host, sid) {
     draft.bindFields({agent});
     let expectedHead = null;
     const go = h("button", { class: "primary", onclick: async () => {
-      if (!instr.value.trim()) return;
+      const instructions = instr.value.trim() ? instr.value : (draft.refs().length ? t("dispatch_inspect_images") : "");
+      if (!instructions) return;
       go.disabled = true;
       try {
         if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
         if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
         const op = await draft.perform("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
-            { instructions: instr.value, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs()} : {}) },
+            { instructions, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs()} : {}) },
             state.caps?.artifacts ? { expected_source_head_sha: expectedHead } : {}, `continue.${cp.checkpoint_id}`);
         out.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
       } catch (e) { out.replaceChildren(errorBox(e)); }
@@ -1337,6 +1540,7 @@ function checkpointPanel(host, sid) {
 
 async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceRepository) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId
     ? {host: sourceHost, kind: sourceKind, id: sourceId} : null;
   const repo = h("input", { "aria-label": t("delivery_repository_input"), placeholder: "owner/name", value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || "" });
@@ -1359,10 +1563,21 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
   if (source) main.append(h("p", {class: "note"}, t("delivery_source_context"), " ", h("code", {}, source.id)));
   let selectedMethod = "";
   let reviewedPreview = null;
+  const selector = prSelector({
+    api, h, t,
+    guard: () => assertView(connection),
+    repoInput: repo,
+    numInput: num,
+    onSelect: () => { load(); }
+  });
+  repo.addEventListener("change", () => selector.loadList());
   main.append(h("h2", {}, t("dep_pull_request")),
     h("form", { class: "filters delivery-controls", onsubmit: event => {event.preventDefault(); acceptLink(); load();} },
       h("label", {}, t("delivery_repository_input"), repo), h("label", {}, t("delivery_pr_number"), num),
-      h("button", { type: "submit", class: "secondary" }, t("load_pr"))), inputStatus, card);
+      h("button", { type: "submit", class: "secondary" }, t("load_pr"))),
+    h("details", {}, h("summary", {}, t("delivery_list_prs") || "List Pull Requests"), selector.container),
+    inputStatus, card);
+  setTimeout(() => { if (repo.value && !num.value) selector.loadList(); }, 100);
   if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
   const load = async (flash = null, fromEvent = false) => {
     const opens = drawerOpens;
@@ -1953,12 +2168,21 @@ async function viewOperations(main, filter = "all") {
 
 async function viewOperation(main, id) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  let repair;
   const panel = h("div", { class: "panel" });
   main.append(panel);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
     try {
       const { operation: op, work_items: linked, cleanup_receipts: cleanupReceipts } = await api("GET", `/operations/${id}`);
+      assertView(connection);
+      if (!repair && state.caps?.features?.managed_repairs?.version === 1 &&
+          ["cleanup.apply", "task.verify", "session.record_verification"].includes(op.action) && ["failed", "needs_attention"].includes(op.status)) {
+        repair = repairPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), namespace: connection.namespace,
+          source: {kind: "operation", operation_id: id}, errorBox, opStatus});
+        main.append(repair.box);
+      }
       const refs = op.external_refs || {};
       const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed"
         ? h("button", { class: "primary", onclick: async () => {
@@ -2042,7 +2266,8 @@ async function viewOperation(main, id) {
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
-  return liveReload(render, ["operation", "integration", "cleanup"]);
+  const off = liveReload(render, ["operation", "integration", "cleanup"]);
+  return () => {off(); repair?.dispose();};
 }
 
 function mergeRecovery(op) {
@@ -2065,7 +2290,16 @@ function mergeRecovery(op) {
 }
 
 function viewSettings(main) {
+  if (state.caps?.managed_installation) return viewManagedSettings(main);
   if (nativeDesktop) return viewNativeSettings(main);
+  if (state.token && state.caps && state.token === browserSessionToken) {
+    main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel"},
+      h("h2", {}, t("managed_browser_connected")),
+      h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
+      h("p", {class: "muted"}, t("managed_browser_help")),
+      h("button", {class: "secondary", onclick: () => {disconnect(); route();}}, t("disconnect"))));
+    return mountTailscale(main, {h, t});
+  }
   const input = h("input", { type: "password", autocomplete: "off", placeholder: "batc_…" });
   const remember = h("input", { type: "checkbox" });
   const info = h("p", { class: "muted" });
@@ -2088,6 +2322,73 @@ function viewSettings(main) {
   return mountTailscale(main, {h, t});
 }
 
+async function viewManagedSettings(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const guard = () => assertView(connection);
+  const status = h("div", {role: "status"});
+  const local = h("section", {class: "panel"}, h("h2", {}, t("managed_browser_connected")),
+    h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
+    h("p", {class: "muted"}, t("managed_background_help")),
+    h("details", {"data-managed-locations": ""}, h("summary", {}, t("managed_locations")),
+      h("p", {class: "muted"}, t("managed_locations_central")),
+      h("p", {class: "muted"}, t("managed_locations_work"))), status);
+  main.append(h("h1", {}, t("nav_settings")), local);
+  const setup = managedSetupPanel({h, t, api, guard, namespace: state.namespace, errorBox, opStatus, caps: () => state.caps,
+    onConfigured: async () => {const caps = await api("GET", "/capabilities"); guard(); state.caps = caps;}});
+  main.append(setup.box);
+  await setup.load();
+  try {guard();} catch (error) {
+    setup.dispose();
+    if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(error.code)) return;
+    throw error;
+  }
+  const fleetRoot = h("div"); main.append(fleetRoot);
+  let disposeFleet;
+  if (nativeDesktop) {
+    const login = h("input", {type: "checkbox", disabled: true});
+    const open = h("button", {class: "secondary", onclick: async () => {
+      open.disabled = true;
+      try {guard(); await managedControl({action: "open_browser"}); guard(); status.replaceChildren();}
+      catch (error) {if (connection.generation === generation) status.replaceChildren(errorBox(error));}
+      finally {open.disabled = false;}
+    }}, t("managed_open_browser"));
+    local.append(h("div", {class: "actions"}, open, h("label", {}, login, " ", t("managed_start_login"))));
+    try {const state = await managedControl({action: "status"}); guard(); login.checked = !!state.login_enabled; login.disabled = false;}
+    catch (error) {status.replaceChildren(errorBox(error));}
+    login.addEventListener("change", async () => {
+      const wanted = login.checked; login.disabled = true;
+      try {guard(); const result = await managedControl({action: "set_login", enabled: wanted}); guard(); login.checked = !!result.login_enabled;}
+      catch (error) {if (connection.generation === generation) {login.checked = !wanted; status.replaceChildren(errorBox(error));}}
+      finally {login.disabled = false;}
+    });
+    try {
+      const native = await nativeStatus(); guard();
+      if (native.configuration_source === "managed" && native.configuration_setup) {
+        const draft = state.nativeSetupDraft ||= {endpoint: "", expected_actor: ""};
+        const endpoint = h("input", {type: "url", value: draft.endpoint, required: true, maxlength: 512,
+          autocomplete: "off", oninput: event => {draft.endpoint = event.target.value;}});
+        const actor = h("input", {value: draft.expected_actor, required: true, maxlength: 200,
+          autocomplete: "off", oninput: event => {draft.expected_actor = event.target.value;}});
+        const review = h("button", {type: "submit", class: "secondary"}, t("desktop_setup_review"));
+        const form = h("form", {onsubmit: event => {
+          event.preventDefault(); if (state.nativeBusy || !form.reportValidity()) return;
+          guard(); review.disabled = true;
+          return nativeTransition("configure", {endpoint: endpoint.value.trim(), expected_actor: actor.value.trim(), contract_version: "2026-10-08"});
+        }}, h("p", {class: "muted"}, t("managed_join_help")),
+          h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint),
+            h("label", {}, t("desktop_expected_actor"), actor)), review);
+        main.append(h("details", {class: "panel", "data-managed-join": ""}, h("summary", {}, t("managed_join_existing")), form));
+      }
+    } catch (error) {if (connection.generation === generation) status.append(errorBox(error));}
+    disposeFleet = await mountFleet(fleetRoot, {h, t});
+  } else {
+    local.append(h("p", {class: "muted"}, t("managed_browser_help")),
+      h("button", {class: "secondary", onclick: () => {disconnect(); route();}}, t("disconnect")));
+  }
+  const disposeTailscale = mountTailscale(fleetRoot, {h, t});
+  return () => {setup.dispose(); disposeFleet?.(); disposeTailscale();};
+}
+
 // Credential dialogs and protected storage stay native. A transition invalidates old async
 // forms immediately, but cancellation restores the existing account and its identity-scoped drafts.
 async function nativeTransition(kind, config = null) {
@@ -2101,7 +2402,7 @@ async function nativeTransition(kind, config = null) {
     if (kind === "configure") {
       const saved = await nativeSetupConfiguration(config);
       if (attempt !== state.nativeAttempt) return;
-      if (saved) {state.nativeSetupDraft = null; state.connectionNotice = t("desktop_setup_saved");}
+      if (saved) {disconnect(); state.nativeSetupDraft = null; state.connectionNotice = t("desktop_setup_saved");}
       else {state.online = previousOnline; state.connectionNotice = t("desktop_setup_cancelled");}
     } else if (kind === "disconnect" || kind === "reload" || kind === "forget") {
       disconnect(); // invalidate caches/old forms before native can load another endpoint
@@ -2207,7 +2508,11 @@ async function viewNativeSettings(main) {
       }}, h("p", {}, t("desktop_setup_help")),
         h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)),
         h("p", {class: "muted"}, t("desktop_setup_origin")), h("div", {class: "actions"}, review));
-      setup.append(form);
+      if (status.configuration_source === "managed" && status.error) {
+        setup.append(h("h3", {}, t("managed_recovery_title")), h("p", {}, t("managed_recovery_help")),
+          h("details", {}, h("summary", {}, t("managed_join_existing")), form));
+        introduction.hidden = true;
+      } else setup.append(form);
       // Keep configuration recovery accessible without making it compete with the first step.
       connectionDetails.append(h("div", {class: "actions"}, reload));
     }
@@ -2215,7 +2520,7 @@ async function viewNativeSettings(main) {
     row("desktop_expected_actor", status.expected_actor);
     if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
     if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-    if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
+    if (status.error && (!status.configuration_setup || status.configuration_source === "managed")) info.append(errorBox(new Error(status.error)));
     else if (!status.credential_available && !status.configuration_setup) info.append(h("p", {}, t("desktop_credential_missing")));
     platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help")
       : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
@@ -2285,7 +2590,7 @@ function orderButtons(sibs, i, key, run) {
   const swap = j => () => {
     const before = sibs.map(x => x[key]);
     const order = before.slice(); [order[i], order[j]] = [order[j], order[i]];
-    run("order", before, order);
+    run("order", before, order, Object.fromEntries(sibs.map(x => [x[key], x.version])));
   };
   const can = j => j >= 0 && j < sibs.length && sibs[j].pinned === me.pinned;
   return [h("button", { class: "mini", title: t("move_up"), "aria-label": t("move_up"), disabled: !can(i - 1), onclick: swap(i - 1) }, "↑"),
@@ -2301,13 +2606,21 @@ function setEditing(n) {
   if (!editing && idleReload) { const fn = idleReload; idleReload = null; fn(); }
 }
 function drawer(...children) {
-  const box = h("div", { class: "drawer", hidden: true }, ...children);
-  const toggle = h("button", { class: "mini", title: t("more"), "aria-label": t("more"), onclick: () => {
+  const box = h("div", { class: "drawer", id: `drawer-${crypto.randomUUID()}`, hidden: true }, ...children);
+  const toggle = h("button", { class: "mini", title: t("more"), "aria-label": t("more"),
+    "aria-controls": box.id, "aria-expanded": "false", onclick: () => {
     box.hidden = !box.hidden;
+    toggle.setAttribute("aria-expanded", String(!box.hidden));
     if (!box.hidden) drawerOpens += 1;
     setEditing(editing + (box.hidden ? -1 : 1));
   } }, "…");
-  const open = () => { if (box.hidden) toggle.click(); };
+  const open = (focus = false) => {
+    if (box.hidden) toggle.click();
+    if (focus) box.querySelector("input:not(:disabled),textarea:not(:disabled),select:not(:disabled),button:not(:disabled),a")?.focus();
+  };
+  box.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !event.isComposing) {event.preventDefault(); if (!box.hidden) toggle.click(); toggle.focus();}
+  });
   return { box, toggle, open, close: () => { if (!box.hidden) toggle.click(); } };
 }
 function freshPage() { editing = 0; idleReload = null; } // a render rebuilt every drawer closed
@@ -2349,42 +2662,30 @@ function liveReload(fn, kinds, prepare = null) {
 
 async function viewProjects(main) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const out = h("div", {});
   const tree = h("div", { class: "panel" });
   const archived = h("div", {});
-  const name = h("input", { placeholder: t("new_project_name"), "aria-label": t("new_project_name"), maxlength: 80, required: true });
-  const repositories = [...new Set((state.caps?.features?.repository_sync || []).map(binding => binding.repository))].sort();
-  const repository = h("select", {"aria-label": t("project_repository_optional")},
-    h("option", {value: ""}, t("project_repository_later")),
-    ...repositories.map(value => h("option", {value}, value)));
-  const add = h("button", { class: "primary", type: "submit", disabled: !may("manage") }, t("add_project"));
-  const create = async event => {
-    event.preventDefault();
-    if (add.disabled || !name.value.trim()) return;
-    add.disabled = true;
-    const params = {name: name.value.trim(), ...(repository.value ? {repositories: [repository.value]} : {})};
-    const op = await change(out, "project.create", {}, params, {}, "project.create");
-    add.disabled = false;
-    if (op) { name.value = ""; location.hash = `#/project/${op.result.project_id}`; }
-  };
-  const fields = h("div", {class: "capture-fields"}, h("label", {}, t("new_project_name"), name),
-    ...(repositories.length ? [h("label", {}, t("project_repository_optional"), repository)] : []));
+  const create = createRecordForm({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    namespace: connection.namespace, kind: "project", errorBox, opStatus,
+    onCreated: async op => {location.hash = `#/project/${op.result.project_id}`;}});
   const showArchived = h("input", { type: "checkbox" });
   main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "",
-    h("form", {class: "panel", onsubmit: create}, fields, h("div", {class: "actions"}, add)), out, tree,
+    create.box, out, tree,
     h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
     try {
       const data = await api("GET", `/projects${showArchived.checked ? "?include_archived=true" : ""}`);
       if (!tree.isConnected) return;
+      create.setContext({rows: data.projects});
       if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
       freshPage();
       const rows = [];
       const walk = (sibs, depth, parent) => sibs.forEach((p, i) => {
         const msg = out; // outside the tree: it survives the re-render below
-        const run = async (what, before, order) => {
-          if (what === "order") await change(msg, "project.order", {}, { parent_id: parent, order }, { before }, `project.order.${parent}`);
+        const run = async (what, before, order, versions) => {
+          if (what === "order") await change(msg, "project.order", {}, { parent_id: parent, order }, { before, expected_versions: versions }, `project.order.${parent}`);
           else await change(msg, "project.pin", { project_id: p.project_id }, { pinned: !before }, { before }, `project.pin.${p.project_id}`);
           render();
         };
@@ -2406,12 +2707,16 @@ async function viewProjects(main) {
               { expected_version: p.version }, `project.archive.${p.project_id}`);
             if (ok || STALE.includes(lastFailure)) render();
           } }, t("archive"))));
-        rows.push(indent(h("div", { class: "row tree" },
+        const row = indent(h("div", { class: "row tree" },
           h("div", { class: "grow" }, h("a", { class: "title", href: `#/project/${p.project_id}` }, p.name),
             p.description ? h("div", { class: "muted clamp" }, p.description) : null),
           ...counts(p.counts),
-          may("manage") ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "project_id", run), d.toggle) : null), depth),
-        d.box);
+          may("manage") ? h("span", { class: "tree-actions" }, d.toggle) : null), depth);
+        if (may("manage")) d.box.prepend(h("div", {class: "actions"}, ...orderButtons(sibs, i, "project_id", run)));
+        if (may("manage")) row.querySelector(".tree-actions").prepend(treeInteractions({h, t, row, scope: `${connection.namespace}.project.${parent}`,
+          siblings: sibs, index: i, key: "project_id", run, open: () => d.open(true), guard: () => assertView(connection),
+          editing: active => setEditing(editing + (active ? 1 : -1))}));
+        rows.push(row, d.box);
         walk(p.children, depth + 1, p.project_id);
       });
       walk(data.projects, 0, "");
@@ -2432,6 +2737,7 @@ async function viewProjects(main) {
 
 async function viewProject(main, pid) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   let draft = null; // the project form's values after a stale save, put back into the reloaded form
   const head = h("div", { class: "panel" });
   const items = h("div", { class: "panel" });
@@ -2439,15 +2745,10 @@ async function viewProject(main, pid) {
   const out = h("div", {});
   const archived = h("div", {});
   const showArchived = h("input", { type: "checkbox" });
-  const title = h("input", { placeholder: t("new_item_title"), maxlength: 120 });
-  const add = h("button", { class: "primary", disabled: !may("manage"), onclick: async () => {
-    if (!title.value.trim()) return;
-    add.disabled = true;
-    const op = await change(out, "work_item.create", { project_id: pid }, { title: title.value.trim() }, {}, `wi.create.${pid}`);
-    add.disabled = false;
-    if (op) { title.value = ""; render(); }
-  } }, t("add_item"));
-  main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items,
+  const create = createRecordForm({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    namespace: connection.namespace, kind: "work_item", projectId: pid, errorBox, opStatus,
+    onCreated: async () => render()});
+  main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), create.box, items,
     h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
@@ -2458,6 +2759,7 @@ async function viewProject(main, pid) {
     if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
     freshPage();
     const p = data.project;
+    create.setContext({rows: data.work_items, name: p.name, active: !p.archived});
     work.hidden = !Array.isArray(data.work);
     fill(work, h("h2", {}, t("delivery_project_work")),
       ...(data.work?.length ? data.work.map(item => deliveryWork(item, p.repositories)) : [h("p", {class: "muted"}, t("delivery_no_work"))]));
@@ -2483,7 +2785,8 @@ async function viewProject(main, pid) {
       h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")),
         ...data.path.flatMap(x => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])),
       h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null),
-      p.description ? h("p", { class: "pre" }, p.description) : null,
+      p.description ? h("details", {}, h("summary", {}, t("description"), " · ", p.description.replace(/\s+/g, " ").slice(0, 140), p.description.length > 140 ? "…" : ""),
+        h("p", {class: "pre"}, p.description)) : null,
       h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map(r => chip(r)),
         !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {class: "session-project-link", href: `#/dispatch/${pid}`}, t("dispatch_title")) : null,
         p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null),
@@ -2494,8 +2797,8 @@ async function viewProject(main, pid) {
     const rows = [];
     const walk = (sibs, depth, parent) => sibs.forEach((w, i) => {
       const rowMsg = out; // outside the tree: it survives the re-render below
-      const run = async (what, before, order) => {
-        if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, { parent_id: parent, order }, { before }, `wi.order.${pid}.${parent}`);
+      const run = async (what, before, order, versions) => {
+        if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, { parent_id: parent, order }, { before, expected_versions: versions }, `wi.order.${pid}.${parent}`);
         else await change(rowMsg, "work_item.pin", { work_item_id: w.work_item_id }, { pinned: !before }, { before }, `wi.pin.${w.work_item_id}`);
         render();
       };
@@ -2515,13 +2818,17 @@ async function viewProject(main, pid) {
           if (ok || STALE.includes(lastFailure)) render();
         } }, t("archive_with_children"))));
       const done = w.steps.filter(s => s.done).length;
-      rows.push(indent(h("div", { class: "row tree" }, stateChip(w.completion),
+      const row = indent(h("div", { class: "row tree" }, stateChip(w.completion),
         h("div", { class: "grow" }, h("a", { class: "title", href: `#/item/${w.work_item_id}` }, w.title),
           w.derived_from ? h("span", { class: "muted" }, " ⑂") : null),
         w.steps.length ? chip(`${done}/${w.steps.length}`) : null,
         w.completion.pending ? chip(t("needs_decision"), "warn") : null,
-        may("manage") && !p.archived ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "work_item_id", run), dr.toggle) : null), depth),
-      dr.box);
+        may("manage") && !p.archived ? h("span", { class: "tree-actions" }, dr.toggle) : null), depth);
+      if (may("manage") && !p.archived) dr.box.prepend(h("div", {class: "actions"}, ...orderButtons(sibs, i, "work_item_id", run)));
+      if (may("manage") && !p.archived) row.querySelector(".tree-actions").prepend(treeInteractions({h, t, row,
+        scope: `${connection.namespace}.item.${pid}.${parent}`, siblings: sibs, index: i, key: "work_item_id", run,
+        open: () => dr.open(true), guard: () => assertView(connection), editing: active => setEditing(editing + (active ? 1 : -1))}));
+      rows.push(row, dr.box);
       walk(w.children, depth + 1, w.work_item_id);
     });
     walk(data.work_items, 0, "");
@@ -2533,7 +2840,6 @@ async function viewProject(main, pid) {
           { expected_version: w.version }, `wi.restore.${w.work_item_id}`);
         render();
       } }, t("restore")))));
-    add.disabled = !may("manage") || p.archived;
   };
   showArchived.onchange = () => render();
   await render();
@@ -2606,7 +2912,9 @@ async function viewWorkItem(main, wid) {
   const ref = h("input", { placeholder: t("link_ref_hint") });
   kind.onchange = () => { ref.placeholder = t("link_ref_" + kind.value); };
   kind.onchange();
-  main.append(manageNote() || "", notice, reading, panel);
+  const results = state.caps?.features?.work_item_results?.version === 1 ? resultSourcesPanel({h, t, api,
+    guard: () => assertView(connection), workItemId: wid, linkTarget, onEvents, errorBox}) : null;
+  main.append(manageNote() || "", notice, reading, results?.box || "", panel);
   let displayedItem = null, renderQueue = Promise.resolve();
   const showReading = (w, progress) => {
     const readingSupported = state.caps?.features?.work_item_reads?.version === 1 && progress;
@@ -2688,7 +2996,9 @@ async function viewWorkItem(main, wid) {
         if (!ok && STALE.includes(lastFailure)) draft = params;
         if (ok || draft) render();
       } }, t("save"))));
-    const section = (label, text) => text ? [h("h2", {}, label), h("div", { class: "panel pre" }, text)] : [];
+    const section = (label, text) => text ? [h("details", {class: "panel"},
+      h("summary", {}, label, " · ", text.replace(/\s+/g, " ").slice(0, 140), text.length > 140 ? "…" : ""),
+      h("div", {class: "pre"}, text))] : [];
     // steps: checking one is an edit like any other (an unchecked step reopens a done item)
     const setSteps = async (steps, added) => {
       if (await update({ steps }, `wi.steps.${wid}`) && added) newStep.value = "";
@@ -2713,7 +3023,7 @@ async function viewWorkItem(main, wid) {
     const linkRows = data.links.map(l => h("div", { class: "row" }, chip(t("link_" + l.kind)),
       h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null,
         h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)),
-      l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice) : null,
+      l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice, data.children) : null,
       live && may("manage") ? h("button", { class: "mini", title: t("remove"), "aria-label": t("remove"),
         onclick: () => link({ kind: l.kind, ref: l.ref, remove: true }, `wi.unlink.${wid}.${l.kind}.${l.ref}`) }, "×") : null));
     const brief = x => h("div", { class: "row" }, chip(t("wi_state_" + x.display_state)),
@@ -2746,12 +3056,20 @@ async function viewWorkItem(main, wid) {
     if (draft) { draft = null; d.open(); }
   };
   await render();
-  return liveReload(render, event => observationAffected("work_item", wid, event), refreshSafety);
+  const repair = /^op_[0-9a-f]{32}$/.test(displayedItem?.operation_id) && state.caps?.features?.managed_repairs?.version === 1 ? repairWorkItemPanel({h, t, api,
+    guard: () => assertView(connection), projectId: displayedItem.project_id, workItemId: wid, originOperationId: displayedItem.operation_id, errorBox}) : null;
+  if (repair) {panel.before(repair.box); await repair.refresh();}
+  try {assertView(connection);} catch {repair?.dispose(); results?.dispose(); return;}
+  const offRepair = repair ? onEvents(event => {
+    if (event.resource_type === "operation" || observationAffected("work_item", wid, event)) return repair.refresh();
+  }) : null;
+  const off = liveReload(render, event => observationAffected("work_item", wid, event), refreshSafety);
+  return () => {off?.(); offRepair?.(); repair?.dispose(); results?.dispose();};
 }
 
 // Start agent work from a linked checkpoint, with this item's words as the instructions; the new operation is
 // linked back so the item lists the run.
-function continueFrom(w, checkpointId, notice) {
+function continueFrom(w, checkpointId, notice, children = []) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const text = [w.title, w.goal, w.request && `${t("request")}:\n${w.request}`, w.acceptance && `${t("acceptance")}:\n${w.acceptance}`,
     w.steps.length ? `${t("steps_title")}:\n${w.steps.map(s => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""]
@@ -2763,13 +3081,15 @@ function continueFrom(w, checkpointId, notice) {
   draft.bindFields({agent});
   let expectedHead = null;
   const go = h("button", { class: "primary", onclick: async () => {
+    const instructions = instr.value.trim() ? instr.value : (draft.refs().length ? t("dispatch_inspect_images") : "");
+    if (!instructions) return;
     go.disabled = true;
     let op;
     try {
       if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
       if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
       op = await draft.perform("checkpoint.continue", { checkpoint_id: checkpointId },
-          { instructions: instr.value, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs(), work_item_id: w.work_item_id} : {}) },
+          { instructions, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs(), work_item_id: w.work_item_id} : {}) },
           state.caps?.artifacts ? { expected_source_head_sha: expectedHead, expected_work_item_fingerprint: w.completion.fingerprint } : {}, `continue.${checkpointId}`);
     } catch (e) { fill(out, errorBox(e)); go.disabled = false; return; }
     assertView(connection);
@@ -2785,7 +3105,10 @@ function continueFrom(w, checkpointId, notice) {
   } }, t("start_agent_work"));
   const note = confinementNote(w.links?.find(l => l.ref === checkpointId)?.target?.host, agent);
   api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then(x => note.setHost(x.checkpoint.host)).catch(() => {});
-  const d = drawer(note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
+  const unfinished = children.filter(child => child.display_state !== "done");
+  const caution = unfinished.length ? h("p", {class: "note warn"}, t("results_unfinished", {count: unfinished.length}), " ",
+    ...unfinished.flatMap((child, index) => [index ? " · " : "", h("a", {href: `#/item/${encodeURIComponent(child.work_item_id)}`}, child.title)])) : null;
+  const d = drawer(caution, note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
   // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
   const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
   const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: async () => { d.toggle.click();
@@ -3081,6 +3404,7 @@ async function viewApprovals(main) {
 async function viewStart(main) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = sessionStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    submitPreference: submit,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
     storageKey: `batc.start.${connection.namespace}`});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
@@ -3110,6 +3434,7 @@ async function viewOrchestration(main, selectedMode = "relay", host, sid) {
 async function viewPublished(main) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    submitPreference: submit,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus, storageKey: `batc.published.${connection.namespace}`,
     attachmentFactory: (prompt, changed) => attachmentDraft("published", prompt, [], false, changed)});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("pub_title")),
@@ -3121,14 +3446,32 @@ async function viewPublished(main) {
   return () => {offOnline(); offEvents();};
 }
 
-async function viewProjectDispatch(main, pid) {
+async function viewProjectDispatch(main, pid, repairWid = null) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  let repairSeed = null;
+  if (repairWid) {
+    try {
+      if (!/^wi_[0-9a-f]{20}$/.test(repairWid) || state.caps?.features?.managed_repairs?.version !== 1) throw new Error(t("repair_unavailable"));
+      const record = await api("GET", `/work-items/${repairWid}/repair`); assertView(connection);
+      validateRepairRecord(record, pid, repairWid);
+      if (record.dispatch_operation_id) {
+        main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")),
+          h("a", {href: `#/op/${record.dispatch_operation_id}`}, t("repair_open_dispatch")));
+        return;
+      }
+      repairSeed = repairDispatchSeed(record);
+    } catch (error) {
+      if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+      return;
+    }
+  }
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    submitPreference: submit, repairSeed,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus, project: pid,
-    storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
-    attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)});
+    storageKey: `batc.dispatch.${connection.namespace}.${pid}${repairWid ? "." + repairWid : ""}`,
+    attachmentFactory: repairSeed ? null : (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)});
   main.append(h("a", {href: `#/project/${pid}`}, t("dispatch_back")), h("h1", {}, t("dispatch_title")),
-    h("p", {class: "muted"}, t("dispatch_intro")), panel.box);
+    h("p", {class: "muted"}, t(repairSeed ? "repair_dispatch_help" : "dispatch_intro")), panel.box);
   try {await panel.init();} catch { /* original intent and project read failure remain visible */ }
   try {assertView(connection);} catch {return;}
   const offOnline = onOnline(() => {try {assertView(connection); panel.update();} catch { /* retired view */ }});
@@ -3199,16 +3542,18 @@ async function viewProjectWork(main, pid, kind, id) {
 
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["artifact-review", "ar_nav"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
-let workspaceNav = null, workspaceIdentity = "";
+let workspaceNav = null, workspaceIdentity = "", workspaceSidebar = null;
 function mountWorkspace(name) {
   const identity = state.token ? `${state.epoch}:${state.namespace}` : "";
   if (workspaceIdentity !== identity) {
+    workspaceSidebar?.dispose(); workspaceSidebar = null;
     workspaceNav?.dispose(); workspaceNav = null; workspaceIdentity = identity;
     if (identity) {
       const connection = {epoch: state.epoch, namespace: state.namespace};
       workspaceNav = workspaceNavigation({h, t, api, guard: () => assertConnection(connection), onEvents,
         namespace: state.namespace, errorBox});
       document.getElementById("workspace").prepend(workspaceNav.box);
+      workspaceSidebar = setupSidebarResizer({ aside: workspaceNav.box, workspace: document.getElementById("workspace"), t });
     }
   }
   document.body.classList.toggle("has-workspace", Boolean(state.token));
@@ -3234,7 +3579,8 @@ async function route() {
   state.viewReady = false;
   if (teardown) { teardown(); teardown = null; }
   freshPage();
-  const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+  let [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+  if (name === "home" && state.token && state.caps?.managed_installation && !state.caps.hosts?.length) name = "settings";
   mountWorkspace(name);
   const main = document.getElementById("main");
   main.replaceChildren();
@@ -3251,7 +3597,20 @@ async function route() {
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
   if (mine !== generation) { if (off) off(); return; } // the user navigated away while this view loaded
-  teardown = off || null;
+  let preferences, skills;
+  if (name === "settings" && state.caps?.features?.host_preferences?.version === 1) {
+    const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+    preferences = modelPreferencesPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
+      storageKey: `batc.model-preferences.${connection.namespace}`, onEvents, errorBox});
+    main.append(preferences.box);
+  }
+  if (name === "project" && state.caps?.features?.project_skills?.version === 1) {
+    const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+    skills = projectSkillsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
+      projectId: rest[0], storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`, onEvents, errorBox});
+    main.append(skills.box);
+  }
+  teardown = () => {off?.(); preferences?.dispose(); skills?.dispose();};
   state.viewReady = true;
 }
 
@@ -3280,7 +3639,9 @@ async function start() {
       }
     } finally { if (attempt === state.nativeAttempt) state.nativeBusy = false; }
   } else {
-    state.token = loadToken();
+    const browserSession = await restoreBrowserSession().catch(() => false);
+    if (browserSession) clearToken();
+    state.token = browserSession ? browserSessionToken : loadToken();
     if (state.token) {
       try { await activate(await api("GET", "/capabilities")); }
       catch { state.token = null; }

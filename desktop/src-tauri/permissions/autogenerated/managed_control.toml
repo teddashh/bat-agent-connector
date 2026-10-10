@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-managed-control"
+description = "Enables the managed_control command without any pre-configured scope."
+commands.allow = ["managed_control"]
+
+[[permission]]
+identifier = "deny-managed-control"
+description = "Denies the managed_control command without any pre-configured scope."
+commands.deny = ["managed_control"]

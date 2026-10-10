@@ -117,12 +117,18 @@ class ApiV1:
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
+        from . import managed_repairs, product_preferences, project_skills
+        managed_repairs.install(daemon.ops)
+        product_preferences.install(daemon.ops)
+        project_skills.install(daemon.ops)
         from .session_observation import SessionObservation
         self.session_observation = SessionObservation(daemon)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("GET", r"/api/v1/managed/setup", self.managed_setup_state, "manage"),
+            ("POST", r"/api/v1/managed/setup/secrets", self.managed_setup_secret, "manage"),
             ("POST", r"/api/v1/approval-previews", self.approval_preview, "observe"),
             ("POST", r"/api/v1/repository-previews", self.repository_preview, "observe"),
             ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
@@ -139,12 +145,14 @@ class ApiV1:
             ("GET", r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)", self.artifact, "observe"),
             ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
             ("GET", r"/api/v1/hosts", self.hosts, "observe"),
+            ("GET", r"/api/v1/hosts/(?P<host>[^/]+)/preferences", self.host_preferences, "observe"),
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)", self.session, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/messages", self.messages, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/wait", self.session_wait, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/history", self.session_history, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/relations", self.session_relations, "observe"),
+            ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/instructions", self.session_instructions, "observe"),
             ("GET", r"/api/v1/hosts/(?P<host>[^/]+)/discovery", self.discovery, "observe"),
             ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})", self.worktree, "observe"),
             ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})/history", self.worktree_history, "observe"),
@@ -163,6 +171,8 @@ class ApiV1:
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/checkpoint-preview", self.checkpoint_preview,
              "observe"),
             ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
+            ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls",
+             self.pulls_list, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
             ("GET", r"/api/v1/delivery/previews/(?P<pv>mpv_[0-9a-f]{32})", self.merge_preview, "observe"),
@@ -177,6 +187,10 @@ class ApiV1:
             ("GET", r"/api/v1/integrations/(?P<op>op_[0-9a-f]{32})", self.integration, "observe"),
             ("GET", r"/api/v1/projects", self.projects, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})", self.project, "observe"),
+            ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})/skills", self.project_skills, "observe"),
+            ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})/repair-evidence", self.repair_evidence, "observe"),
+            ("GET", r"/api/v1/work-items/(?P<wid>wi_[0-9a-f]{20})/repair", self.work_item_repair, "observe"),
+            ("GET", r"/api/v1/work-items/(?P<wid>wi_[0-9a-f]{20})/result-sources", self.work_item_results, "observe"),
             ("GET", r"/api/v1/work-items", self.work_items, "observe"),
             ("GET", r"/api/v1/work-items/(?P<wi>wi_[0-9a-f]{20})", self.work_item, "observe"),
         ]
@@ -194,6 +208,16 @@ class ApiV1:
         try:
             if not _host_is_loopback(headers.get("host", "")):
                 raise ApiError(400, "BAD_HOST", "Host must be a loopback address")
+            parts = urlsplit(target)
+            path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
+            browser = getattr(self, "browser_sessions", None)
+            if browser and path == "/api/v1/browser-handoff" and method == "POST":
+                await browser.consume(headers, reader, writer)
+                return
+            if browser and path == "/api/v1/managed/identity" and method == "GET":
+                payload = self.daemon.managed_proof(self._q(query, "challenge", ""), headers.get("host"))
+                await self._send_json(writer, 200, payload)
+                return
             origin = headers.get("origin")
             if origin and not _origin_ok(origin, self.allowed_origins):
                 raise ApiError(403, "BAD_ORIGIN", "origin is not allowed")
@@ -209,12 +233,14 @@ class ApiV1:
                 with contextlib.suppress(Exception):
                     await writer.drain()
                 return
-            parts = urlsplit(target)
-            path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
+            token = self._bearer(headers)
+            if not token and browser:
+                token = browser.credential(method, headers,
+                    bootstrap=method == "GET" and path == "/api/v1/browser-session")
             content = re.fullmatch(r"/api/v1/artifacts/uploads/(?P<op>op_[0-9a-f]{32})/content", path)
             download = re.fullmatch(r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)/content", path)
             if content or download:
-                principal = api_auth.authenticate(self.daemon.journal.db, self._bearer(headers), self.daemon._admin_token)
+                principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
                 if principal is None:
                     raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
                 if content:
@@ -241,8 +267,41 @@ class ApiV1:
                     await writer.drain()
                 return
             body = await self._read_body(method, headers, reader)
-            token = self._bearer(headers)
+            if method == "POST" and getattr(self.daemon, "managed_stopping", False):
+                raise ApiError(503, "SERVICE_STOPPING", "owned service is stopping; reopen Dashboard to reconnect")
             principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
+            if browser and path in {"/api/v1/browser-session", "/api/v1/browser-session/logout",
+                                    "/api/v1/managed/browser-file", "/api/v1/managed/stop"}:
+                if principal is None:
+                    raise ApiError(401, "UNAUTHORIZED", "open Dashboard from the desktop menu")
+                if path == "/api/v1/browser-session" and method == "GET":
+                    payload = browser.describe(token)
+                elif path == "/api/v1/browser-session/logout" and method == "POST":
+                    browser.describe(token)  # only a browser credential can be signed out here
+                    browser.revoke(token)
+                    payload = {"signed_out": True}
+                elif path == "/api/v1/managed/browser-file" and method == "POST" and self._bearer(headers):
+                    if principal.actor != self.daemon.managed_installation["actor"]:
+                        raise ApiError(403, "FORBIDDEN", "browser entry belongs to the installation owner")
+                    payload = browser.create_handoff(principal)
+                elif path == "/api/v1/managed/stop" and method == "POST" and self._bearer(headers):
+                    if principal.actor != self.daemon.managed_installation["actor"]:
+                        raise ApiError(403, "FORBIDDEN", "service belongs to the installation owner")
+                    db = self.daemon.journal.db
+                    if db.execute("SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                        raise ApiError(409, "SERVICE_BUSY", "finish or reconcile current operations before stopping")
+                    if db.execute("SELECT 1 FROM tasks WHERE state NOT IN ('done','failed') LIMIT 1").fetchone():
+                        raise ApiError(409, "SERVICE_BUSY", "finish or pause service shutdown until current tasks settle")
+                    if self.daemon._active_ticks or self.daemon.ops._active:
+                        raise ApiError(409, "SERVICE_BUSY", "current work is still running")
+                    payload = {"protocol": 1, "stopped": True}
+                    self.daemon.managed_stopping = True
+                    # Reply is written before the ordinary service shutdown cancels background loops.
+                    asyncio.get_running_loop().call_later(0.1, self.daemon.managed_stop.set)
+                else:
+                    raise ApiError(405, "METHOD_NOT_ALLOWED", "method not allowed")
+                await self._send_json(writer, 200, payload)
+                return
             if principal is None and method == "POST" and path == "/api/v1/operations":
                 principal = self.daemon.capability_principal(
                     token, body.get("action"), body.get("target") or {},
@@ -265,6 +324,10 @@ class ApiV1:
                 query = parse_qs(parts.query, keep_blank_values=True)
                 kwargs.update(reader=reader, writer=writer,
                               check_authorization=authorizer(self.daemon, token, principal))
+            if fn in {self.repair_evidence, self.work_item_repair, self.session_instructions,
+                      self.host_preferences, self.project_skills, self.work_item_results}:
+                # Empty or repeated selectors cannot silently become defaults.
+                query = parse_qs(parts.query, keep_blank_values=True)
             status, payload = await fn(principal=principal, query=query, body=body, headers=headers, **kwargs)
         except dashboard_sync.ResetRequired as e:
             status, payload = 409, e.document()
@@ -302,10 +365,11 @@ class ApiV1:
                 body = (resources.files(__package__) / "dashboard" / name).read_bytes()
             else:
                 status, ctype, body = 404, "text/plain; charset=utf-8", b"not found\n"
+        referrer_policy = "same-origin" if getattr(self, "browser_sessions", None) else "no-referrer"
         head = (f"HTTP/1.1 {status} {_REASONS[status]}\r\n"
                 f"Content-Type: {ctype}\r\nContent-Length: {len(body)}\r\n{extra}"
                 f"Cache-Control: no-cache\r\nContent-Security-Policy: {DASHBOARD_CSP}\r\n"
-                "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+                f"X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: {referrer_policy}\r\n"
                 "Cross-Origin-Opener-Policy: same-origin\r\nConnection: close\r\n\r\n")
         writer.write(head.encode() + (b"" if method == "HEAD" else body))
         with contextlib.suppress(Exception):
@@ -367,6 +431,15 @@ class ApiV1:
         values = query.get(name)
         return values[-1] if values else default
 
+    @staticmethod
+    def _exact_query(query, allowed):
+        if set(query) - set(allowed) or any(
+            len(values) != 1 or not values[0] or len(values[0]) > 2048
+            or any(ord(char) < 32 or ord(char) == 127 for char in values[0])
+            for values in query.values()
+        ):
+            raise ApiError(422, "INVALID_REQUEST", "use one nonempty value for each supported query field")
+
     def _int(self, query: dict, name: str, default: int) -> int:
         try:
             return int(self._q(query, name, default))
@@ -407,12 +480,17 @@ class ApiV1:
                                and (a.name not in {"artifact.capture", "artifact.capture.managed", "session.approve_pending"} or principal.allows("observe"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
+                  "profile_id": fleet.config.host(h).profile_id,
                   "orchestrate": fleet.orchestrate_enabled(h),
                   "managed_roots": list(fleet.config.host(h).managed_roots),
                   "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
                   "confinement": confinement.host_capability(fleet, h)}
                  for h in fleet.config.hosts]
-        return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
+        managed = getattr(self.daemon, "managed_installation", None)
+        managed_fields = {"managed_installation": {"installation_id": managed["installation_id"],
+                            "runtime_version": managed["runtime_version"], "background": True},
+                          "desktop_identity": dashboard_sync.identity(self.daemon.journal, principal)} if managed else {}
+        return 200, {**managed_fields, "actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "artifacts": {"limits": self.daemon.artifact_store.settings.limits(),
                                    "capture": {"manual_single_file": True, "managed_single_file": True, "snapshot": False,
@@ -434,6 +512,12 @@ class ApiV1:
                                   "project_dispatch": {"version": 1, "artifacts": True, "model": True},
                                   "execution_delivery": {"version": 1, "source_kinds": ["execution", "task_command"]},
                                   "work_item_reads": {"version": 1},
+                                  "session_reading": {"version": 1, "counts": "observed_history"},
+                                  "host_preferences": {"version": 1, "model_catalog": True, "usage": True, "personal_models": True},
+                                  "project_skills": {"version": 1, "pinned_selection": True, "application": False},
+                                  "work_item_results": {"version": 1},
+                                  "managed_repairs": {"version": 1, "fixed_evidence": True, "auto_launch": False},
+                                  "session_instructions": {"version": 1, "live_queue": False, "per_message_cancel": False},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
@@ -462,18 +546,41 @@ class ApiV1:
     async def repository_preview(self, principal, body, **_):
         return 200, {"preview": await repository_sync.preview(self.daemon.ops, principal, body)}
 
+    async def managed_setup_state(self, principal, query, **_):
+        from . import managed_setup
+        if query:
+            raise ApiError(422, "INVALID_REQUEST", "setup accepts no query")
+        return 200, managed_setup.state(self.daemon, principal)
+
+    async def managed_setup_secret(self, principal, query, body, **_):
+        from . import managed_setup
+        if query:
+            raise ApiError(422, "INVALID_REQUEST", "secret staging accepts no query")
+        return 200, managed_setup.stage_secret(self.daemon, principal, body)
+
+    async def work_item_results(self, principal, wid, query, **_):
+        from . import work_item_results
+        self._exact_query(query, {"after", "limit"})
+        limit = self._q(query, "limit", "50")
+        if not re.fullmatch(r"[0-9]{1,3}", limit):
+            raise ApiError(422, "INVALID_REQUEST", "limit must be 1-100")
+        return 200, work_item_results.read(self.daemon.ops, principal, wid,
+            limit=int(limit), after=self._q(query, "after"))
+
     async def approval_preview(self, principal, body, **_):
         from .bulk_approval import preview
         return 200, await preview(self.daemon.ops, principal, body)
 
     async def bootstrap(self, principal, **_):
+        from .session_reading import decorate
         # Cursor first. The following existing read models are live pages, not an atomic snapshot.
         sync = dashboard_sync.checkpoint(self.daemon.journal, principal)
         _, capabilities = await self.capabilities(principal)
         db = self.daemon.journal.db
         return 200, {"sync": sync, "capabilities": capabilities,
                      "snapshot": {"hosts": self.daemon.inventory.hosts_document(),
-                         "sessions": self.daemon.inventory.list_sessions(order="id", include_gone=True, limit=50),
+                         "sessions": decorate(self.daemon.journal, principal,
+                             self.daemon.inventory.list_sessions(order="id", include_gone=True, limit=50)),
                          "projects": work_items.projects_list(db, include_archived=True),
                          "work_items": work_items.work_items_list(db, include_archived=True, limit=50,
                              principal_id=sync["principal_id"]),
@@ -489,8 +596,46 @@ class ApiV1:
     async def hosts(self, query, **_):
         return 200, self.daemon.inventory.hosts_document(host=self._q(query, "host"), discovery=bool(self._bool(query, "discovery")), after=self._int(query, "after", 0), limit=self._int(query, "limit", 20))
 
-    async def sessions(self, query, **_):
-        return 200, self.daemon.inventory.list_sessions(
+    async def host_preferences(self, principal, host, query, **_):
+        from . import product_preferences
+        self._exact_query(query, {"agent", "session_id", "refresh"})
+        if self._q(query, "refresh", "false") not in {"0", "1", "true", "false"}:
+            raise ApiError(422, "INVALID_REQUEST", "refresh must be true or false")
+        return 200, await product_preferences.read(self.daemon.ops, principal, host,
+            agent=self._q(query, "agent"), session_id=self._q(query, "session_id"),
+            refresh=bool(self._bool(query, "refresh")))
+
+    async def project_skills(self, principal, prj, query, **_):
+        from . import project_skills
+        self._exact_query(query, {"host", "workspace_id", "refresh"})
+        if self._q(query, "refresh", "false") not in {"0", "1", "true", "false"}:
+            raise ApiError(422, "INVALID_REQUEST", "refresh must be true or false")
+        return 200, await project_skills.read(self.daemon.ops, principal, prj,
+            self._q(query, "host"), self._q(query, "workspace_id"), refresh=bool(self._bool(query, "refresh")))
+
+    async def repair_evidence(self, principal, prj, query, **_):
+        from . import managed_repairs
+        self._exact_query(query, {"kind", "host", "profile_id", "operation_id"})
+        return 200, managed_repairs.read(self.daemon.ops, principal, prj,
+                                         {key: values[0] for key, values in query.items()})
+
+    async def work_item_repair(self, principal, wid, query, **_):
+        from . import managed_repairs
+        self._exact_query(query, set())
+        return 200, managed_repairs.read_work_item(self.daemon.ops, principal, wid)
+
+    async def session_instructions(self, principal, host, sid, query, **_):
+        from . import session_instructions
+        self._exact_query(query, {"limit", "cursor"})
+        limit = self._q(query, "limit", "30")
+        if not re.fullmatch(r"[0-9]{1,3}", limit):
+            raise ApiError(422, "INVALID_REQUEST", "limit must be 1-100")
+        return 200, session_instructions.read(self.daemon.ops, principal, host, sid,
+                                             limit=int(limit), cursor=self._q(query, "cursor"))
+
+    async def sessions(self, query, principal, **_):
+        from .session_reading import decorate
+        return 200, decorate(self.daemon.journal, principal, self.daemon.inventory.list_sessions(
             host=self._q(query, "host"), provenance=self._q(query, "provenance"),
             api_access=self._q(query, "access"), attention=self._bool(query, "attention"),
             include_gone=bool(self._bool(query, "include_gone")), order=self._q(query, "order", "activity"),
@@ -498,13 +643,14 @@ class ApiV1:
             profile_id=self._q(query, "profile_id"), project_id=query.get("project_id"), work_item_id=self._q(query, "work_item_id"),
             execution_id=self._q(query, "execution_id"), provider=self._q(query, "provider"), has_tab=self._bool(query, "has_tab"),
             loaded=self._bool(query, "loaded"), streaming=self._bool(query, "streaming"), lifecycle=self._q(query, "lifecycle"),
-            stale=self._bool(query, "stale"), relation_scope=self._q(query, "relation_scope", "history"))
+            stale=self._bool(query, "stale"), relation_scope=self._q(query, "relation_scope", "history")))
 
     def _known_host(self, host: str) -> None:
         if host not in self.daemon.fleet.config.hosts:
             raise ApiError(404, "UNKNOWN_HOST", f"unknown host {host!r}")
 
-    async def session(self, query, host, sid, **_):
+    async def session(self, query, host, sid, principal, **_):
+        from .session_reading import decorate
         live = self._bool(query, "live")
         if live:
             self._known_host(host)
@@ -520,7 +666,7 @@ class ApiV1:
                 out["session"].update(confinement.session_fields(
                     host, sid, await service._meta(self.daemon.fleet.client(host), sid),
                     account=confinement.account_status(self.daemon.fleet, host)))
-        return 200, out
+        return 200, decorate(self.daemon.journal, principal, out)
 
     def _history(self, query, resource_type, resource_id):
         return self.daemon.inventory.observation.history(resource_type, resource_id,
@@ -591,9 +737,16 @@ class ApiV1:
     async def create_operation(self, principal, query, body, headers, **_):
         key = headers.get("idempotency-key") or body.get("idempotency_key")
         wait = parse_wait(self._q(query, "wait"))  # before anything is stored: a 422 must mean nothing happened
-        op, created = self.daemon.ops.create(
-            principal, action=body.get("action"), target=body.get("target"), params=body.get("params"),
-            preconditions=body.get("preconditions"), idempotency_key=key, entry="http")
+        try:
+            op, created = self.daemon.ops.create(
+                principal, action=body.get("action"), target=body.get("target"), params=body.get("params"),
+                preconditions=body.get("preconditions"), idempotency_key=key, entry="http")
+        except OperationError as error:
+            if body.get("action") not in {"setup.host", "setup.repository", "setup.verification"}:
+                raise
+            # This boundary is before a new durable setup operation exists. The UI
+            # may review invalid input again; lost transport replies still keep the key.
+            return error.status, {"error": {"code": error.code, "message": error.message, "admission_refused": True}}
         if wait > 0:
             op = await self.daemon.ops.wait(op["operation_id"], wait)
         return (202 if created else 200), {"operation": op, "created": created}
@@ -635,6 +788,12 @@ class ApiV1:
             token=self._q(query, "checkpoint"),
             resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"), kind=self._q(query, "kind"),
             related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))
+
+    async def pulls_list(self, owner, repo, query, **_):
+        from . import pr_list
+        if set(query) - {"state", "page"}:
+            raise ApiError(422, "INVALID_REQUEST", "unknown PR list query")
+        return 200, await pr_list.list_pulls(self.daemon.ops, f"{owner}/{repo}", self._q(query, "state", "open"), self._int(query, "page", 1))
 
     async def pull_preview(self, owner, repo, number, query, **_):
         return 200, {"pull_request": await integration.pr_card(
@@ -702,9 +861,10 @@ class ApiV1:
         return 200, work_items.projects_list(self.daemon.journal.db,
                                              include_archived=bool(self._bool(query, "include_archived")))
 
-    async def project(self, query, prj, **_):
-        return 200, work_items.project_get(self.daemon.journal.db, prj,
-                                           include_archived=bool(self._bool(query, "include_archived")), ops=self.daemon.ops)
+    async def project(self, query, prj, principal, **_):
+        from .session_reading import decorate
+        return 200, decorate(self.daemon.journal, principal, work_items.project_get(self.daemon.journal.db, prj,
+                                           include_archived=bool(self._bool(query, "include_archived")), ops=self.daemon.ops))
 
     async def work_items(self, query, principal, **_):
         return 200, work_items.work_items_list(

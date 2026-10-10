@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from bat_agent_connector import confinement, lifecycle, orchestrate, registry, task_bat
+from bat_agent_connector import confinement, lifecycle, orchestrate, platform_files, registry, task_bat
 from bat_agent_connector.errors import InvokeError, WriteRefused
 from bat_agent_connector.task_core import TaskCoordinator
 from bat_agent_connector.task_journal import Journal
@@ -113,9 +113,8 @@ def test_a10_reserve_cannot_append_another_row_for_an_existing_id(status, sent):
 @pytest.mark.parametrize("reader", ["list", "reserve", "ensure_existing", "claim_warm"])
 def test_a10_registry_duplicate_identity_fails_loudly_without_changes(reader):
     path = registry.registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     row = {"host": "h1", "session_id": "duplicate-id", "status": "failed", "start_sent": True}
-    path.write_text(json.dumps({"sessions": [row, row]}))
+    platform_files.atomic_write(path, json.dumps({"sessions": [row, row]}).encode())
     before = path.read_bytes()
     with pytest.raises(registry.RegistryInvariantError, match="REGISTRY_DUPLICATE_SESSION"):
         if reader == "list":
@@ -132,7 +131,7 @@ def test_a10_registry_duplicate_identity_fails_loudly_without_changes(reader):
 
 def test_a10_registry_write_rejects_duplicate_identity_atomically():
     path = registry.registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    platform_files.ensure_private_directory(path.parent)
     row = {"host": "h1", "session_id": "unique-id"}
     registry._write(path, [row])
     before = path.read_bytes()

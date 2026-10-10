@@ -35,6 +35,11 @@ jobs:
           node-version: "24.21.0"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+      - name: Bundle matching managed central runtime
+        run: uv run --locked --extra desktop-build python desktop/scripts/build-managed-runtime.py
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
           toolchain: "1.98.1"

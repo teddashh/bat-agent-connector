@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -80,9 +81,23 @@ def is_tool(m: dict) -> bool:
     return "toolName" in m
 
 
+def _message_metadata(m: dict) -> dict:
+    # Never borrow model/agent/cost metadata from the current session. Older BAT
+    # archives usually have only a timestamp; missing message facts stay absent.
+    result = {}
+    for key in ("agent", "model", "status"):
+        value = m.get(key)
+        if isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(c) < 32 for c in value):
+            result[key] = value
+    duration = m.get("durationMs")
+    if type(duration) in (int, float) and math.isfinite(duration) and duration >= 0:
+        result["duration_ms"] = duration
+    return result
+
+
 def summarize_message(m: dict, *, include_tools: bool, max_chars: int) -> dict | None:
     ts = ts_to_ms(m.get("timestamp") or m.get("completedAt"))
-    base: dict[str, Any] = {"id": m.get("id"), "ts": iso_local(ts)}
+    base: dict[str, Any] = {"id": m.get("id"), "ts": iso_local(ts), **_message_metadata(m)}
     if is_tool(m):
         if not include_tools:
             return None
@@ -92,12 +107,23 @@ def summarize_message(m: dict, *, include_tools: bool, max_chars: int) -> dict |
             brief = brief if isinstance(brief, str) else json.dumps(inp, ensure_ascii=False)
         else:
             brief = str(inp or "")
-        base.update(
-            role="tool",
-            tool=m.get("toolName"),
-            status=m.get("status"),
-            text=clip(str(brief), min(300, max_chars)),
-        )
+        result = m.get("result")
+        parts = [clip(str(brief), min(300, max_chars))]
+        if isinstance(result, str) and result:
+            parts.append(result)
+        if isinstance(m.get("denyReason"), str) and m["denyReason"]:
+            parts.append(m["denyReason"])
+        completed = ts_to_ms(m.get("completedAt"))
+        base.update(role="tool", tool=m.get("toolName"), status=m.get("status"),
+                    text=clip("\n\n".join(parts), max_chars))
+        for source, target in (("denied", "denied"), ("isDeferred", "deferred")):
+            if type(m.get(source)) is bool:
+                base[target] = m[source]
+        if completed is not None:
+            base["completed_at"] = iso_local(completed)
+        started = ts_to_ms(m.get("timestamp"))
+        if started is not None and completed is not None and completed >= started:
+            base["duration_ms"] = completed - started
         return base
     role = m.get("role") or m.get("type") or "?"
     text = _content_text(m.get("content") if "content" in m else m.get("text"))

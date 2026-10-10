@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 export const nativeDesktop = isTauri();
 export interface ConnectorResponse { status: number; data: any }
 export interface NativeStatus {
+  configuration_source?: "managed" | "external";
   updates?: boolean;
   endpoint: string | null; error: string | null; credential_available: boolean;
   expected_actor?: string; credential_source?: "launch_environment" | "windows_credential_manager" | null;
@@ -10,6 +11,30 @@ export interface NativeStatus {
   configuration_file?: string; connected?: boolean; file_transfers?: boolean;
 }
 export let nativeFileSupport = false;
+export const browserSessionToken = "managed-browser-session";
+let browserCsrf: string | null = null;
+export async function restoreBrowserSession(): Promise<boolean> {
+  if (nativeDesktop) return false;
+  const response = await fetch("/api/v1/browser-session", {credentials: "same-origin", mode: "same-origin",
+    cache: "no-store", redirect: "error"});
+  if (!response.ok) return false;
+  const data = await response.json();
+  if (typeof data.csrf !== "string" || data.csrf.length < 32) return false;
+  browserCsrf = data.csrf;
+  return true;
+}
+export function browserAuthHeaders(token: string): Record<string, string> {
+  if (token !== browserSessionToken) return {Authorization: `Bearer ${token}`};
+  if (!browserCsrf) throw new Error("Browser session needs to be restored");
+  return {"X-Batc-CSRF": browserCsrf};
+}
+export function forgetBrowserSession() {
+  if (!browserCsrf) return;
+  const headers = {...browserAuthHeaders(browserSessionToken), "Content-Type": "application/json"};
+  browserCsrf = null;
+  return fetch("/api/v1/browser-session/logout", {method: "POST", credentials: "same-origin",
+    mode: "same-origin", redirect: "error", headers, body: "{}"});
+}
 export async function nativeStatus() {
   const status = await invoke<NativeStatus>("native_status");
   nativeFileSupport = status.file_transfers === true;
@@ -23,6 +48,8 @@ export const nativeFilesControl = (transferId: string, action: string) => invoke
 export const nativeFilesSave = (reference: unknown) => invoke<any>("native_files_save", {reference});
 export const nativeFilesPreview = (reference: unknown) => invoke<any>("native_files_preview", {reference});
 export const nativeConnect = () => invoke<any>("connector_connect");
+export const managedControl = (input: {action: "status" | "open_browser"} | {action: "set_login"; enabled: boolean}) =>
+  invoke<any>("managed_control", {input});
 export const nativeDisconnect = () => invoke<void>("connector_disconnect");
 export const nativeEnroll = () => invoke<any | null>("connector_enroll", {
   locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
@@ -67,10 +94,10 @@ export async function connectorRequest(method: string, path: string, body: unkno
       method, path, body: body ?? null, idempotency_key: key ?? null
     } });
   }
-  const headers: Record<string, string> = { Authorization: `Bearer ${browserToken}` };
+  const headers = browserAuthHeaders(browserToken);
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (key) headers["Idempotency-Key"] = key;
-  const res = await fetch(`/api/v1${path}`, { method, headers,
+  const res = await fetch(`/api/v1${path}`, { method, headers, credentials: "same-origin", redirect: "error",
     body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: res.status, data: await res.json().catch(() => ({})) };
 }
@@ -84,6 +111,6 @@ export async function connectorUploadArtifact(operationId: string, bytes: ArrayB
   }
   // Ignore content_url from operation metadata. Tokens only reach this same-origin fixed route.
   const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {method: "POST", redirect: "error",
-    headers: {Authorization: `Bearer ${browserToken}`, "Content-Type": "application/octet-stream"}, body: bytes});
+    credentials: "same-origin", headers: {...browserAuthHeaders(browserToken), "Content-Type": "application/octet-stream"}, body: bytes});
   return {status: res.status, data: await res.json().catch(() => ({}))};
 }

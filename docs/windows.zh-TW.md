@@ -2,9 +2,9 @@
 
 [English](windows.md) · **繁體中文** · [產品總覽](../README.zh-TW.md)
 
-Windows Fleet 是本產品的本機連線與啟動層，已整合進 Tauri client。Python Connector／
-Task Service 負責 Agent 工作的中央控制，BAT 在選定主機執行工作。Windows client 可以
-連接 Linux 中央，不必等 Windows 原生中央完成，才能管理既有 Fleet 連線。
+Windows Fleet 是 Tauri 裡的本機連線與啟動層。Python Connector／Task Service 授權並派工，BAT 在選定主機執行工作。候選桌面包包含本機 Python 中央 runtime；加入既有中央（例如 Linux 中央）保留為進階選項。
+
+這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的實作，不會因此改變先前發布的 release 資產。舊 release 資產仍是先前的 client 包。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對來源 commit，僅從 Windows 平台建置成功的 job 下載 `desktop-Windows-unsigned`。
 
 ## 每一層負責什麼
 
@@ -18,31 +18,27 @@ Task Service 負責 Agent 工作的中央控制，BAT 在選定主機執行工�
 專案管理是這套系統的一個 Dashboard 視角。Project Hub 提供互動參考，並不是本產品的
 runtime 或資料後端。
 
-## 使用既有 Windows 環境
+## 首次啟動與 BAT 存取
 
-以下是**目前已配置環境的試用步驟**。正常安裝器應自動準備 runtime 與背景環境，
-完整流程[仍須實作](design/managed-installation.md)。
+1. 安裝相符的 NSIS `.exe` 並開啟 Dashboard。程式會準備私人本機中央與個人身分，不需預裝 Python／uv 或複製中央 API token。
+2. 開啟「連線／Fleet → 準備開始工作」，在「連線至 BAT」選擇可匯入的 profile，或填入實際 BAT 位址、可信指紋、workspace profile ID 與 BAT token。選擇所需 managed 權限與專用遠端管理目錄，再按「驗證並儲存主機」。
+3. Git 同步與成果操作使用「此電腦已設定的 SSH alias」。只有預定的直接 BAT 開工需要共用 clone metadata 時，才勾選「允許共享 clone 的 Git worktree」；這些選項都不會接管人工工作。
+4. 在「連結 GitHub 儲存庫」讀取所選主機的 workspaces，綁定精確 repository、Git remote 與 workspace ID，依需求開啟整合／merge／metadata 權限。儲存只驗證存取，不會推送或建立 PR。
+5. 「設定驗證命令」使用精確 Task Service project key，設定執行程式、每行一個完整參數及逾時秒數；儲存不執行。來源選擇、恢復與 Agent 存取詳見[完整設定指南](getting-started.zh-TW.md)。
 
-1. 從成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)
-   下載 `desktop-Windows-unsigned`，內含 NSIS `.exe`。核對 commit；artifact 可能到期，
-   目前仍不是正式簽章發行／更新通道。
-2. 依[目前的桌面連線步驟](getting-started.zh-TW.md#5-接上桌面-client)連接可信中央，
-   在原生憑證視窗完成驗證。
-3. 已部署 Fleet 時，保留原來已檢視的 Kit inventory、BAT profile index 與 SSH 設定。
-   原生 adapter 讀取同一份配置；以 [fleet.example.json](../desktop/fleet.example.json) 與
-   [安裝合約](design/fleet-installation.md) 綁定現有 Kit。範例本身不是完整安裝，私人主機
-   拓撲也不應複製到這個公開 repo。
-4. 在連線設定查看目前 backend，分別選擇**背景連線、BAT profiles、Dashboard**。
-   保存或啟動前檢視必要連線；Dashboard-only 不需要本機 BAT executable。
-5. 逐台看就緒狀態。Tunnel、TLS pin、BAT 驗證／workspace、中央 observe 存取分開檢查。
-   需要 Tailscale 登入時，從本機面板開啟已安裝的 Tailscale 程式，在該程式登入，再刷新狀態。
-6. 檢視登入選擇器與已保存啟動選項。未指定 `backend` 時沿用 **PowerShell**；Rust runtime
-   已接入，但接手既有 owner 必須經明確遷移，安裝新版 Dashboard 不會自動完成遷移。
+共用 Dashboard 提供可調整的專案樹、對話與發送回執、模型偏好、經檢視的技能選取、成果及修復工作入口。選取技能不會自動把它啟用到 Agent。
 
-關閉 Dashboard 只隱藏視窗，背景工作繼續。明確選擇 Quit 則會要求正常停止已證明由自己
-持有的本機 Fleet monitor；ownership 不明時拒絕退出。兩者都不結束中央任務或人工 BAT
-sessions。已配置的遠端中央 bootstrap 使用固定 SSH recipe，不是任意遠端安裝，也不會
-默默建立另一套中央資料庫。
+## Fleet 連線、profiles 與登入
+
+已部署 Fleet 時，保留原有已檢視的 Kit inventory、BAT profile index 與 SSH 設定，原生 adapter 沿用這份配置。[fleet.example.json](../desktop/fleet.example.json) 與 [Fleet 安裝合約](design/fleet-installation.md) 說明明確綁定方式；範例不是完整私人網路設定。中央 onboarding 不會猜測 SSH 拓撲或接管既有 Fleet owner。
+
+在連線設定查看目前 backend，分別選擇**背景連線、BAT profiles、Dashboard**，保存或啟動前預覽必要條件。Dashboard-only 不需本機 BAT executable。Tunnel、固定 TLS 指紋、BAT 驗證／workspace、中央 observe 存取是不同的就緒檢查。
+
+需要 Tailscale 登入時，從面板開啟已安裝的 Tailscale 程式，在該程式登入後刷新。可保留登入選擇器或檢視已保存啟動選項。未指定 `backend` 時沿用 **PowerShell**；切換 Rust 須使用明確遷移流程，先證明舊 owner 已停止。
+
+「登入電腦時啟動」會啟動自有 managed 安裝與已選 Windows Fleet 登入流程。「在瀏覽器開啟 Dashboard」使用本機認證交接。關窗後中央背景工作繼續；明確「退出 Dashboard」會依正常停止條件處理已證明持有的 Fleet monitor，不結束中央任務或人工 BAT sessions。
+
+「進階：加入既有中央」經原生確認與獨立憑證登錄後，改變目前 client 連線；原本機背景工作保留。已配置的遠端 bootstrap 用固定 SSH recipe 查詢／啟動指定中央，不會任意安裝服務，也不因連線失敗另造資料庫。
 
 ## 資源索引
 
@@ -56,6 +52,4 @@ sessions。已配置的遠端中央 bootstrap 使用固定 SSH recipe，不是�
 | Credential Manager、系統匣與原生檔案 | [桌面 client](design/desktop.md) · [檔案操作](design/native-files.md) |
 | 驗證安裝包與 installed fixtures | [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [驗收矩陣](product/acceptance-v2.md) |
 
-Windows 安裝／WebView fixture、Fleet 原始碼測試，和在使用者真正 SSH／Tailscale／BAT
-主機上跑完整工作日，是不同的證據。完整自動安裝、Fleet 實機驗收與正式簽署更新仍須完成；
-支援 Mac Dashboard 也不代表 Windows Fleet 已移植到 Mac。
+Windows 套件／WebView fixture、Fleet 原始碼測試與使用者實際 SSH／Tailscale／BAT 環境是不同的證據。驗證紀錄須與套件來源 commit 相符。正式簽章與正式更新通道已排除於本次交付；完整實際環境驗收由使用者負責。排除不等於能力或測試已完成，Mac Dashboard 支援也不表示 Windows Fleet 已移植。

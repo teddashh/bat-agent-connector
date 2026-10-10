@@ -103,8 +103,8 @@ parts.append(
     '</aside></div><div class="release-note">'
     + bi("Development preview", "開發預覽", "strong")
     + bi(
-        "The shared Dashboard is available for configured trials. Automatic environment setup in the desktop installer is still in development.",
-        "共用 Dashboard 可在已配置環境試用；桌面安裝包自動建立環境的流程仍在開發。",
+        "This source version includes bundled local central and guided setup from PR #81. Match the package source commit to its successful build and validation records.",
+        "這版原始碼包含 PR #81 引入的打包本機中央與引導設定；請核對套件來源 commit、成功建置及驗證紀錄。",
     )
     + link("#status", "See readiness", "查看交付現況")
     + "</div></section>"
@@ -378,8 +378,8 @@ parts.append(
     + "</div><div>"
     + bi("Keep the existing central identity.", "保留既有中央身分與工作。", "h3")
     + bi(
-        "Today's Windows Fleet can reach a configured Linux central. Future managed installation must prepare the full environment while preserving ownership and history; a disconnected client must never invent a replacement central.",
-        "現有 Windows Fleet 可連接已配置的 Linux 中央。完整自動安裝仍須補齊，並保留 ownership 與歷史；client 斷線不能自行另造一套中央。",
+        "The candidate prepares one owned local central and personal identity. Reopen and safe upgrade preserve its journal; joining an existing central stays explicit, and connection failure never creates a replacement database.",
+        "候選版準備一套自有本機中央與個人身分，重開和安全升級沿用原帳本。加入既有中央仍須明確選擇，連線失敗不會另造資料庫。",
         "p",
     )
     + "</div></div></section>"
@@ -391,8 +391,8 @@ parts.append(
         "Windows Fleet 與資源",
         "Choose what connects. Choose what opens.",
         "選要連的主機，選要開的視窗。",
-        "These native controls are integrated today for configured Windows installations. Full automatic environment provisioning and live Fleet acceptance are separate remaining work.",
-        "以下原生控制已整合，可用於已配置的 Windows 環境；完整自動建立環境與 Fleet 實機驗收，是另外仍須完成的工作。",
+        "Windows Fleet retains its connection, profile and startup controls alongside the candidate bundled central. Fleet configuration and central onboarding have separate responsibilities.",
+        "Windows Fleet 的連線、profile 與啟動控制，和候選打包中央一起保留。Fleet 配置與中央引導設定各有分工。",
     )
     + '<div class="feature-list">'
 )
@@ -426,12 +426,12 @@ parts.append(
 parts.append(
     '<section class="installation-band" id="start"><div class="section">'
     + heading(
-        "The installation we are building",
-        "正在完成的安裝體驗",
+        "Candidate installation",
+        "候選安裝流程",
         "Install. Connect. Open Dashboard.",
         "安裝、連接，打開就能管理。",
-        "The desktop package should prepare the environment. You should not have to install Python or understand an API actor before using the product.",
-        "桌面包應替你準備好環境，不該要求你先裝 Python，或理解 API actor 才能使用。",
+        "Install the matching candidate package. It prepares the Python runtime, private local central and personal identity; you authorize BAT and GitHub in Settings.",
+        "安裝相符候選包後，程式準備 Python runtime、私人本機中央與個人身分，再由你於設定中授權 BAT 與 GitHub。",
     )
     + '<ol class="install-steps">'
 )
@@ -458,29 +458,29 @@ for en, zh, d, dz in [
     parts.append("<li>" + bi(en, zh, "h3") + bi(d, dz, "p") + "</li>")
 parts.append(
     '</ol><div class="install-current">'
-    + bi("Available today: configured trials", "目前可用：已配置環境試用", "h3")
+    + bi("Choose a matching candidate artifact", "選擇相符的候選 artifact", "h3")
     + bi(
-        "The current installers contain the desktop client, not the complete automatic setup above. An operator can prepare central for a supervised trial. Joining an existing central remains an advanced path.",
-        "目前安裝包提供桌面 client，尚未完成上述自動設定。操作者可先準備中央進行有人監督的試用；加入既有中央保留為進階路徑。",
+        "Follow PR #81 checks to a desktop run and select the same source commit with a successful platform package job. Earlier release assets remain historical client packages; external central setup is an advanced option.",
+        "從 PR #81 檢查進入 desktop run，核對同一來源 commit 與成功的平台打包 job。舊 release 資產仍是先前的 client 包，外部中央設定保留為進階選項。",
         "p",
     )
     + '<div class="actions">'
     + link(
         repo + "/blob/main/docs/getting-started.md",
-        "Read the trial setup guide",
-        "閱讀開發試用指南",
+        "Read the first-use guide",
+        "閱讀首次使用指南",
         "button light lang-en",
     )
     + link(
         repo + "/blob/main/docs/getting-started.zh-TW.md",
-        "Read the trial setup guide",
-        "閱讀開發試用指南",
+        "Read the first-use guide",
+        "閱讀首次使用指南",
         "button light lang-zh",
     )
     + link(
         repo + "/blob/main/docs/design/managed-installation.md",
-        "Managed installation requirements →",
-        "自動安裝的交付要求 →",
+        "Installation and recovery contract →",
+        "安裝與恢復合約 →",
         "text-link",
     )
     + "</div></div></div></section>"
@@ -492,8 +492,8 @@ parts.append(
         "選擇使用入口",
         "Windows. Mac. Your browser.",
         "Windows、Mac，或你的瀏覽器。",
-        "Desktop validation packages and central platform support are different things.",
-        "桌面驗證包與中央服務的平台支援，需要分開看。",
+        "Candidate packages bundle central; local Fleet capabilities and credential adapters still depend on platform.",
+        "候選包包含中央；本機 Fleet 能力與憑證 adapter 仍依平台提供。",
     )
     + '<div class="table-wrap" role="region" aria-label="Platform support / 平台支援" tabindex="0"><table><thead><tr>'
     + "".join(
@@ -503,55 +503,25 @@ parts.append(
     + "</tr></thead><tbody>"
 )
 platforms = [
-    (
-        "Web",
-        "Web",
-        "Responsive shared Dashboard",
-        "共用響應式 Dashboard",
-        "A configured central service and trusted access path.",
-        "需要已配置的中央與可信連線路徑。",
-    ),
-    (
-        "Windows x64",
-        "Windows x64",
-        "NSIS; Credential Manager; native Fleet, BAT profile and sign-in controls",
-        "NSIS、Credential Manager、原生 Fleet／BAT profile／登入控制",
-        "Unsigned; automatic local central provisioning is not included yet.",
-        "尚未正式簽署；未包含本機中央自動建立。",
-    ),
-    (
-        "Mac Apple Silicon / Intel",
-        "Mac Apple Silicon／Intel",
-        "DMGs, native WebView and Keychain checks",
-        "DMG、原生 WebView 與 Keychain 驗證",
-        "Ad-hoc signing; formal notarization / updates remain. No Windows Fleet parity claim.",
-        "目前 ad-hoc 簽署；正式公證／更新待完成，不宣稱 Windows Fleet 同等支援。",
-    ),
-    (
-        "Linux",
-        "Linux",
-        "Debian validation package",
-        "Debian 驗證包",
-        "Native credential source is currently memory-only.",
-        "原生憑證目前只支援記憶體來源。",
-    ),
-    (
-        "Central service",
-        "中央服務",
-        "Python 3.10–3.13 tests on Linux",
-        "Linux 上 Python 3.10–3.13 測試",
-        "POSIX implementation. Windows central is not implemented; Mac client tests do not establish Mac central acceptance.",
-        "依賴 POSIX；Windows 中央未實作，Mac client 測試不代表 Mac 中央驗收。",
-    ),
+    ("Web", "Web", "Shared Dashboard with managed browser sign-in", "共用 Dashboard 與 managed 瀏覽器登入",
+     "Trusted loopback / tunnel; external central login remains available.", "可信 loopback／tunnel；保留外部中央登入。"),
+    ("Windows x64", "Windows x64", "NSIS with bundled central, private storage, Fleet and Credential Manager", "NSIS 包含中央、私人儲存、Fleet 與 Credential Manager",
+     "Unsigned validation package; match its source commit to the successful platform job.", "未正式簽署的驗證包；來源 commit 須與成功的平台 job 相符。"),
+    ("Mac Apple Silicon / Intel", "Mac Apple Silicon／Intel", "DMGs with bundled central, menu bar and Keychain", "DMG 包含中央、選單列與 Keychain",
+     "Ad-hoc validation signing; notarization / production updates excluded; no Windows Fleet port.", "採 ad-hoc 驗證簽署；公證／正式更新已排除，沒有 Windows Fleet 移植。"),
+    ("Linux", "Linux", "Debian package with bundled central", "Debian 包含中央",
+     "External-central native credentials remain memory-only; persistent vault excluded.", "外部中央的原生憑證仍只留記憶體；持久 vault 已排除。"),
+    ("Central service", "中央服務", "Python authority with Windows and POSIX private storage / locks", "Python 中央權威，支援 Windows／POSIX 私人儲存與檔案鎖",
+     "Bundled with desktop; manual operator deployment remains available.", "隨桌面打包；仍可由操作者手動部署。"),
 ]
 for e, z, a, az, c, cz in platforms:
     parts.append("<tr>" + bi(e, z, "th") + bi(a, az, "td") + bi(c, cz, "td") + "</tr>")
 parts.append(
     '</tbody></table></div><div class="actions">'
     + link(
-        repo + "/actions/workflows/desktop.yml",
-        "Find validation packages",
-        "查看驗證安裝包",
+        repo + "/pull/81/checks",
+        "Find matching candidate packages",
+        "查找相符候選安裝包",
         "button secondary",
     )
     + link(repo + "/releases", "Release history →", "正式發行紀錄 →", "text-link")
@@ -611,10 +581,10 @@ parts.append(
     + heading(
         "Readiness, with evidence",
         "交付現況與證據",
-        "Useful today. Clear about what remains.",
-        "可以開始試用，也看得清還缺什麼。",
-        "Baseline: 10 October 2026 · product source 15b2048 / PR #74.",
-        "基準：2026 年 10 月 10 日 · 產品來源 15b2048／PR #74。",
+        "Implementation and evidence, kept separate.",
+        "實作、檢查與實際環境分開記錄。",
+        "Implementation introduced in PR #81 · source, package validation and release assets are recorded separately.",
+        "PR #81 引入的實作 · 原始碼、套件驗證與 release 資產分開記錄。",
     )
     + '<dl class="readiness">'
 )
@@ -622,27 +592,27 @@ for label, lz, en, zh in [
     (
         "Implemented",
         "已實作",
-        "Shared Web / Tauri workflows, project dispatch, managed resource controls, result lineage, PR integration, configured delivery and reviewed cleanup.",
-        "共用 Web／Tauri 流程、專案派工、managed 資源控制、成果來源、PR 整合、已配置交付與審閱後整理。",
+        "Bundled central and guided BAT / repository / verification setup; shared project tree, conversations, dispatch, skill selections, result links, repair work, delivery and cleanup.",
+        "打包中央與 BAT／儲存庫／驗證命令引導；共用專案樹、對話、派工、技能選取、成果連結、修復工作、交付與整理。",
     ),
     (
-        "Validated in controlled environments",
-        "已在受控環境驗證",
-        "Python 3.10–3.13 CI and desktop packages on Windows, both Mac architectures and Linux. Installed fixtures use loopback services and synthetic data; they do not prove a user’s full working day.",
-        "Python 3.10–3.13 CI，以及 Windows、兩種 Mac、Linux 桌面包。安裝 fixture 使用 loopback 與合成資料，不等於使用者完整工作日驗收。",
+        "Validation records",
+        "驗證紀錄",
+        "The linked checks record Python, shared UI and platform package validation by source commit. Match them to your package; older release results do not establish this version. Controlled fixtures do not stand in for a real user environment.",
+        "檢查頁依來源 commit 記錄 Python、共用 UI 與各平台套件驗證。請核對所用套件，不沿用舊 release 證據；受控 fixture 不取代使用者實際環境。",
     ),
     (
-        "Still to deliver",
-        "仍須交付",
-        "Automatic managed installation; signed releases and updates; full unknown-ACK adjudication for native BAT worktree.merge; live startup-to-deploy acceptance on the selected hosts.",
-        "自動 managed 安裝、正式簽署發行／更新、原生 BAT worktree.merge 的完整 unknown-ACK 裁決，以及指定主機從啟動到部署的實際驗收。",
+        "Excluded from this delivery",
+        "本次排除範圍",
+        "Formal signing, Mac notarization, production update channels and Linux persistent native credential storage are excluded. The user owns the 46-item real-environment acceptance. These exclusions are not completed-feature or passed-test claims.",
+        "正式簽章、Mac 公證、正式更新通道與 Linux 原生憑證持久儲存已排除；46 項實際環境驗收由使用者負責。排除不等於功能或測試已完成。",
     ),
 ]:
     parts.append("<div>" + bi(label, lz, "dt") + bi(en, zh, "dd") + "</div>")
 parts.append(
     '</dl><div class="evidence-links">'
-    + link(repo + "/actions/runs/38032723049", "Python candidate checks ↗", "Python 候選檢查 ↗")
-    + link(repo + "/actions/runs/38032723037", "Native package evidence ↗", "原生套件證據 ↗")
+    + link(repo + "/pull/81/checks", "Candidate checks ↗", "候選檢查 ↗")
+    + link(repo + "/actions/workflows/desktop.yml", "Matching desktop artifacts ↗", "核對桌面 artifacts ↗")
     + link(repo + "/blob/main/docs/product/acceptance-v2.md", "Acceptance matrix ↗", "驗收矩陣 ↗")
     + "</div></section>"
 )
@@ -670,8 +640,8 @@ docs = [
         "01",
         "Installation & first use",
         "安裝與首次使用",
-        "Trial paths, credentials, desktop connection and troubleshooting.",
-        "試用方式、憑證、桌面連線與排錯。",
+        "First launch, BAT / repository setup, verification commands and recovery.",
+        "首次啟動、BAT／儲存庫設定、驗證命令與恢復。",
         "docs/getting-started.md",
         "docs/getting-started.zh-TW.md",
     ),
@@ -743,10 +713,10 @@ faqs = [
         "不必。Dashboard 可管理已配置遠端 BAT 主機的工作，coding sessions 留在 BAT。開本機 BAT 與 Fleet 控制是依平台提供的選用能力。",
     ),
     (
-        "Does the current installer set everything up?",
-        "現在安裝包會把環境全部建好嗎？",
-        "Not yet. That is the required normal experience, including background service and one-click browser access. Current validation packages still need an operator-configured central service and identity.",
-        "還不會。包含背景服務與一鍵開網頁的完整安裝，是正式產品要求；現有驗證包仍需操作者先配置中央與身分。",
+        "What does the candidate installer prepare?",
+        "候選安裝包會準備哪些內容？",
+        "A matching candidate package prepares its local runtime, background central, private data and personal identity. You still confirm BAT trust, account authorization and exact host/workspace bindings; SSH access must already be configured for Git work.",
+        "相符候選包準備本機 runtime、背景中央、私人資料與個人身分。BAT 信任、帳號授權及精確 host／workspace 綁定仍由你確認；Git 工作所需 SSH 存取須先配置。",
     ),
     (
         "Can Web and Tauri stay open together?",
@@ -763,8 +733,8 @@ faqs = [
     (
         "Is this ready to run unattended all day?",
         "可以整天放著無人值守了嗎？",
-        "The current recommendation is a supervised trial in a configured environment. Full host startup, interruption recovery, delivery and cleanup still need acceptance on the intended real setup.",
-        "目前建議在已配置環境進行有人監督的試用；主機啟動、中斷恢復、交付與整理，仍需在預定的真實環境完整驗收。",
+        "Automated fixtures cover controlled setups. The user decides readiness for their own hosts, accounts and deployment targets and performs real-environment acceptance. The candidate does not claim that those checks have already passed.",
+        "自動 fixture 驗證受控環境；使用者自行判斷其主機、帳號與部署目標的就緒程度並執行實際驗收。候選版不宣稱那些檢查已通過。",
     ),
     (
         "Is this an official BAT product?",

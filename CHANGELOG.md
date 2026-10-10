@@ -2,6 +2,22 @@
 
 ## Next release (unreleased)
 
+- Introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81):
+  bundle the matching Python central runtime and prepare private installation data,
+  stable personal identity, authenticated browser handoff and installation-owned login startup.
+  Windows uses native file locks and private storage; safe forward upgrades preserve the
+  journal and refuse busy work or downgrades. Validation records are linked from the PR checks.
+- Add guided BAT/profile access, exact GitHub repository/host/workspace bindings and
+  Task Service verification command settings. Configuration is revision-bound and journaled;
+  saving probes access without dispatching, pushing or executing a saved verification command.
+- Add adjustable project navigation, readable conversation/send receipts, unread and model
+  preferences, reviewed skill selections, result links and repair work. Skill selections pin
+  source digests and remain unapplied; historical queued receipts do not imply a current BAT
+  queue position or support per-message cancellation.
+- Formal signing, Mac notarization, production update channels and Linux persistent native
+  credential enrollment are outside this delivery. Real-environment acceptance is user-owned;
+  these exclusions do not claim corresponding features or tests are complete.
+
 - Backport the official GLib iterator fix for RUSTSEC-2024-0429 into the Linux
   desktop dependency graph. Preserve the original crate version/license and exact
   source inventory; require resolved-source verification, an optimized iterator

@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth
+from bat_agent_connector import api_auth, platform_files
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import adopt, make_config
@@ -21,6 +21,8 @@ SID = "sess-claude-0001"
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-task-controls-ui-") as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / "config"), BATC_STATE_DIR=str(root / "state"), BATC_TEST_TOKEN=TOKEN)
         os.environ.pop("BATC_DEVICE_ID", None)
         mock = MockBat()

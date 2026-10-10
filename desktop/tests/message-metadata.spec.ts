@@ -1,0 +1,28 @@
+import {test, expect} from '@playwright/test';
+import {conversationFixture, mountConversation} from './conversation-fixture.ts';
+for (const native of [false, true]) test(`message-local metadata and visible exceptional tool results (${native ? 'IPC' : 'Web'})`, async ({page}) => {
+  const f = conversationFixture(), errors: string[] = []; const reads: string[] = [];
+  f.data.messages = [
+    {id: 'old', role: 'assistant', ts: '2026-10-09T12:00:00Z', text: 'No historic model is known', status: 'failed'},
+    {id: 'new', role: 'assistant', ts: '2026-10-09T12:01:00Z', text: 'Exact original message', model: 'message-model', agent: 'codex', duration_ms: 2500},
+    ...['completed', 'error', 'running', 'unknown'].map((status, i) => ({id: 'tool-'+status, role: 'tool', tool: 'Bash', status,
+      ts: '2026-10-09T12:02:00Z', text: `Tool ${status} original result`, duration_ms: i ? undefined : 1500}))
+  ] as any;
+  const dispatch = async (input: any) => {reads.push(input.path); return f.dispatch(input);};
+  page.on('pageerror', error => errors.push(error.message)); await mountConversation(page, native, dispatch);
+  await page.goto('/dashboard/#/session/demo/session-1');
+  const row = (id: string) => page.locator(`[data-message-id="${id}"]`);
+  await expect(row('new')).toContainText('Message model: message-model'); await expect(row('new')).toContainText('Message agent: codex');
+  await expect(row('new')).toContainText('Message duration: 2500 ms'); await expect(row('old')).not.toContainText('Message model:'); await expect(row('old')).toContainText('Status: failed');
+  await expect(row('tool-completed').locator('details')).not.toHaveAttribute('open');
+  for (const status of ['error', 'running', 'unknown']) {
+    await expect(row('tool-'+status)).toContainText('Status: '+status);
+    await expect(row('tool-'+status).locator('details')).toHaveAttribute('open', '');
+    await expect(row('tool-'+status).getByText(`Tool ${status} original result`, {exact: true})).toBeVisible();
+  }
+  await row('tool-completed').locator('summary').click();
+  f.data.cursor++; await expect.poll(() => f.data.reads).toBeGreaterThan(1);
+  await expect(row('tool-completed').locator('details')).toHaveAttribute('open', '');
+  expect(reads.some(path => path.includes('/messages?') && path.includes('include_tools=true'))).toBe(true);
+  expect(f.data.writes).toEqual([]); expect(errors).toEqual([]);
+});

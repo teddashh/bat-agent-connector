@@ -1,11 +1,20 @@
 # Better Agent Dashboard／Connector：R10 驗收證據矩陣
 
+## 2026-10-10 交付範圍更新
+
+依產品負責人最新決定，Issue #59 的 Agent 結案條件是完成其餘實作、自動回歸、原生套件 fixtures、文件與合併證據。
+~~正式簽章、Mac 公證、正式更新通道與 Linux 原生憑證持久儲存~~已排除；~~46 項真人實機／live 驗收~~由使用者自行處理，不列 Agent 待辦或結案門檻。
+下列矩陣保留歷史證據與使用者驗收參考；舊欄位中的「尚缺」「gate」及里程碑描述不覆蓋本次範圍，也不代表未執行的情境已通過。
+目前實作與對應 PR 檢查見[目前實作狀態](implementation-status.md#目前續作)。
+
+## 歷史基線與驗收參考
+
 歷史基線：2026-10-08 23:26 UTC，`6d88f4d`（#51 merge）；2026-10-09 main 已合併 #64–#68；固定候選與 GLib gate closure 見 [目前實作狀態](implementation-status.md#2026-10-09-發行門檻收斂)。依產品負責人提供的
 Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–D06、E01–E06、T01–T12，共 46 項**。
 範圍見 [realignment-v2.md](realignment-v2.md)，進度見 [implementation-status.md](implementation-status.md)。
 兩份計畫對應同一產品與功能 backlog；Tauri 是更新的介面方向。
 使用者另要求 macOS：Apple Silicon／Intel DMG 與各自 native fixture 納入平台 gate；Mac 的 Keychain、更新、公證與 I／L 證據分開追蹤，不能繼承 Windows 結果。
-此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及完整產品交付均未完成。**
+此表不是通過清單：歷史基線未建立同一候選版本的 installed／live 證據；這項歷史狀態不再作為 Issue #59 的 Agent 結案判定。
 
 範圍依產品負責人提供的原始對話與後續澄清校正，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
 程式碼的跨主機同步只針對明確 repository 的已發布 commit；直接搬運未發布 Git objects 不列交付 gate。
@@ -16,7 +25,7 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 - **主線／分支**：程式所在位置；有程式或測試來源不等於已驗收。本輪彙整已記錄測試與審查證據；本文件更新沒有重跑測試。
 - **F（fixture）**：MockBat、FakeGitHub、暫存真 Git／bytes、HTTP、browser／IPC mock。可證明指定邏輯，不能證明真 BAT、WebView 或實際部署。
 - **N（native fixture）**：真 OS 子程序或打包 WebView 接合成服務。Windows PowerShell startup、Linux WebKit smoke，以及 disposable Windows runner 上 NSIS 真安裝接 loopback fixture，均不等於使用者實機／live 端到端驗收。
-- **I／L（installed／live）**：實際安裝組合、真中央／BAT／provider 的記錄。以下 46 項均仍需補對應 I／L 證據；未測平台不標支援。
+- **I／L（installed／live）**：實際安裝組合、真中央／BAT／provider 的記錄。以下 46 項供使用者自行驗收時記錄；Agent 不代填通過，也不以此阻擋結案。
 
 以下代號供矩陣引用。SHA 與 CI 狀態會變；合併／發行前須重新記錄完整 SHA 和該 head 的 checks，不能沿用前一個 head 的綠燈。
 本表的測試檔名預設位於所列候選的 `tests/`；`desktop/`、Kit 路徑另寫全名。連結固定到證據版本，不代表目前 main。
@@ -155,7 +164,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 1. **固定 RC**：整合上述必要能力後，記 app/backend 同一完整 commit、Kit/installer pins、skill digest、OS/WebView/BAT/agent 版本及中央 contract。尚缺實作的列先補能力；不能只把格子改為「待實機」。沒有這組 manifest，不彙總為 R10 通過。
 2. **F／CI gate**：在固定 RC 的隔離 CI 跑 Python 3.10–3.13 full suites、Ruff、secret scan；再跑 shared UI 的 browser/native-IPC tests 與 central fixtures。來源合併後必須是該 RC 的結果；已有 exact-head CI 不需為累加數字重跑相同本機 full。
 3. **N gate**：Windows 真 system PowerShell subprocess＋Kit 自身 Pester、Rust tests、打包 WebView fixture；另保存 Linux N 的平台範圍。DOM／IPC mock 與真 WebView 日誌分開，跳過的能力不能宣稱通過。
-4. **I／L gate**：選一個非正式部署的驗收 repo/environment、一個人工專案、兩個 managed 工作、至少兩個 client，各自 scopes；環境引用只放私有 run manifest。依 A→B→C→D→E 路徑與 T 場景執行，注入指定故障，查回同 ID/key。每台允許無人寫入的 host 另留 A10 證據。
+4. **使用者 I／L 驗收參考（不屬 Agent 結案門檻）**：選一個非正式部署的驗收 repo/environment、一個人工專案、兩個 managed 工作、至少兩個 client，各自 scopes；環境引用只放私有 run manifest。依 A→B→C→D→E 路徑與 T 場景執行，注入指定故障，查回同 ID/key。每台允許無人寫入的 host 另留 A10 證據。
 
 以下為 **完成整合後 RC** 的 fixture 重現入口，並非本文件執行紀錄，也不連真 hosts/provider：
 
@@ -190,7 +199,7 @@ Windows 打包／Linux native smoke 的具體入口見 U `docs/design/desktop.md
 
 正式收斂路徑仍是：Windows 登入 → Fleet/中央 → 唯讀人工 checkpoint → 兩個 managed 工作與附件 → 同 PR
 → merge/deploy 查實際版本 → reviewed cleanup 留歷史 → client 重開中央繼續 → 新 agent 以自身 MCP 身分接手。
-唯有同 RC 的 46 項結果及上述缺口都可追溯，才能重新判定各里程碑；本快照不作完成宣告。
+使用者實機驗收結果須保留相同 RC 與可追溯證據；本快照不宣稱這些情境已通過，亦不以人工紀錄阻擋本次 Agent 結案。
 
 ## 日常試用候選的五段實機紀錄
 
@@ -208,4 +217,4 @@ operation/session/worktree ID 與證據位置。私有主機、profile、reposit
 | 整理／另一 Agent 接手 | cleanup preview、阻擋原因與逐項 receipt、保留 ref／tombstone；接手 Agent 使用自己的 actor/scopes，能查回既有關聯 |
 
 Mac 另記 Intel／Apple Silicon 安裝及中央連線範圍；不以 Mac Dashboard 的成功替代 Windows Fleet
-啟動驗收。正式 Release feed、更新簽章、in-app upgrade 與 macOS 公證仍是獨立交付 gates。
+啟動驗收。正式 Release feed、更新簽章、正式更新通道與 macOS 公證已排除於本次交付；既有升級保護的自動回歸仍保留。

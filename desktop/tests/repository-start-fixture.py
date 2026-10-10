@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth, integration, registry
+from bat_agent_connector import api_auth, integration, platform_files, registry
 from bat_agent_connector.config import parse_config
 from bat_agent_connector.errors import InvokeTimeout
 from bat_agent_connector.task_daemon import TaskDaemon
@@ -26,6 +26,8 @@ from tests.test_repository_sync import Runner
 async def main():
     with tempfile.TemporaryDirectory(prefix='batc-published-ui-') as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / 'config'), BATC_STATE_DIR=str(root / 'state'),
                           BATC_TEST_TOKEN=TOKEN, REPO_FAKE_TOKEN=GH_TOKEN)
         os.environ.pop('BATC_DEVICE_ID', None)

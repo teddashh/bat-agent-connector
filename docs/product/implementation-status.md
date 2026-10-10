@@ -1,12 +1,35 @@
 # Better Agent Dashboard／Connector 實作狀態
 
-查核日期：2026-10-09。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
+查核日期：2026-10-10。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
 [`2026-10-08-dispatch.md`](../handoff/2026-10-08-dispatch.md)。此表以 source evidence
 追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `2568520`（#41 已合併）；
 本輪已依序合併 #36（`800f6ec`）、#35（`8e687fb`）、#37（`2ac5715`）及 #38（`8c755a3`）。下面的接手基線保留歷史，
 已合併證據以「本輪收斂結果」為準，續作以「目前續作」為準。
 
 ## 目前續作
+
+### 2026-10-10 Issue #59 候選收斂（PR #81）
+
+這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的實作；各來源 commit 的 [Python／共用 UI／各平台套件檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks)保留對應驗證紀錄。原始碼、整合狀態與 release 資產分開核對，不沿用舊 release 的測試總數或 artifacts，也不由此推論已正式發行新安裝包。
+
+| 項目 | 候選實作與界線 |
+| --- | --- |
+| 一般首次安裝 | 平台包包含 Python runtime；首次啟動建立私人資料、自有背景中央及個人身分。驗證 artifact digest、核心檔案鎖及服務身分，重開／並行 clients 沿用同一份帳本。 |
+| 平台與生命週期 | Windows 私人 ACL／handle／reparse 檢查與檔案鎖；Mac／Linux 使用對應儲存保護。背景中央獨立於 UI，登入啟動屬於該安裝；升級須由原 owner 同意安全停止，忙碌／unknown 工作不強制終止，禁止降版帳本。 |
+| BAT／repository 引導 | 匯入可讀 profile 或手動輸入可信 endpoint／fingerprint／token；明確設定 managed 權限、遠端目錄及已有 SSH alias。GitHub repository 綁定精確 host／workspace；儲存只讀驗證，不推送或派工。 |
+| 設定與身分恢復 | 祕密先存為私人不透明參照，durable setup action 固定 config revision；原子保存及同意圖查回。損壞 profile 不使頁面崩潰；失效憑證不重新發出身分或建立另一個 DB。 |
+| 驗證命令 | 設定 UI 按精確 Task Service project key 保存 executable／逐行 literal argv／1–3600 秒 timeout；不解析 shell、不在儲存時執行。既有 task／ownership gates 決定後續驗證。 |
+| 共用工作介面 | 可調左樹、對話閱讀、未讀／模型偏好、成果連結、固定失敗證據的修復工作與同版技能目錄。技能選取保存 digest，`selected_not_applied` 不代表 runtime 啟用。 |
+| 發送／恢復 | 保存精確原操作、訊息與發送回執；歷史 queued 回執不推論現在排隊位置，也未提供 BAT 逐訊息取消。Unknown 回覆保留原 key／資源並先查回。 |
+| 既有中央與 Fleet | 已配置外部中央沿用；進階加入須原生確認與另行登錄憑證，自有背景工作保留。Windows Fleet 管連線／啟動，Python 管授權／派工，BAT 執行工作；原有 profiles、Kit ownership 與遷移守衛保留。 |
+
+正常使用方式見中英文 [首次使用](../getting-started.md)／[繁中](../getting-started.zh-TW.md)及 [Windows](../windows.md)／[繁中](../windows.zh-TW.md)；[managed 安裝合約](../design/managed-installation.md)列出來源及自動 fixture。下載時須核對 PR 的來源 commit 與成功平台 job；早期 release 資產仍是歷史 client 包。
+
+**本次排除範圍：**正式簽章、Mac 公證、正式更新通道、Linux 原生憑證持久儲存。完整 46 項實際環境的人工驗收由使用者負責，不列入 Agent 未完成工作，也不宣稱已通過。原生 BAT merge 的 unknown ACK 保留原操作及資源；獨立人工裁決 API 不在[目前 merge 合約](../design/worktree-merge.md)範圍，不另列交付門檻。
+
+**驗證與整合紀錄：**以對應 PR、來源 commit 與檢查頁為準。以下保留各階段當時的實作紀錄及基線；其中「尚未實作」和「待驗收」描述是歷史狀態，不覆蓋本節的候選實作與最新排除範圍。
+
+## 歷史實作紀錄（保留當時狀態）
 
 ### 2026-10-10 專案工作樹與對話工作空間
 

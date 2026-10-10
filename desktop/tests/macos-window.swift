@@ -15,12 +15,46 @@ func fail(_ message: String) -> Never {
 func emit(_ value: [String: Any]) {
     print(String(data: try! JSONSerialization.data(withJSONObject: value), encoding: .utf8)!)
 }
+func managedView(_ pid: pid_t) -> [String: Bool] {
+    guard AXIsProcessTrusted() else { fail("Existing Accessibility trust is required; fixture does not change privacy settings") }
+    let application = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(application, 0.2)
+    var result = ["webContent": false, "authenticated": false, "setup": false,
+                  "configurationLoaded": false, "saveEnabled": false, "bounded": true]
+    var pending = [application]
+    var visited = 0
+    let deadline = Date().addingTimeInterval(2)
+    while let element = pending.popLast() {
+        visited += 1
+        if visited > 2000 || Date() >= deadline { result["bounded"] = false; break }
+        func attribute(_ name: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+        }
+        let role = attribute(kAXRoleAttribute) as? String ?? ""
+        if role == "AXWebArea" { result["webContent"] = true }
+        // Never inspect text-entry values or emit any accessibility text.
+        if ["AXStaticText", "AXHeading", "AXButton"].contains(role) {
+            let labels = [attribute(kAXTitleAttribute), attribute(kAXDescriptionAttribute),
+                          role == "AXStaticText" ? attribute(kAXValueAttribute) : nil].compactMap { $0 as? String }
+            for label in labels {
+                if ["Connected to your local Connector", "已連線至本機 Connector"].contains(label) { result["authenticated"] = true }
+                if ["Get ready to work", "準備開始工作"].contains(label) { result["setup"] = true }
+                if ["Configured: 0 hosts, 0 repositories", "已設定 0 台主機、0 個儲存庫"].contains(label) { result["configurationLoaded"] = true }
+                if role == "AXButton" && ["Verify and save host", "驗證並儲存主機"].contains(label),
+                   (attribute(kAXEnabledAttribute) as? Bool) == true { result["saveEnabled"] = true }
+            }
+        }
+        if let children = attribute(kAXChildrenAttribute) as? [AXUIElement] { pending.append(contentsOf: children.reversed()) }
+    }
+    return result
+}
 func perform() {
     if args.count == 2 && args[1] == "existing" {
         print(NSRunningApplication.runningApplications(withBundleIdentifier: identifier).count)
         exit(0)
     }
-    if args.count == 3 && args[1] == "launch" {
+    if args.count == 3 && (args[1] == "launch" || args[1] == "launch-managed") {
         guard NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty
         else { fail("Refusing an existing Dashboard process") }
         let url = URL(fileURLWithPath: args[2]).standardizedFileURL
@@ -29,7 +63,7 @@ func perform() {
         configuration.createsNewApplicationInstance = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
-        configuration.environment = ["BATC_DESKTOP_TOKEN": "fixture-native-token"]
+        configuration.environment = args[1] == "launch-managed" ? [:] : ["BATC_DESKTOP_TOKEN": "fixture-native-token"]
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, error in
             guard error == nil, let app, app.bundleURL?.standardizedFileURL == url,
                   app.bundleIdentifier == identifier, let date = app.launchDate
@@ -53,6 +87,8 @@ func perform() {
     else { fail("Fixture app identity does not match") }
     let state = "finished=\(app.isFinishedLaunching) policy=\(app.activationPolicy.rawValue) hidden=\(app.isHidden) terminated=\(app.isTerminated)"
     switch args[1] {
+    case "managed-view":
+        emit(managedView(pid))
     case "hide":
         // Hosted macOS can report false while the asynchronous hide still completes.
         // Record that return value; the caller must prove hidden state and no windows.

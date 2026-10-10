@@ -1,21 +1,59 @@
 import {renderMessage} from "./message-format.js";
 
-// This is view-local reading state, never a central event cursor or read receipt.
-export function conversationPanel({h, t, when, guard}) {
+// Scrolling never marks messages read. Personal receipts require an explicit action.
+export function conversationPanel({h, t, when, guard, readingActions = null}) {
   const viewport = h("div", {class: "conversation-scroll", tabindex: "0", role: "region", "aria-label": t("messages")});
   const status = h("span", {class: "muted", role: "status"}), fallback = h("div", {class: "conversation-copy"});
   const notice = h("p", {class: "muted", role: "status", hidden: true}, t("message_anchor_missing"));
   const latest = h("button", {class: "mini", type: "button", hidden: true, onclick: () => {
+    if (olderWindow && readingActions) {run(() => readingActions.latest()); return;}
     viewport.scrollTop = viewport.scrollHeight; notice.hidden = true; indicator();
   }}, t("message_latest"));
+  const progress = h("span", {class: "muted", role: "status", "data-conversation-reading": ""});
+  const mark = h("button", {class: "mini", type: "button", onclick: () => {
+    const messages = visible().filter(row => row.reading?.can_mark && row.reading?.unread)
+      .map(row => ({message_id: row.id, revision: row.reading.revision}));
+    if (messages.length) run(() => readingActions.mark(messages));
+  }}, t("conversation_mark"));
+  const remember = h("button", {class: "mini", type: "button", onclick: () => {
+    const row = visible().find(row => row.reading);
+    if (row?.reading) run(() => readingActions.remember({message_id: row.id, revision: row.reading.revision,
+      offset: Math.round(row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top)}, reading?.position?.version || 0));
+  }}, t("conversation_remember"));
+  const older = h("button", {class: "mini", type: "button", hidden: true,
+    onclick: () => run(() => readingActions.older())}, t("conversation_older"));
   const box = h("section", {class: "panel conversation"},
     h("div", {class: "muted"}, t("message_window")), notice, viewport,
-    h("div", {class: "conversation-toolbar"}, status, latest), fallback);
-  let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0;
+    h("div", {class: "conversation-toolbar"}, status, latest),
+    readingActions ? h("div", {class: "actions"}, progress, mark, remember, older) : null, fallback);
+  let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0, reading = null, busy = false, olderWindow = false;
   const alive = () => {if (disposed) return false; try {guard(); return true;} catch {return false;}};
   const atBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
-  const indicator = () => {latest.hidden = atBottom();};
+  const visible = () => {
+    if (document.visibilityState !== "visible") return [];
+    const bounds = viewport.getBoundingClientRect(), top = Math.max(bounds.top, 0), bottom = Math.min(bounds.bottom, innerHeight);
+    return [...rows.values()].filter(row => {
+      const rect = row.node.getBoundingClientRect();
+      return bottom > top && rect.bottom > top && rect.top < bottom;
+    });
+  };
+  const indicator = () => {
+    latest.hidden = !olderWindow && atBottom();
+    if (!readingActions) return;
+    mark.disabled = busy || !visible().some(row => row.reading?.can_mark && row.reading?.unread);
+    remember.disabled = busy || !visible().some(row => row.reading);
+    older.disabled = busy;
+  };
+  const run = async action => {
+    if (!alive() || busy) return;
+    busy = true; indicator();
+    try {await action(); if (alive()) status.textContent = t("conversation_saved");}
+    catch (error) {if (alive()) status.textContent = error.message || String(error);}
+    finally {busy = false; if (alive()) indicator();}
+  };
   viewport.addEventListener("scroll", indicator, {passive: true});
+  window.addEventListener("scroll", indicator, {passive: true});
+  window.addEventListener("resize", indicator);
   const copy = async text => {
     if (!alive()) return;
     const attempt = ++copyAttempt;
@@ -36,13 +74,13 @@ export function conversationPanel({h, t, when, guard}) {
       input.focus(); input.select();
     }
   };
-  const update = messages => {
+  const update = (messages, state = null) => {
     if (!alive()) return;
     const top = viewport.getBoundingClientRect().top;
     const anchor = [...rows.entries()].find(([, row]) => row.node.getBoundingClientRect().bottom > top);
     const selection = window.getSelection();
     const readingSelection = selection && !selection.isCollapsed && viewport.contains(selection.anchorNode);
-    const follow = !initialized || atBottom() && !readingSelection;
+    const follow = !initialized || !state?.preserve && atBottom() && !readingSelection;
     const offset = anchor ? anchor[1].node.getBoundingClientRect().top - top : 0, scrollTop = viewport.scrollTop;
     const next = new Map(), occurrences = new Map();
     for (const message of messages) {
@@ -56,10 +94,30 @@ export function conversationPanel({h, t, when, guard}) {
         row.node = h("article", {class: "msg"}, h("div", {class: "message-meta"}, row.who,
           h("button", {class: "mini", type: "button", onclick: () => copy(row.text)}, t("message_copy"))), row.body);
       }
-      const meta = `${message.role || ""} · ${when(message.ts)}`;
+      const metadata = [message.role || "", when(message.ts)];
+      if (message.role === "tool") metadata.push(message.tool || t("obs_unknown"),
+        t("message_tool_status", {status: message.denied ? "denied" : message.deferred ? "deferred" : message.status || t("obs_unknown")}));
+      else if (typeof message.status === "string") metadata.push(t("message_tool_status", {status: message.status}));
+      if (typeof message.agent === "string") metadata.push(t("message_agent", {agent: message.agent}));
+      if (typeof message.model === "string") metadata.push(t("message_model", {model: message.model}));
+      if (typeof message.duration_ms === "number" && Number.isFinite(message.duration_ms) && message.duration_ms >= 0)
+        metadata.push(t("message_duration", {ms: message.duration_ms}));
+      const meta = metadata.join(" · ");
       if (row.meta !== meta) {row.who.textContent = meta; row.meta = meta;}
       row.node.className = `msg${message.role === "user" ? " user" : ""}`;
-      if (row.text !== text) {row.body.replaceChildren(...renderMessage(h, t, text, copy)); row.text = text;}
+      row.id = message.id; row.reading = message.reading;
+      row.node.dataset.messageId = typeof message.id === "string" ? message.id : "";
+      const tool = message.role === "tool", completed = tool && message.status === "completed" && !message.denied && !message.deferred;
+      if (row.tool !== tool) {row.body.replaceChildren(); row.text = null; row.tool = tool; row.toolDetails = null;}
+      if (tool && !row.toolDetails) {
+        row.toolContent = h("div", {});
+        row.toolDetails = h("details", {class: "message-tool", open: !completed}, h("summary", {}, t("message_tool_details")), row.toolContent);
+        row.toolDetails.addEventListener("toggle", indicator); row.body.append(row.toolDetails);
+      }
+      if (tool && !completed) row.toolDetails.open = true; // errors, pending and unknown never fold out of sight
+      if (row.text !== text) {
+        (tool ? row.toolContent : row.body).replaceChildren(...renderMessage(h, t, text, copy)); row.text = text;
+      }
       next.set(key, row);
     }
     // Keep unchanged nodes in place so refresh does not erase focus or selected text.
@@ -75,7 +133,25 @@ export function conversationPanel({h, t, when, guard}) {
     if (follow) {viewport.scrollTop = viewport.scrollHeight; notice.hidden = true;}
     else if (anchor && next.has(anchor[0])) viewport.scrollTop += next.get(anchor[0]).node.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset;
     else {viewport.scrollTop = scrollTop; if (anchor) notice.hidden = false;}
-    rows = next; initialized = true; indicator();
+    rows = next;
+    if (state?.restore) {
+      const row = [...rows.values()].find(row => row.id === state.restore.message_id);
+      if (row) {
+        viewport.scrollTop += row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top - state.restore.offset;
+        notice.hidden = false; notice.textContent = t("conversation_restored");
+      } else {notice.hidden = false; notice.textContent = t("message_anchor_missing");}
+    }
+    if (state?.latest) {viewport.scrollTop = viewport.scrollHeight; notice.hidden = true;}
+    if (readingActions && state) {
+      reading = state.reading; older.hidden = state.next_offset == null; olderWindow = Boolean(state.olderWindow);
+      progress.textContent = reading?.unread_count == null ? t("conversation_unknown")
+        : t(reading.complete ? "conversation_unread" : "conversation_partial", {count: reading.unread_count});
+      progress.title = t("conversation_count_note");
+    }
+    initialized = true; indicator();
   };
-  return {box, update, dispose() {disposed = true; viewport.removeEventListener("scroll", indicator);}};
+  return {box, update, dispose() {
+    disposed = true; viewport.removeEventListener("scroll", indicator);
+    window.removeEventListener("scroll", indicator); window.removeEventListener("resize", indicator);
+  }};
 }

@@ -2,11 +2,9 @@
 
 **English** · [繁體中文](windows.zh-TW.md) · [Product overview](../README.md)
 
-Windows Fleet is the product's local connection and startup layer. It is already
-integrated into the Tauri client. Python Connector / Task Service remains the
-authority for agent work, and BAT executes that work on the chosen host. A Windows
-client can use a Linux central service; it does not need a Windows-native central
-to manage its existing Fleet connections.
+Windows Fleet is the local connection and startup layer inside Tauri. Python Connector / Task Service authorizes and dispatches work; BAT executes it on the selected host. The candidate desktop package includes a local Python central runtime. Joining an existing central, including one on Linux, remains an advanced option.
+
+The implementation introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) is included in this source version; that does not update previously published release assets. Older release assets are historical client packages. Follow [its checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) to a desktop run, match the source commit, and download `desktop-Windows-unsigned` only from a successful Windows package job.
 
 ## What runs where
 
@@ -20,37 +18,27 @@ to manage its existing Fleet connections.
 Project organization is one Dashboard view over this system. Project Hub supplies
 interaction references; it is not the runtime or data backend.
 
-## Use an existing Windows installation
+## First launch and BAT access
 
-These are the **current configured-trial steps**. The required normal installer must
-prepare the runtime and background environment automatically; that complete flow is
-[still being implemented](design/managed-installation.md).
+1. Install the matching NSIS `.exe` and launch Dashboard. It prepares its private local central and personal identity; no preinstalled Python / uv or copied central API token is needed.
+2. Open **Connection / Fleet → Get ready to work**. In **Connect BAT**, choose an importable profile or enter the actual BAT endpoint, trusted fingerprint, workspace profile ID and BAT token. Choose the intended managed permissions and dedicated remote directories, then **Verify and save host**.
+3. Git synchronization and artifact work use an existing trusted **SSH alias configured on this computer**. Choose **Allow Git worktrees sharing a clone** only when the intended direct BAT starts need shared clone metadata. Neither setting transfers ownership of human work.
+4. Under **Bind a GitHub repository**, read the selected host's workspaces and bind the exact repository, Git remote and workspace ID. Grant only the intended integration / merge / metadata permissions. Saving verifies access without pushing or opening a PR.
+5. **Configure verification commands** is for exact Task Service project keys: executable, one literal argument per line, and timeout. Saving does not run the command. See the [full setup guide](getting-started.md) for source selection, recovery and agent access.
 
-1. Get `desktop-Windows-unsigned` from a successful [desktop workflow run](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
-   It contains the NSIS `.exe`. Verify its commit; artifacts can expire and this is
-   not yet a signed release / update channel.
-2. Connect the trusted central and native credential using the
-   [current desktop setup](getting-started.md#5-connect-the-desktop-client).
-3. If Fleet is already deployed, keep its reviewed Kit inventory, BAT profile index
-   and SSH configuration. The native adapter reads that same configuration. Use
-   [fleet.example.json](../desktop/fleet.example.json) and the
-   [installation contract](design/fleet-installation.md) to bind the existing Kit.
-   The sample is not a complete installation; no private topology belongs in this repo.
-4. In Connection settings, inspect the current backend and choose **connections**,
-   **BAT profiles**, and **Dashboard** independently. Preview prerequisite connections
-   before applying or launching. Dashboard-only works without a local BAT executable.
-5. Read readiness per host. Tunnel, pinned TLS, BAT authentication/workspace and
-   central observe access are separate checks. For Tailscale sign-in, open the installed
-   Tailscale app from its local panel, sign in there, then refresh status.
-6. Review login-picker / saved launch behavior. An omitted `backend` retains
-   **PowerShell** for compatibility. Rust is integrated but taking over an existing
-   owner requires the explicit migration flow; installing a new Dashboard is not migration.
+The shared Dashboard provides the adjustable project tree, conversation and send receipts, model preferences, reviewed skill selections, results and repair-work entry. Skill selection does not automatically activate a skill in an agent.
 
-Closing the Dashboard hides its window and leaves background work running. Explicit
-Quit is different: it requests normal shutdown only of the proven owned local Fleet
-monitor and refuses uncertain ownership. Neither action ends central tasks or manual
-BAT sessions. Configured remote central bootstrap uses a fixed SSH recipe; it does
-not install an arbitrary service or silently create another central database.
+## Fleet connections, profiles and sign-in
+
+Keep the existing reviewed Kit inventory, BAT profile index and SSH configuration when Fleet is already deployed. The native adapter reads that configuration. [fleet.example.json](../desktop/fleet.example.json) and the [Fleet installation contract](design/fleet-installation.md) describe its explicit binding; the sample is not a complete private network configuration. Central onboarding does not invent an SSH topology or take over an existing Fleet owner.
+
+In Connection settings, inspect the current backend and choose **connections**, **BAT profiles** and **Dashboard** independently. Preview prerequisites before saving or launching. Dashboard-only works without a local BAT executable. Tunnel, pinned TLS, BAT authentication/workspace and central observe access are distinct readiness checks.
+
+For Tailscale sign-in, open the installed Tailscale app from its panel, sign in there, then refresh status. Keep the login picker or review the saved launch choices. An omitted `backend` retains **PowerShell** compatibility; moving to Rust requires the explicit migration flow that proves the previous owner stopped.
+
+**Start when I sign in** starts the owned managed installation and the selected Windows Fleet login flow. **Open Dashboard in browser** uses authenticated local handoff. Closing the window leaves background central work running. Explicit **Quit Dashboard** follows the normal shutdown guards for the proven local Fleet monitor; it does not stop central tasks or manual BAT sessions.
+
+**Advanced: join an existing central** changes the selected client binding after native confirmation and separate credential enrollment. Existing local background work remains. A configured remote bootstrap uses a fixed SSH recipe to query/start that central; it does not install an arbitrary service or create another database after failure.
 
 ## Resource index
 
@@ -64,7 +52,4 @@ not install an arbitrary service or silently create another central database.
 | Credential Manager, tray and native files | [Desktop client](design/desktop.md) · [file operations](design/native-files.md) |
 | Validation packages and installed fixtures | [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [acceptance matrix](product/acceptance-v2.md) |
 
-Windows installation/WebView fixtures, Fleet source tests and a real working day
-against the user's SSH / Tailscale / BAT hosts are different evidence. Complete
-managed installation, live Fleet acceptance and signed upgrades remain open product
-work. Mac Dashboard support does not establish a Mac port of Windows Fleet.
+Windows package/WebView fixtures, Fleet source tests and a user's real SSH / Tailscale / BAT environment are distinct evidence. Match validation records to the package source commit. Formal signing and production update channels are excluded from this delivery; full real-environment acceptance belongs to the user. Neither exclusion is a completed feature or test. Mac Dashboard support does not imply a Windows Fleet port.

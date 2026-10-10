@@ -57,11 +57,12 @@ function Run-Installer([string]$Path, [string]$Arguments) {
     }
     if ($process.ExitCode -ne 0) { throw "Installer exit code: $($process.ExitCode)" }
 }
-function Start-Dashboard {
+function Start-Dashboard([bool]$Managed = $false) {
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
     $info.WorkingDirectory = $installDir
-    $info.Environment['BATC_DESKTOP_TOKEN'] = 'fixture-native-token'
+    if ($Managed) { $null = $info.Environment.Remove('BATC_DESKTOP_TOKEN') }
+    else { $info.Environment['BATC_DESKTOP_TOKEN'] = 'fixture-native-token' }
     [Diagnostics.Process]::Start($info)
 }
 function Stop-Owned([Diagnostics.Process]$Process) {
@@ -112,10 +113,85 @@ function Save-Window([IntPtr]$Window, [string]$Name) {
         $bitmap.Save((Join-Path $Evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
 }
+function Build-ManagedViewProbe {
+    $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
+    $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $framework 'csc.exe'))
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($arg in @('/nologo', '/target:exe', '/platform:x64', '/codepage:65001', "/out:$managedViewProbe",
+        "/reference:$(Join-Path $framework 'WPF/UIAutomationClient.dll')",
+        "/reference:$(Join-Path $framework 'WPF/UIAutomationTypes.dll')",
+        "/reference:$(Join-Path $framework 'WPF/WindowsBase.dll')",
+        (Join-Path $PWD 'tests/windows-managed-view.cs'))) { $info.ArgumentList.Add($arg) }
+    $compiler = [Diagnostics.Process]::Start($info)
+    try {
+        $output = $compiler.StandardOutput.ReadToEndAsync()
+        $errors = $compiler.StandardError.ReadToEndAsync()
+        if (-not $compiler.WaitForExit(60000)) {
+            $compiler.Kill()
+            if (-not $compiler.WaitForExit(5000)) { throw 'Owned UIA compiler did not exit after its deadline' }
+            throw 'UIA fixture compilation exceeded its deadline'
+        }
+        if ($compiler.ExitCode -ne 0) {
+            throw "UIA fixture compilation failed: $($output.GetAwaiter().GetResult())$($errors.GetAwaiter().GetResult())"
+        }
+    } finally { $compiler.Dispose() }
+}
+function Wait-ManagedView([Diagnostics.Process]$Process, [IntPtr]$Window, [string]$Name) {
+    $observed = @{state = @{}; phases = @{}}
+    try {
+        Wait-Until {
+            if ($Process.HasExited) { throw 'Managed app exited before WebView readiness' }
+            $observed.phases = [ordered]@{spawned=$false; started=$false; owner_verified=$false; assemblies_loaded=$false;
+                window_resolved=$false; query_started=$false; query_completed=$false; completed=$false; failed=$false; timed_out=$false}
+            # The already compiled MTA client avoids PowerShell/STA startup and
+            # retains process isolation if an accessibility provider stops responding.
+            $info = [Diagnostics.ProcessStartInfo]::new($managedViewProbe)
+            $info.UseShellExecute = $false
+            $info.CreateNoWindow = $true
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            foreach ($arg in @($Window.ToInt64().ToString(), $Process.Id.ToString())) { $info.ArgumentList.Add($arg) }
+            $probe = [Diagnostics.Process]::Start($info)
+            $observed.phases.spawned = $true
+            try {
+                $output = $probe.StandardOutput.ReadToEndAsync()
+                $errors = $probe.StandardError.ReadToEndAsync()
+                if (-not $probe.WaitForExit(8000)) {
+                    $observed.phases.timed_out = $true
+                    $probe.Kill()
+                    if (-not $probe.WaitForExit(5000)) { throw 'Owned UIA probe did not exit after its deadline' }
+                }
+                foreach ($phase in $errors.GetAwaiter().GetResult().Split([char]10)) {
+                    $phase = $phase.Trim()
+                    if (@('started', 'owner_verified', 'assemblies_loaded', 'window_resolved',
+                        'query_started', 'query_completed', 'completed', 'failed') -ccontains $phase) { $observed.phases[$phase] = $true }
+                }
+                if ($observed.phases.timed_out) { throw 'Native UI Automation probe exceeded its deadline' }
+                if ($probe.ExitCode -ne 0) { throw 'Native UI Automation readiness probe failed' }
+                $observed.state = $output.GetAwaiter().GetResult() | ConvertFrom-Json
+                @('webContent', 'authenticated', 'setup', 'configurationLoaded', 'saveEnabled', 'bounded').Where({
+                    $observed.state.$_ -ne $true
+                }).Count -eq 0
+            } finally { $probe.Dispose() }
+        } 'Managed WebView did not render authenticated first-run configuration'
+    } catch {
+        # Preserve the real native surface before app cleanup, even when UIA stalls.
+        try { Save-Window $Window "$Name-failed.png" } catch { Write-Warning 'Readiness failure screenshot was unavailable' }
+        throw
+    } finally {
+        $observed.state | ConvertTo-Json | Set-Content (Join-Path $Evidence "$Name-readiness.json") -Encoding utf8
+        $observed.phases | ConvertTo-Json | Set-Content (Join-Path $Evidence "$Name-probe-phases.json") -Encoding utf8
+    }
+}
 $app = $null
 $second = $null
 $reopened = $null
+$managedViewProbe = Join-Path $installRoot 'managed-view-probe.exe'
 try {
+    Build-ManagedViewProbe
     # NSIS /D must be last and unquoted, even when the path contains spaces.
     Run-Installer $installer "/S /D=$installDir"
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Installed executable missing' }
@@ -177,6 +253,32 @@ try {
     Save-Window $windows[0] 'reopened.png'
     Record-Step 'Owned process termination/relaunch resumed WebView polling and preserved configuration'
     Stop-Owned $reopened
+    Remove-Item -LiteralPath $central
+    $app = Start-Dashboard $true
+    $managedIdentity = node tests/managed-installed-probe.mjs wait $dataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Managed clean-profile first-run failed' }
+    Wait-Until { @([DashboardWindows]::Find($app.Id)).Count -eq 1 } 'Managed first-run window missing'
+    $window = @([DashboardWindows]::Find($app.Id))[0]
+    Wait-ManagedView $app $window 'managed-first-run'
+    Save-Window $window 'managed-first-run.png'
+    if (-not [DashboardWindows]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Managed WM_CLOSE failed' }
+    Wait-Until { -not [DashboardWindows]::IsWindowVisible($window) } 'Managed close did not hide window'
+    $closedIdentity = node tests/managed-installed-probe.mjs probe $dataRoot
+    if ($LASTEXITCODE -ne 0 -or $closedIdentity -cne $managedIdentity) { throw 'Managed identity changed after close' }
+    Stop-Owned $app
+    $backgroundIdentity = node tests/managed-installed-probe.mjs probe $dataRoot
+    if ($LASTEXITCODE -ne 0 -or $backgroundIdentity -cne $managedIdentity) { throw 'Central did not survive UI process termination' }
+    $reopened = Start-Dashboard $true
+    $reopenedIdentity = node tests/managed-installed-probe.mjs wait $dataRoot
+    if ($LASTEXITCODE -ne 0 -or $reopenedIdentity -cne $managedIdentity) { throw 'Managed relaunch changed installation identity' }
+    Wait-Until { @([DashboardWindows]::Find($reopened.Id)).Count -eq 1 } 'Managed reopened window missing'
+    $reopenedWindow = @([DashboardWindows]::Find($reopened.Id))[0]
+    Wait-ManagedView $reopened $reopenedWindow 'managed-reopened'
+    Save-Window $reopenedWindow 'managed-reopened.png'
+    Stop-Owned $reopened
+    node tests/managed-installed-probe.mjs stop $dataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Managed fixture service cleanup failed' }
+    Record-Step 'Clean managed first-run and relaunch rendered authenticated, enabled setup via UI Automation; same identity across close and relaunch; central survived UI termination'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
     Run-Installer $uninstaller '/S'
     Wait-Until { -not (Test-Path -LiteralPath $binary) -and @(Get-Registration).Count -eq 0 } 'Uninstall left binary or registration'
@@ -190,9 +292,12 @@ try {
     Stop-Owned $second
     Stop-Owned $reopened
     Stop-Owned $app
+    node tests/managed-installed-probe.mjs stop $dataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Managed fixture service cleanup failed' }
     $receipt | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $Evidence 'result.json') -Encoding utf8
     # State was proven absent before this fixture; only fixture-created app data is removed.
     foreach ($path in @($configRoot, $dataRoot)) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }
+    if (Test-Path -LiteralPath $managedViewProbe) { Remove-Item -LiteralPath $managedViewProbe }
 }

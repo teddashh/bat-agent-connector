@@ -21,6 +21,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import platform_files
+
 # Latest allocated data step; individual backfills retain their own version gates.
 LATEST_DATA_STEP = 3
 
@@ -79,12 +81,23 @@ def _context_refs(refs: dict | None) -> dict | None:
 class Journal:
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.path.parent.chmod(0o700)
-        if not self.path.exists():
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(fd)
-        self.path.chmod(0o600)
+        if platform_files.WINDOWS:
+            platform_files.ensure_private_directory(self.path.parent)
+            # Pin the chain while SQLite opens its WAL/SHM siblings.
+            self._storage_directory = platform_files.native.open_dir(self.path.parent)
+            try:
+                fd = platform_files.open_private_file(self.path, os.O_RDWR | os.O_CREAT)
+                os.close(fd)
+            except BaseException:
+                self._storage_directory.close()
+                raise
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.path.parent.chmod(0o700)
+            if not self.path.exists():
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(fd)
+            self.path.chmod(0o600)
         self.db = sqlite3.connect(self.path, isolation_level=None, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -364,6 +377,8 @@ class Journal:
         session_metadata_schema(self)
         from .work_item_reads import schema as work_item_reads_schema
         work_item_reads_schema(self)
+        from .session_reading import schema as session_reading_schema
+        session_reading_schema(self)
 
     def _migrate_artifacts(self):
         # Additive DDL runs after numbered data migrations without claiming their versions.
@@ -444,6 +459,8 @@ class Journal:
 
     def close(self):
         self.db.close()
+        if getattr(self, "_storage_directory", None):
+            self._storage_directory.close()
         if getattr(self, "on_close", None):
             self.on_close()
 

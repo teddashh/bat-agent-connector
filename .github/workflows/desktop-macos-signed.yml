@@ -58,6 +58,11 @@ jobs:
           toolchain: "1.98.1"
       - run: npm ci
         working-directory: desktop
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+      - name: Bundle matching managed central runtime
+        run: uv run --locked --extra desktop-build python desktop/scripts/build-managed-runtime.py
       - name: Build Developer ID signed and notarized DMG
         working-directory: desktop
         env:

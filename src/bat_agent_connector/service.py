@@ -641,6 +641,7 @@ async def session_read(
     max_chars: int = 12_000,
     max_message_chars: int = 2_000,
     after: Any = None,
+    index_reading: bool = False,
 ) -> dict:
     last_n = max(1, min(MAX_LAST_N, int(last_n)))
     offset = max(0, int(offset))
@@ -664,8 +665,11 @@ async def session_read(
     want = offset + last_n
     archive_total = None
     arch_off = 0
+    archive_complete = False
     raw_budget = 3000
     def need_archive() -> bool:
+        if index_reading:
+            return not archive_complete
         if isinstance(after, str) and (after.startswith("batc-") or turn):
             return not any(m.get("id") == after and _is_user(m) for m in newest_first)
         visible = [m for m in newest_first if after_ms is None or _msg_ms(m) > after_ms]
@@ -681,6 +685,7 @@ async def session_read(
         archive_total = r.get("total", archive_total)
         msgs = [m for m in r.get("messages") or [] if isinstance(m, dict)]
         if not msgs:
+            archive_complete = r.get("hasMore") is False
             break
         for m in reversed(msgs):
             if m.get("id") not in live_ids:
@@ -688,6 +693,7 @@ async def session_read(
         arch_off += len(msgs)
         raw_budget -= len(msgs)
         if not r.get("hasMore"):
+            archive_complete = r.get("hasMore") is False
             break
 
     chronological = list(reversed(newest_first))
@@ -742,7 +748,12 @@ async def session_read(
         if not prog["started"]:
             since["streaming_text_tail_hidden"] = True  # the live tail may still be the previous turn
             pending = None  # a blocked prompt may also belong to the previous turn
+    reading_index = {}
+    if index_reading:
+        from .session_reading import index_messages
+        reading_index["_reading_index"] = index_messages(chronological, complete=archive_complete, include_tools=include_tools)
     return {
+        **reading_index,
         **since,
         "host": host,
         "session_id": sid,

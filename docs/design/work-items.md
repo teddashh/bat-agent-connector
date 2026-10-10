@@ -13,6 +13,16 @@
 
 ID 隨機產生，封存的列保留，所以 ID 不會重用。改名、移動、排序都不改 ID。
 
+2026-10-10 共用介面補充：專案與工作清單可拖曳同層項目，固定項目不跨越未固定群組，
+不因拖放改變 parent。拖曳與「…」內的上移／下移都提交完整 `before`／`order`，另帶
+`expected_versions={id:version}`；中央在 admission 與執行時都查核各 sibling version。
+舊 client 只有 `before` 仍沿用原順序合約。右鍵、Shift+F10 與「…」開同一份動作／表單，
+Escape 關閉並還原焦點；開著草稿或拖曳時不由事件刷新重建畫面。
+
+Session、直接開工及專案派工輸入區另提供按鈕／Enter／Ctrl 或 ⌘+Enter 的入口偏好。
+Shift+Enter 保留換行，IME composition／229 keycode／重複按鍵不送出；快捷鍵只呼叫原按鈕，
+沿用其權限、固定意圖、附件 readiness 與中央 admission gates，不自行提交另一套 request。
+
 ## Actions
 
 | Action | Scope | 前置條件 |
