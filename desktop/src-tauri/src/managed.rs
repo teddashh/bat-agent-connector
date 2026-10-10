@@ -105,13 +105,21 @@ impl Managed {
             },
             serial: Mutex::new(()),
         };
-        // Any configured advanced service, including an invalid/symlink file, prevents
-        // local provisioning. A remote connection failure never creates another journal.
+        // An advanced central always remains the selected client binding. Only an
+        // already saved installation can additionally recover its background service;
+        // a remote connection failure never provisions a second journal.
         match fs::symlink_metadata(config.join("central.json")) {
             Ok(_) => {
                 state.status.mode = "external";
                 state.status.background = false;
-                return (state, None);
+                match fs::symlink_metadata(state.data_dir.join("installation.json")) {
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                        // Python verifies the private manifest, identity and ownership
+                        // challenge before reconnecting. Its failure is never a fallback.
+                        state.status.background = true;
+                    }
+                    _ => return (state, None),
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
@@ -462,6 +470,24 @@ mod tests {
             "MANAGED_RUNTIME_MANIFEST_INVALID"
         );
         assert!(!data.exists());
+    }
+
+    #[test]
+    fn existing_owned_manifest_keeps_external_client_selected_during_background_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("configuration");
+        let data = root.path().join("application");
+        fs::create_dir(&config).unwrap();
+        fs::write(config.join("central.json"), b"operator-owned external configuration").unwrap();
+        fs::create_dir_all(data.join("managed-central")).unwrap();
+        let installation = data.join("managed-central/installation.json");
+        fs::write(&installation, b"saved installation evidence for Python to verify").unwrap();
+        let (managed, launch) = Managed::prepare(&root.path().join("missing-package"), &data, &config);
+        assert_eq!(managed.status.mode, "external");
+        assert!(managed.status.background);
+        assert!(!managed.status.ready && managed.status.error.is_some() && launch.is_none());
+        assert_eq!(fs::read(installation).unwrap(), b"saved installation evidence for Python to verify");
+        assert!(!data.join("managed-central/state/tasks.sqlite3").exists());
     }
 
     #[test]
