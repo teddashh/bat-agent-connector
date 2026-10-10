@@ -30,7 +30,7 @@ The shared Dashboard provides the adjustable project tree, conversation and send
 
 ## Fleet connections, profiles and sign-in
 
-For a new Fleet installation, use the public [Rust configuration and setup guide](design/fleet-configuration.md) with [fleet.example.json](../desktop/fleet.example.json) and the [generic inventory, profile and SSH examples](../desktop/fleet.example/). Explicit `"backend":"rust"` needs no separate repository or legacy PS/VBS scripts. Replace all example connection details with your own trusted configuration. Existing Fleet installations retain their inventory, profiles, SSH configuration and owner; use the native migration flow for a backend change. Central onboarding does not invent SSH topology or take over an existing Fleet owner.
+For a new Fleet installation, use the public [Rust configuration and setup guide](design/fleet-configuration.md) with [fleet.example.json](../desktop/fleet.example.json) and the [generic inventory, profile and SSH examples](../desktop/fleet.example/README.md). Explicit `"backend":"rust"` needs no separate repository or legacy PS/VBS scripts. Replace all example connection details with your own trusted configuration. Existing Fleet installations retain their inventory, profiles, SSH configuration and owner; use the native migration flow for a backend change. Central onboarding does not invent SSH topology or take over an existing Fleet owner.
 
 In Connection settings, inspect the current backend and choose **connections**, **BAT profiles** and **Dashboard** independently. Preview prerequisites before saving or launching. Dashboard-only works without a local BAT executable. Tunnel, pinned TLS, BAT authentication/workspace and central observe access are distinct readiness checks.
 

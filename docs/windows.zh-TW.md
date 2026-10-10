@@ -30,7 +30,7 @@ runtime 或資料後端。
 
 ## Fleet 連線、profiles 與登入
 
-首次設定 Fleet 可直接使用公開的 [Rust 設定指南](design/fleet-configuration.md#繁體中文設定摘要)、[fleet.example.json](../desktop/fleet.example.json) 與[通用 inventory／profile／SSH 範例](../desktop/fleet.example/)。明確指定 `"backend":"rust"` 不需其他 repository 或舊 PS／VBS scripts；範例連線資料必須換成自己的可信設定。已有 Fleet 時保留原 inventory、profiles、SSH 設定及 owner，backend 變更沿用原生遷移流程。中央 onboarding 不會猜測 SSH 拓撲或接管既有 Fleet owner。
+首次設定 Fleet 可直接使用公開的 [Rust 設定指南](design/fleet-configuration.md#繁體中文設定摘要)、[fleet.example.json](../desktop/fleet.example.json) 與[通用 inventory／profile／SSH 範例](../desktop/fleet.example/README.md)。明確指定 `"backend":"rust"` 不需其他 repository 或舊 PS／VBS scripts；範例連線資料必須換成自己的可信設定。已有 Fleet 時保留原 inventory、profiles、SSH 設定及 owner，backend 變更沿用原生遷移流程。中央 onboarding 不會猜測 SSH 拓撲或接管既有 Fleet owner。
 
 在連線設定查看目前 backend，分別選擇**背景連線、BAT profiles、Dashboard**，保存或啟動前預覽必要條件。Dashboard-only 不需本機 BAT executable。Tunnel、固定 TLS 指紋、BAT 驗證／workspace、中央 observe 存取是不同的就緒檢查。
 

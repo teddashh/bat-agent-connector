@@ -4,7 +4,7 @@
 
 The packaged Windows client contains the Rust Fleet runtime. A new installation can
 use the public [configuration example](../../desktop/fleet.example.json) and
-[example data directory](../../desktop/fleet.example/) without another repository,
+[example data directory](../../desktop/fleet.example/README.md) without another repository,
 PowerShell Fleet scripts or VBS launchers. Windows OpenSSH and BAT remain separate
 installed tools. This is the optional native connection layer; the bundled central
 and shared Web Dashboard do not require Fleet configuration.
