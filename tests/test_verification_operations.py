@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from bat_agent_connector import api_auth, cli, registry, service, verification
+from bat_agent_connector import api_auth, cli, platform_files, registry, service, verification
 from bat_agent_connector import verification_operations as subject
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.mcp_server import build_server
@@ -214,8 +214,7 @@ async def test_started_step_without_json_receipt_remains_unknown_without_rewrite
     '{"records":[{}]}', '{"records":[],"operation_receipts":{"op_bad":{}}}', '{"records":[] ,"unexpected":1}'])
 def test_invalid_store_never_overwrites_original_bytes(raw):
     p = verification.path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(raw)
+    platform_files.atomic_write(p, raw.encode())
     with pytest.raises(WriteRefused, match="invalid"):
         verification.record("h1", SID, **PARAMS, actor="witness")
     assert p.read_text() == raw
