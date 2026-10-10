@@ -332,6 +332,326 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 		}
 	};
 }
+//#endregion
+//#region src/managed-setup.js
+function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, onConfigured }) {
+	const key = `batc.managed.setup.${namespace}`;
+	let saved = {}, snapshot = null, busy = false, disposed = false, operation = null;
+	try {
+		saved = JSON.parse(localStorage.getItem(key) || "{}");
+	} catch {}
+	if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
+	const equal = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+	function canonical(value) {
+		if (Array.isArray(value)) return value.map(canonical);
+		if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((k) => [k, canonical(value[k])]));
+		return value;
+	}
+	const validIntent = (intent) => intent && typeof intent.key === "string" && intent.key.length <= 200 && ["setup.host", "setup.repository"].includes(intent.request?.action) && /^[0-9a-f]{64}$/.test(intent.request?.preconditions?.config_revision) && intent.request?.params && typeof intent.request.params === "object" && intent.request?.target && Object.keys(intent.request.target).length === 1 && typeof intent.request.target[intent.request.action === "setup.host" ? "host" : "repository"] === "string" && (!intent.operation_id || /^op_[0-9a-f]{32}$/.test(intent.operation_id));
+	const damaged = !!saved.intent && !validIntent(saved.intent);
+	const alive = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(key, JSON.stringify(saved));
+	};
+	const terminal = () => [
+		"succeeded",
+		"failed",
+		"cancelled"
+	].includes(operation?.status);
+	const message = h("div", { role: "status" }), summary = h("div"), receipt = h("div");
+	const unsaved = h("span", {
+		class: "chip",
+		hidden: true
+	}, t("setup_unsaved"));
+	const fields = new Map();
+	const input = (name, label, options = {}) => {
+		const secret = options.type === "password";
+		const node = h("input", {
+			autocomplete: "off",
+			maxlength: secret ? 4096 : 1024,
+			...options
+		});
+		if (!secret) node.value = typeof saved[name] === "string" ? saved[name] : "";
+		node.addEventListener("input", () => {
+			if (!alive()) return;
+			if (!secret) {
+				saved[name] = node.value;
+				try {
+					persist();
+				} catch (error) {
+					message.replaceChildren(errorBox(error));
+				}
+			}
+			unsaved.hidden = false;
+		});
+		fields.set(name, node);
+		return h("label", {}, t(label), node);
+	};
+	const checkbox = (name, label) => {
+		const node = h("input", { type: "checkbox" });
+		node.checked = saved[name] === true;
+		node.addEventListener("change", () => {
+			if (!alive()) return;
+			saved[name] = node.checked;
+			persist();
+			unsaved.hidden = false;
+		});
+		fields.set(name, node);
+		return h("label", {}, node, " ", t(label));
+	};
+	const profile = h("select", { "aria-label": t("setup_profile") });
+	profile.addEventListener("change", () => {
+		if (!alive() || saved.intent) return;
+		const selected = snapshot?.profiles?.find((row) => row.id === profile.value);
+		saved.import_profile_id = selected?.id || "";
+		if (selected) for (const name of [
+			"url",
+			"fingerprint",
+			"profile_id"
+		]) {
+			fields.get(name).value = selected[name] || "";
+			saved[name] = fields.get(name).value;
+		}
+		persist();
+		unsaved.hidden = false;
+	});
+	const hostForm = h("form", {
+		"data-setup-host": "",
+		onsubmit: (event) => {
+			event.preventDefault();
+			run("host");
+		}
+	}, h("h3", {}, t("setup_host_title")), h("p", { class: "muted" }, t("setup_host_help")), h("label", {}, t("setup_profile"), profile), h("div", { class: "capture-fields" }, input("host", "setup_host_name", {
+		required: true,
+		maxlength: 64
+	}), input("url", "setup_host_url", {
+		type: "url",
+		required: true,
+		placeholder: "wss://host:9876/"
+	}), input("fingerprint", "setup_fingerprint", { required: true }), input("profile_id", "setup_workspace_profile", { placeholder: "default" }), input("bat_secret", "setup_bat_token", { type: "password" })), h("p", { class: "muted" }, t("setup_trust_help")), h("details", {}, h("summary", {}, t("setup_managed_work")), checkbox("writes", "setup_allow_messages"), checkbox("orchestrate", "setup_allow_start"), h("div", { class: "capture-fields" }, input("managed_roots", "setup_managed_roots"), input("ssh_alias", "setup_ssh_alias")), h("p", { class: "muted" }, t("setup_roots_help"))), h("button", {
+		type: "submit",
+		class: "primary"
+	}, t("setup_save_host")));
+	const repoForm = h("form", {
+		"data-setup-repository": "",
+		onsubmit: (event) => {
+			event.preventDefault();
+			run("repository");
+		}
+	}, h("h3", {}, t("setup_repository_title")), h("p", { class: "muted" }, t("setup_repository_help")), h("div", { class: "capture-fields" }, input("repository", "setup_repository", {
+		required: true,
+		placeholder: "owner/repository"
+	}), input("repository_host", "setup_host_name", { required: true }), input("workspace_id", "setup_workspace_id", { required: true }), input("remote_url", "setup_remote_url", {
+		required: true,
+		placeholder: "git@github.com:owner/repository.git"
+	}), input("github_secret", "setup_github_token", { type: "password" })), h("div", { class: "actions" }, checkbox("allow_integrate", "setup_allow_integrate"), checkbox("allow_merge", "setup_allow_merge"), checkbox("allow_pr_update", "setup_allow_pr_update")), h("button", {
+		type: "button",
+		class: "secondary",
+		onclick: () => workspaces().catch(showError)
+	}, t("setup_find_workspaces")), h("div", { "data-setup-workspaces": "" }), h("button", {
+		type: "submit",
+		class: "primary"
+	}, t("setup_save_repository")));
+	const refreshButton = h("button", {
+		class: "secondary",
+		onclick: () => refresh().catch(showError)
+	}, t("setup_refresh"));
+	const retry = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => recover().catch(showError)
+	}, t("setup_recover"));
+	const next = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => {
+			if (!alive() || damaged || !terminal() && !saved.intent?.refused) return;
+			saved.intent = null;
+			operation = null;
+			persist();
+			update();
+			refresh().catch(showError);
+		}
+	}, t("setup_next_change"));
+	const box = h("section", {
+		class: "panel managed-setup",
+		"data-managed-setup": ""
+	}, h("h2", {}, t("setup_title"), " ", unsaved), h("p", { class: "muted" }, t("setup_resume_help")), summary, h("div", { class: "actions" }, refreshButton, retry, next), message, receipt, h("details", { open: true }, h("summary", {}, t("setup_host_title")), hostForm), h("details", {}, h("summary", {}, t("setup_repository_title")), repoForm), h("a", { href: "#/projects" }, t("setup_open_projects")));
+	function showError(error) {
+		if (alive()) {
+			message.replaceChildren(errorBox(error));
+			update();
+		}
+	}
+	function update() {
+		if (!alive()) return;
+		const locked = busy || !snapshot || !!saved.intent || snapshot.busy;
+		for (const field of [
+			...fields.values(),
+			profile,
+			...box.querySelectorAll("button[type=submit]")
+		]) field.disabled = !!locked;
+		refreshButton.disabled = busy;
+		retry.hidden = !saved.intent || terminal();
+		retry.disabled = busy;
+		next.hidden = !saved.intent || !terminal() && !saved.intent.refused;
+		next.disabled = busy || damaged;
+		if (damaged) retry.disabled = true;
+		receipt.replaceChildren();
+		if (operation) receipt.append(opStatus(operation), " ", h("a", { href: `#/op/${operation.operation_id}` }, t("setup_operation")));
+		else if (saved.intent) receipt.append(h("p", { class: "note" }, t("setup_uncertain")));
+	}
+	function accept(candidate) {
+		const intent = saved.intent;
+		if (!candidate || candidate.action !== intent.request.action || !equal(candidate.target, intent.request.target) || !equal(candidate.params, intent.request.params) || !equal(candidate.preconditions, intent.request.preconditions) || candidate.idempotency_key && candidate.idempotency_key !== intent.key || intent.operation_id && candidate.operation_id !== intent.operation_id) throw Error(t("setup_receipt_mismatch"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		persist();
+		if (candidate.status === "succeeded") {
+			unsaved.hidden = true;
+			Promise.resolve(onConfigured?.()).catch(showError);
+		}
+		update();
+	}
+	async function sendOriginal() {
+		const intent = saved.intent;
+		const result = intent.operation_id ? await api("GET", `/operations/${encodeURIComponent(intent.operation_id)}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
+		guard();
+		accept(result.operation);
+	}
+	async function recover() {
+		if (!alive() || busy || !saved.intent || damaged || saved.intent.refused) return;
+		busy = true;
+		update();
+		try {
+			await sendOriginal();
+			await refresh();
+		} finally {
+			busy = false;
+			if (alive()) update();
+		}
+	}
+	async function run(kind) {
+		const form = kind === "host" ? hostForm : repoForm;
+		if (!alive() || busy || !snapshot || saved.intent || !form.reportValidity()) return;
+		busy = true;
+		update();
+		message.replaceChildren();
+		try {
+			persist();
+			const value = (name) => fields.get(name).value.trim();
+			const checked = (name) => fields.get(name).checked;
+			const tokenField = fields.get(kind === "host" ? "bat_secret" : "github_secret");
+			let secretRef;
+			if (tokenField.value) {
+				const staged = await api("POST", "/managed/setup/secrets", {
+					kind: kind === "host" ? "bat" : "github",
+					value: tokenField.value
+				});
+				guard();
+				secretRef = staged.secret_ref;
+				tokenField.value = "";
+			}
+			const params = kind === "host" ? {
+				url: value("url"),
+				fingerprint: value("fingerprint"),
+				profile_id: value("profile_id") || "default",
+				writes: checked("writes"),
+				orchestrate: checked("orchestrate"),
+				managed_roots: value("managed_roots").split(/\r?\n|;/).map((item) => item.trim()).filter(Boolean),
+				...value("ssh_alias") ? { ssh_alias: value("ssh_alias") } : {},
+				...!secretRef && saved.import_profile_id ? { import_profile_id: saved.import_profile_id } : {}
+			} : {
+				host: value("repository_host"),
+				workspace_id: value("workspace_id"),
+				remote_url: value("remote_url"),
+				allow_integrate: checked("allow_integrate"),
+				allow_merge: checked("allow_merge"),
+				allow_pr_update: checked("allow_pr_update")
+			};
+			if (secretRef) params.secret_ref = secretRef;
+			saved.intent = {
+				key: crypto.randomUUID(),
+				request: {
+					action: `setup.${kind}`,
+					target: kind === "host" ? { host: value("host") } : { repository: value("repository") },
+					params,
+					preconditions: { config_revision: snapshot.revision }
+				}
+			};
+			persist();
+			await sendOriginal();
+			await refresh();
+		} catch (error) {
+			if (alive() && saved.intent && !saved.intent.operation_id && [
+				"CONFIGURATION_CHANGED",
+				"SETUP_BUSY",
+				"PRECONDITION_REQUIRED"
+			].includes(error.code)) {
+				saved.intent.refused = error.code;
+				persist();
+			}
+			showError(error);
+		} finally {
+			busy = false;
+			if (alive()) update();
+		}
+	}
+	async function workspaces() {
+		const host = fields.get("repository_host").value.trim();
+		if (!host || busy || !alive()) return;
+		const result = await api("GET", `/workspaces?host=${encodeURIComponent(host)}`);
+		guard();
+		const rows = result.workspaces || [];
+		box.querySelector("[data-setup-workspaces]").replaceChildren(...rows.map((row) => h("button", {
+			class: "secondary",
+			type: "button",
+			onclick: () => {
+				if (!alive() || saved.intent) return;
+				fields.get("workspace_id").value = row.workspace_id || row.id;
+				saved.workspace_id = fields.get("workspace_id").value;
+				persist();
+				unsaved.hidden = false;
+			}
+		}, `${row.name || row.title || row.workspace_id || row.id} · ${row.workspace_id || row.id}`)));
+	}
+	async function refresh() {
+		const result = await api("GET", "/managed/setup");
+		guard();
+		if (disposed) return;
+		snapshot = result;
+		summary.replaceChildren(h("p", {}, t("setup_counts", {
+			hosts: result.hosts?.length || 0,
+			repositories: result.repositories?.length || 0
+		})), ...(result.hosts || []).map((row) => h("p", {}, h("strong", {}, row.name), " · ", t(row.connected ? "setup_connected" : "setup_unverified"), " · ", row.url)), ...[result.busy ? h("p", { class: "note warn" }, t("setup_busy")) : null].filter(Boolean), ...[result.profiles_error ? h("p", { class: "muted" }, t("setup_profiles_unavailable")) : null].filter(Boolean));
+		profile.replaceChildren(h("option", { value: "" }, t("setup_manual_profile")), ...(result.profiles || []).map((row) => h("option", { value: row.id }, row.name || row.id)));
+		profile.value = saved.import_profile_id || "";
+		update();
+	}
+	return {
+		box,
+		async load() {
+			try {
+				await refresh();
+				if (saved.intent?.operation_id) await recover();
+			} catch (error) {
+				showError(error);
+			}
+		},
+		dispose() {
+			disposed = true;
+			for (const name of ["bat_secret", "github_secret"]) fields.get(name).value = "";
+		}
+	};
+}
 var init_tslib_es6 = __esmMin((() => {}));
 async function invoke(cmd, args = {}, options) {
 	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
@@ -427,7 +747,7 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
-var nativeDesktop, nativeFileSupport, browserSessionToken, browserCsrf, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
+var nativeDesktop, nativeFileSupport, browserSessionToken, browserCsrf, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, managedControl, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
 var init_transport = __esmMin((() => {
 	init_core();
 	nativeDesktop = isTauri();
@@ -448,6 +768,7 @@ var init_transport = __esmMin((() => {
 	nativeFilesSave = (reference) => invoke("native_files_save", { reference });
 	nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
 	nativeConnect = () => invoke("connector_connect");
+	managedControl = (input) => invoke("managed_control", { input });
 	nativeDisconnect = () => invoke("connector_disconnect");
 	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
 	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
@@ -1606,9 +1927,206 @@ function conversationPanel({ h, t, when, guard, readingActions = null }) {
 	};
 }
 //#endregion
+//#region src/composer-shortcut.js
+function composerShortcut({ h, t, input, button, storageKey, guard }) {
+	const modes = [
+		"modified",
+		"enter",
+		"button"
+	];
+	let mode = "modified", composing = false, ended = -Infinity;
+	try {
+		const saved = localStorage.getItem(storageKey);
+		if (modes.includes(saved)) mode = saved;
+	} catch {}
+	const select = h("select", { "aria-label": t("composer_shortcut") }, ...modes.map((value) => h("option", { value }, t(`composer_shortcut_${value}`))));
+	select.value = mode;
+	const status = h("span", {
+		class: "muted",
+		role: "status"
+	});
+	select.addEventListener("change", () => {
+		try {
+			guard();
+			localStorage.setItem(storageKey, select.value);
+			mode = select.value;
+			status.textContent = "";
+		} catch (error) {
+			select.value = mode;
+			status.textContent = error.message || String(error);
+		}
+	});
+	const start = () => {
+		composing = true;
+	}, end = () => {
+		composing = false;
+		ended = performance.now();
+	};
+	const keydown = (event) => {
+		if (event.key !== "Enter" || event.shiftKey || event.altKey || event.repeat || event.isComposing || composing || event.keyCode === 229 || performance.now() - ended < 50) return;
+		if (!(mode === "modified" ? event.ctrlKey || event.metaKey : mode === "enter" && !event.ctrlKey && !event.metaKey) || button.disabled || button.hidden) return;
+		try {
+			guard();
+		} catch {
+			return;
+		}
+		event.preventDefault();
+		button.click();
+	};
+	input.addEventListener("compositionstart", start);
+	input.addEventListener("compositionend", end);
+	input.addEventListener("keydown", keydown);
+	return {
+		box: h("div", { class: "actions composer-shortcut" }, h("label", { class: "muted" }, t("composer_shortcut"), " ", select), h("span", { class: "muted" }, t("composer_newline")), status),
+		dispose() {
+			input.removeEventListener("compositionstart", start);
+			input.removeEventListener("compositionend", end);
+			input.removeEventListener("keydown", keydown);
+		}
+	};
+}
+//#endregion
+//#region src/tree-interactions.js
+var drag = null;
+var ids = (rows, key) => rows.map((row) => row[key]);
+var same$1 = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+function treeInteractions({ h, t, row, scope, siblings, index, key, run, open, guard, editing }) {
+	const me = siblings[index];
+	const handle = h("button", {
+		class: "mini tree-drag-handle",
+		type: "button",
+		draggable: "true",
+		title: t("tree_drag_help"),
+		"aria-label": t("tree_drag", { name: me.name || me.title })
+	}, "↕");
+	const clear = () => {
+		if (drag) {
+			drag.editing(false);
+			drag = null;
+		}
+		for (const target of document.querySelectorAll(".tree-drop-target")) target.classList.remove("tree-drop-target");
+	};
+	const allowed = () => drag && drag.row.isConnected && row.isConnected && drag.scope === scope && drag.pinned === me.pinned && same$1(drag.before, ids(siblings, key));
+	handle.addEventListener("dragstart", (event) => {
+		if (!event.dataTransfer) {
+			event.preventDefault();
+			return;
+		}
+		try {
+			guard();
+		} catch {
+			event.preventDefault();
+			return;
+		}
+		clear();
+		drag = {
+			row,
+			scope,
+			index,
+			pinned: me.pinned,
+			before: ids(siblings, key),
+			versions: Object.fromEntries(siblings.map((value) => [value[key], value.version])),
+			editing
+		};
+		editing(true);
+		event.dataTransfer.setData("text/plain", me[key]);
+		event.dataTransfer.effectAllowed = "move";
+	});
+	handle.addEventListener("dragend", clear);
+	row.addEventListener("dragover", (event) => {
+		if (!allowed()) return;
+		event.preventDefault();
+		event.dataTransfer.dropEffect = "move";
+		row.classList.add("tree-drop-target");
+	});
+	row.addEventListener("dragleave", (event) => {
+		if (!row.contains(event.relatedTarget)) row.classList.remove("tree-drop-target");
+	});
+	row.addEventListener("drop", (event) => {
+		if (!allowed()) return;
+		event.preventDefault();
+		const intent = drag, order = intent.before.slice();
+		order.splice(index, 0, order.splice(intent.index, 1)[0]);
+		clear();
+		if (same$1(order, intent.before)) return;
+		try {
+			guard();
+			run("order", intent.before, order, intent.versions);
+		} catch {}
+	});
+	row.addEventListener("contextmenu", (event) => {
+		if (event.shiftKey || event.target.closest("input,textarea,select")) return;
+		try {
+			guard();
+		} catch {
+			return;
+		}
+		event.preventDefault();
+		open();
+	});
+	row.addEventListener("keydown", (event) => {
+		if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
+		if (event.target.closest("input,textarea,select")) return;
+		try {
+			guard();
+		} catch {
+			return;
+		}
+		event.preventDefault();
+		open();
+	});
+	return handle;
+}
+//#endregion
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		setup_title: "準備開始工作",
+		setup_unsaved: "有未儲存設定",
+		setup_resume_help: "可稍後繼續。非機密草稿會保留；帳號授權與主機信任仍須由你確認。",
+		setup_host_title: "1. 連線至 BAT",
+		setup_host_help: "選取已有的 BAT profile，或填入要連線的主機。先確認主機，再選擇可執行的工作。",
+		setup_profile: "BAT 連線 profile",
+		setup_manual_profile: "手動設定主機",
+		setup_host_name: "主機名稱",
+		setup_host_url: "BAT 連線位址",
+		setup_fingerprint: "主機憑證 SHA-256 指紋",
+		setup_workspace_profile: "Workspace profile ID",
+		setup_bat_token: "BAT 連線 token（使用 profile 時可留白）",
+		setup_trust_help: "請與主機擁有者核對指紋。儲存前會驗證連線；不會跳過主機信任。",
+		setup_managed_work: "允許管理工作",
+		setup_allow_messages: "允許操作 Connector 管理的對話",
+		setup_allow_start: "允許在獨立管理工作區開工",
+		setup_managed_roots: "遠端管理目錄（多個目錄用分號分隔）",
+		setup_ssh_alias: "此電腦已設定的 SSH alias",
+		setup_roots_help: "指定專供新管理工作使用的遠端目錄；人工專案保持唯讀。Git 同步與成果操作使用你選擇的 SSH 連線。",
+		setup_save_host: "驗證並儲存主機",
+		setup_repository_title: "2. 連結 GitHub 儲存庫",
+		setup_repository_help: "將儲存庫明確連結到選定主機與 workspace。驗證只讀取資料，不會建立 PR 或推送。",
+		setup_repository: "GitHub 儲存庫",
+		setup_workspace_id: "BAT workspace ID",
+		setup_remote_url: "Git remote 位址",
+		setup_github_token: "GitHub token（已有有效授權時可留白）",
+		setup_allow_integrate: "允許整合成果到 PR",
+		setup_allow_merge: "允許合併 PR",
+		setup_allow_pr_update: "允許更新 PR 資料",
+		setup_find_workspaces: "讀取這台主機的 workspace",
+		setup_save_repository: "驗證並連結儲存庫",
+		setup_refresh: "重新檢查設定",
+		setup_recover: "查回原設定請求",
+		setup_next_change: "檢視下一筆設定",
+		setup_open_projects: "開啟專案，開始派工",
+		setup_operation: "查看設定操作",
+		setup_uncertain: "原設定請求尚未確認。查回同一筆請求後再繼續。",
+		setup_receipt_mismatch: "回執與原設定請求不一致。",
+		setup_counts: "已設定 {hosts} 台主機、{repositories} 個儲存庫",
+		setup_connected: "已連線",
+		setup_unverified: "等待連線驗證",
+		setup_busy: "目前仍有工作或操作；設定會等安全時機再變更。",
+		setup_profiles_unavailable: "尚無可匯入的 BAT profile，或其授權受系統保護。可在下方手動設定。",
+		managed_background_help: "Connector 在背景持續運作。關閉這個畫面不會停止工作。",
+		managed_open_browser: "在瀏覽器開啟 Dashboard",
+		managed_start_login: "登入電腦時啟動",
 		managed_browser_connected: "已連線至本機 Connector",
 		managed_browser_help: "此瀏覽器沿用桌面的個人身分。登出後，可從桌面選單重新開啟 Dashboard。",
 		workspace_navigation: "專案與工作",
@@ -2650,6 +3168,13 @@ var STRINGS = {
 		conversation_unknown: "尚未讀取對話紀錄",
 		conversation_count_note: "中央記錄已觀察訊息的版本；新內容須重新讀取才會計入，部分紀錄不代表完整總數。捲動與事件同步不會標記已讀。",
 		conversation_badge: "{count} 未讀",
+		composer_shortcut: "送出快捷鍵",
+		composer_shortcut_modified: "Ctrl／⌘ + Enter",
+		composer_shortcut_enter: "Enter",
+		composer_shortcut_button: "只用按鈕",
+		composer_newline: "Shift + Enter 換行；選字時不送出。",
+		tree_drag: "拖曳排序：{name}",
+		tree_drag_help: "只在同層移動；也可使用上移／下移按鈕。",
 		conversation_saved: "閱讀狀態已保存。",
 		conversation_restored: "已回到同一身分保存的閱讀位置。",
 		conversation_pending: "閱讀操作尚未完成，請稍後查回或用同一按鈕重試。",
@@ -2853,6 +3378,52 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		setup_title: "Get ready to work",
+		setup_unsaved: "Unsaved settings",
+		setup_resume_help: "Continue later without losing non-secret drafts. You still confirm account authorization and host trust.",
+		setup_host_title: "1. Connect BAT",
+		setup_host_help: "Choose an existing BAT profile or enter a host. Verify the host, then choose which work it may run.",
+		setup_profile: "BAT connection profile",
+		setup_manual_profile: "Configure a host manually",
+		setup_host_name: "Host name",
+		setup_host_url: "BAT endpoint",
+		setup_fingerprint: "Host certificate SHA-256 fingerprint",
+		setup_workspace_profile: "Workspace profile ID",
+		setup_bat_token: "BAT connection token (optional with a profile)",
+		setup_trust_help: "Confirm the fingerprint with the host owner. The connection is verified before saving; host trust is never bypassed.",
+		setup_managed_work: "Allow managed work",
+		setup_allow_messages: "Allow control of Connector-managed conversations",
+		setup_allow_start: "Allow starts in separate managed workspaces",
+		setup_managed_roots: "Remote managed directories (separate with semicolons)",
+		setup_ssh_alias: "SSH alias configured on this computer",
+		setup_roots_help: "Choose remote directories dedicated to new managed work; human projects remain read-only. Git synchronization and artifact actions use your selected SSH connection.",
+		setup_save_host: "Verify and save host",
+		setup_repository_title: "2. Bind a GitHub repository",
+		setup_repository_help: "Bind the repository to an exact host and workspace. Verification only reads data; it creates no PR and pushes nothing.",
+		setup_repository: "GitHub repository",
+		setup_workspace_id: "BAT workspace ID",
+		setup_remote_url: "Git remote URL",
+		setup_github_token: "GitHub token (optional when already authorized)",
+		setup_allow_integrate: "Allow result integration into PRs",
+		setup_allow_merge: "Allow PR merges",
+		setup_allow_pr_update: "Allow PR metadata updates",
+		setup_find_workspaces: "Read this host's workspaces",
+		setup_save_repository: "Verify and bind repository",
+		setup_refresh: "Recheck configuration",
+		setup_recover: "Recover original setup request",
+		setup_next_change: "Review another configuration change",
+		setup_open_projects: "Open projects and start work",
+		setup_operation: "View setup operation",
+		setup_uncertain: "The original configuration request is unconfirmed. Recover that same request before continuing.",
+		setup_receipt_mismatch: "The receipt does not match the original configuration request.",
+		setup_counts: "Configured: {hosts} hosts, {repositories} repositories",
+		setup_connected: "Connected",
+		setup_unverified: "Awaiting connection verification",
+		setup_busy: "Work or operations are still active; configuration changes wait for a safe point.",
+		setup_profiles_unavailable: "No BAT profile can be imported, or its authorization is protected by the operating system. Configure the connection below.",
+		managed_background_help: "Connector keeps running in the background. Closing this view does not stop work.",
+		managed_open_browser: "Open Dashboard in browser",
+		managed_start_login: "Start when I sign in",
 		managed_browser_connected: "Connected to your local Connector",
 		managed_browser_help: "This browser uses your desktop identity. After signing out, reopen Dashboard from the desktop menu.",
 		workspace_navigation: "Projects and work",
@@ -3894,6 +4465,13 @@ var STRINGS = {
 		conversation_unknown: "Conversation has not been observed",
 		conversation_count_note: "Central tracks observed message revisions. New content is counted after refreshing; partial history is not a complete total. Scrolling and event sync never mark messages read.",
 		conversation_badge: "{count} unread",
+		composer_shortcut: "Send shortcut",
+		composer_shortcut_modified: "Ctrl / ⌘ + Enter",
+		composer_shortcut_enter: "Enter",
+		composer_shortcut_button: "Button only",
+		composer_newline: "Shift + Enter adds a line; composition never sends.",
+		tree_drag: "Drag to reorder: {name}",
+		tree_drag_help: "Move within these siblings, or use the Move up / Move down buttons.",
 		conversation_saved: "Reading state saved.",
 		conversation_restored: "Restored the reading position saved by this identity.",
 		conversation_pending: "The reading operation is still pending. Check again or retry the same button.",
@@ -7012,10 +7590,18 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 		if (key === "host") discover();
 	});
 	const label = (name, control) => h("label", {}, t(name), control);
+	const shortcut = composerShortcut({
+		h,
+		t,
+		input: prompt,
+		button: apply,
+		storageKey: `${storageKey}.shortcut`,
+		guard
+	});
 	const box = h("section", {
 		class: "session-start",
 		"data-session-start": ""
-	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label("start_workspace", workspace)), h("div", { class: "actions" }, reload), discoveryStatus, h("p", { class: "muted" }, t("start_isolation"))), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_model", model), label("start_title", title)), label("start_prompt", prompt), h("p", { class: "muted" }, t("start_prompt_help"))), h("div", { class: "actions" }, apply, check, another), result, status);
+	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label("start_workspace", workspace)), h("div", { class: "actions" }, reload), discoveryStatus, h("p", { class: "muted" }, t("start_isolation"))), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_model", model), label("start_title", title)), label("start_prompt", prompt), shortcut.box, h("p", { class: "muted" }, t("start_prompt_help"))), h("div", { class: "actions" }, apply, check, another), result, status);
 	function update() {
 		const fixed = Boolean(saved.intent);
 		for (const el of Object.values(inputs)) el.disabled = busy || fixed;
@@ -8193,10 +8779,18 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		class: "dispatch-advanced",
 		open: Boolean(saved.model || saved.title)
 	}, h("summary", {}, t("dispatch_advanced")), h("div", { class: "capture-fields" }, label("start_title", title), label("start_model", model)));
+	const shortcut = composerShortcut({
+		h,
+		t,
+		input: prompt,
+		button: apply,
+		storageKey: `${storageKey}.shortcut`,
+		guard
+	});
 	const box = h("section", {
 		class: "session-start published-start",
 		"data-published-start": ""
-	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), branchHelp, h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), label("pub_prompt", prompt), project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
+	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), branchHelp, h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), label("pub_prompt", prompt), shortcut.box, project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
 	function update() {
 		const fixed = Boolean(saved.intent);
 		if (attachmentBox) {
@@ -11010,10 +11604,18 @@ async function viewSession(main, host, sid, context = null) {
 			}
 		}
 	}, t("interrupt"));
+	const shortcut = composerShortcut({
+		h,
+		t,
+		input: box,
+		button: send,
+		storageKey: `batc.composer-shortcut.${connection.namespace}`,
+		guard: () => assertView(connection)
+	});
 	const composer = h("div", {
 		hidden: true,
 		id: "workspace-message-input"
-	}, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+	}, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))), shortcut.box);
 	const readonly = h("p", { class: "note" }, t("session_access_unknown"));
 	let capture, permissions, batHandoff;
 	const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
@@ -11333,6 +11935,7 @@ async function viewSession(main, host, sid, context = null) {
 		batHandoff?.dispose();
 		conversation.dispose();
 		mobileLayout?.dispose();
+		shortcut.dispose();
 	};
 }
 function checkpointPanel(host, sid) {
@@ -12459,6 +13062,7 @@ function mergeRecovery(op) {
 	}, h("h2", {}, t("delivery_merge_recovery")), h("p", { class: "note" }, t("delivery_merge_held")), h("dl", { class: "kv" }, ...["source", "destination"].flatMap((label, i) => [h("dt", {}, t("delivery_merge_" + label)), h("dd", {}, h("code", {}, refs.carrier_paths?.[i] || t("obs_unknown")))])), ...frames.map((step) => h("p", {}, h("code", {}, step.name), " · ", t(step.status === "succeeded" ? "delivery_merge_ack" : "delivery_merge_no_ack"), " · ", observationTime(step.finished_at || step.started_at))), h("p", {}, t("delivery_merge_safe_reads")), h("p", { class: "muted" }, t("delivery_merge_closeout")), refs.host && refs.session_id ? observationLink("session", `${refs.host}/${refs.session_id}`) : null);
 }
 function viewSettings(main) {
+	if (state.caps?.managed_installation) return viewManagedSettings(main);
 	if (nativeDesktop) return viewNativeSettings(main);
 	if (state.token === "managed-browser-session") {
 		main.append(h("h1", {}, t("nav_settings")), h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
@@ -12514,6 +13118,110 @@ function viewSettings(main) {
 		h,
 		t
 	});
+}
+async function viewManagedSettings(main) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const guard = () => assertView(connection);
+	const status = h("div", { role: "status" });
+	const local = h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
+		actor: state.caps.actor,
+		scopes: state.caps.scopes.join(", ")
+	})), h("p", { class: "muted" }, t("managed_background_help")), status);
+	main.append(h("h1", {}, t("nav_settings")), local);
+	const setup = managedSetupPanel({
+		h,
+		t,
+		api,
+		guard,
+		namespace: state.namespace,
+		errorBox,
+		opStatus,
+		onConfigured: async () => {
+			const caps = await api("GET", "/capabilities");
+			guard();
+			state.caps = caps;
+		}
+	});
+	main.append(setup.box);
+	await setup.load();
+	guard();
+	const fleetRoot = h("div");
+	main.append(fleetRoot);
+	let disposeFleet;
+	if (nativeDesktop) {
+		const login = h("input", {
+			type: "checkbox",
+			disabled: true
+		});
+		const open = h("button", {
+			class: "secondary",
+			onclick: async () => {
+				open.disabled = true;
+				try {
+					guard();
+					await managedControl({ action: "open_browser" });
+					guard();
+					status.replaceChildren();
+				} catch (error) {
+					if (connection.generation === generation) status.replaceChildren(errorBox(error));
+				} finally {
+					open.disabled = false;
+				}
+			}
+		}, t("managed_open_browser"));
+		local.append(h("div", { class: "actions" }, open, h("label", {}, login, " ", t("managed_start_login"))));
+		try {
+			const state = await managedControl({ action: "status" });
+			guard();
+			login.checked = !!state.login_enabled;
+			login.disabled = false;
+		} catch (error) {
+			status.replaceChildren(errorBox(error));
+		}
+		login.addEventListener("change", async () => {
+			const wanted = login.checked;
+			login.disabled = true;
+			try {
+				guard();
+				const result = await managedControl({
+					action: "set_login",
+					enabled: wanted
+				});
+				guard();
+				login.checked = !!result.login_enabled;
+			} catch (error) {
+				if (connection.generation === generation) {
+					login.checked = !wanted;
+					status.replaceChildren(errorBox(error));
+				}
+			} finally {
+				login.disabled = false;
+			}
+		});
+		disposeFleet = await mountFleet(fleetRoot, {
+			h,
+			t
+		});
+	} else local.append(h("p", { class: "muted" }, t("managed_browser_help")), h("button", {
+		class: "secondary",
+		onclick: () => {
+			disconnect();
+			route();
+		}
+	}, t("disconnect")));
+	const disposeTailscale = mountTailscale(fleetRoot, {
+		h,
+		t
+	});
+	return () => {
+		setup.dispose();
+		disposeFleet?.();
+		disposeTailscale();
+	};
 }
 async function nativeTransition(kind, config = null) {
 	if (state.nativeBusy && kind !== "disconnect") return;
@@ -12814,7 +13522,7 @@ function orderButtons(sibs, i, key, run) {
 		const before = sibs.map((x) => x[key]);
 		const order = before.slice();
 		[order[i], order[j]] = [order[j], order[i]];
-		run("order", before, order);
+		run("order", before, order, Object.fromEntries(sibs.map((x) => [x[key], x.version])));
 	};
 	const can = (j) => j >= 0 && j < sibs.length && sibs[j].pinned === me.pinned;
 	return [
@@ -12854,21 +13562,33 @@ function setEditing(n) {
 function drawer(...children) {
 	const box = h("div", {
 		class: "drawer",
+		id: `drawer-${crypto.randomUUID()}`,
 		hidden: true
 	}, ...children);
 	const toggle = h("button", {
 		class: "mini",
 		title: t("more"),
 		"aria-label": t("more"),
+		"aria-controls": box.id,
+		"aria-expanded": "false",
 		onclick: () => {
 			box.hidden = !box.hidden;
+			toggle.setAttribute("aria-expanded", String(!box.hidden));
 			if (!box.hidden) drawerOpens += 1;
 			setEditing(editing + (box.hidden ? -1 : 1));
 		}
 	}, "…");
-	const open = () => {
+	const open = (focus = false) => {
 		if (box.hidden) toggle.click();
+		if (focus) box.querySelector("input:not(:disabled),textarea:not(:disabled),select:not(:disabled),button:not(:disabled),a")?.focus();
 	};
+	box.addEventListener("keydown", (event) => {
+		if (event.key === "Escape" && !event.isComposing) {
+			event.preventDefault();
+			if (!box.hidden) toggle.click();
+			toggle.focus();
+		}
+	});
 	return {
 		box,
 		toggle,
@@ -12935,6 +13655,11 @@ function liveReload(fn, kinds, prepare = null) {
 }
 async function viewProjects(main) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	const out = h("div", {});
 	const tree = h("div", { class: "panel" });
 	const archived = h("div", {});
@@ -12985,11 +13710,14 @@ async function viewProjects(main) {
 			const rows = [];
 			const walk = (sibs, depth, parent) => sibs.forEach((p, i) => {
 				const msg = out;
-				const run = async (what, before, order) => {
+				const run = async (what, before, order, versions) => {
 					if (what === "order") await change(msg, "project.order", {}, {
 						parent_id: parent,
 						order
-					}, { before }, `project.order.${parent}`);
+					}, {
+						before,
+						expected_versions: versions
+					}, `project.order.${parent}`);
 					else await change(msg, "project.pin", { project_id: p.project_id }, { pinned: !before }, { before }, `project.pin.${p.project_id}`);
 					render();
 				};
@@ -13024,10 +13752,25 @@ async function viewProjects(main) {
 						if (await change(msg, "project.update", { project_id: p.project_id }, { archived: true }, { expected_version: p.version }, `project.archive.${p.project_id}`) || STALE.includes(lastFailure)) render();
 					}
 				}, t("archive"))));
-				rows.push(indent(h("div", { class: "row tree" }, h("div", { class: "grow" }, h("a", {
+				const row = indent(h("div", { class: "row tree" }, h("div", { class: "grow" }, h("a", {
 					class: "title",
 					href: `#/project/${p.project_id}`
-				}, p.name), p.description ? h("div", { class: "muted clamp" }, p.description) : null), ...counts(p.counts), may("manage") ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "project_id", run), d.toggle) : null), depth), d.box);
+				}, p.name), p.description ? h("div", { class: "muted clamp" }, p.description) : null), ...counts(p.counts), may("manage") ? h("span", { class: "tree-actions" }, d.toggle) : null), depth);
+				if (may("manage")) d.box.prepend(h("div", { class: "actions" }, ...orderButtons(sibs, i, "project_id", run)));
+				if (may("manage")) row.querySelector(".tree-actions").prepend(treeInteractions({
+					h,
+					t,
+					row,
+					scope: `${connection.namespace}.project.${parent}`,
+					siblings: sibs,
+					index: i,
+					key: "project_id",
+					run,
+					open: () => d.open(true),
+					guard: () => assertView(connection),
+					editing: (active) => setEditing(editing + (active ? 1 : -1))
+				}));
+				rows.push(row, d.box);
 				walk(p.children, depth + 1, p.project_id);
 			});
 			walk(data.projects, 0, "");
@@ -13050,6 +13793,11 @@ async function viewProjects(main) {
 }
 async function viewProject(main, pid) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	let draft = null;
 	const head = h("div", { class: "panel" });
 	const items = h("div", { class: "panel" });
@@ -13145,11 +13893,14 @@ async function viewProject(main, pid) {
 		const rows = [];
 		const walk = (sibs, depth, parent) => sibs.forEach((w, i) => {
 			const rowMsg = out;
-			const run = async (what, before, order) => {
+			const run = async (what, before, order, versions) => {
 				if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, {
 					parent_id: parent,
 					order
-				}, { before }, `wi.order.${pid}.${parent}`);
+				}, {
+					before,
+					expected_versions: versions
+				}, `wi.order.${pid}.${parent}`);
 				else await change(rowMsg, "work_item.pin", { work_item_id: w.work_item_id }, { pinned: !before }, { before }, `wi.pin.${w.work_item_id}`);
 				render();
 			};
@@ -13181,10 +13932,25 @@ async function viewProject(main, pid) {
 				}
 			}, t("archive_with_children"))));
 			const done = w.steps.filter((s) => s.done).length;
-			rows.push(indent(h("div", { class: "row tree" }, stateChip(w.completion), h("div", { class: "grow" }, h("a", {
+			const row = indent(h("div", { class: "row tree" }, stateChip(w.completion), h("div", { class: "grow" }, h("a", {
 				class: "title",
 				href: `#/item/${w.work_item_id}`
-			}, w.title), w.derived_from ? h("span", { class: "muted" }, " ⑂") : null), w.steps.length ? chip(`${done}/${w.steps.length}`) : null, w.completion.pending ? chip(t("needs_decision"), "warn") : null, may("manage") && !p.archived ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "work_item_id", run), dr.toggle) : null), depth), dr.box);
+			}, w.title), w.derived_from ? h("span", { class: "muted" }, " ⑂") : null), w.steps.length ? chip(`${done}/${w.steps.length}`) : null, w.completion.pending ? chip(t("needs_decision"), "warn") : null, may("manage") && !p.archived ? h("span", { class: "tree-actions" }, dr.toggle) : null), depth);
+			if (may("manage") && !p.archived) dr.box.prepend(h("div", { class: "actions" }, ...orderButtons(sibs, i, "work_item_id", run)));
+			if (may("manage") && !p.archived) row.querySelector(".tree-actions").prepend(treeInteractions({
+				h,
+				t,
+				row,
+				scope: `${connection.namespace}.item.${pid}.${parent}`,
+				siblings: sibs,
+				index: i,
+				key: "work_item_id",
+				run,
+				open: () => dr.open(true),
+				guard: () => assertView(connection),
+				editing: (active) => setEditing(editing + (active ? 1 : -1))
+			}));
+			rows.push(row, dr.box);
 			walk(w.children, depth + 1, w.work_item_id);
 		});
 		walk(data.work_items, 0, "");
