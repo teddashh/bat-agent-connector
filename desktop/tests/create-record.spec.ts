@@ -36,8 +36,8 @@ function fixture() {
   return {state,dispatch};
 }
 
-test('creation layout', async ({browser, baseURL}) => {
-  const folder = process.env.CREATE_SCREENSHOTS || '/tmp/connector-screenshots';
+test('creation layout', async ({browser, baseURL}, testInfo) => {
+  const folder = process.env.CREATE_SCREENSHOTS || testInfo.outputPath('screenshots');
   mkdirSync(folder,{recursive:true});
   for (const locale of ['en','zh-TW']) {
     const context = await browser.newContext({locale, baseURL});
