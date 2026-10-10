@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth, cleanup
+from bat_agent_connector import api_auth, cleanup, platform_files
 from tests.mockbat import TOKEN, MockBat
 from tests.test_checkpoints import daemon as daemon_fixture
 from tests.test_checkpoints import human as human_fixture
@@ -19,6 +19,8 @@ from tests.test_cleanup import setup_work
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-cleanup-ui-") as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / "config"), BATC_STATE_DIR=str(root / "state"), BATC_TEST_TOKEN=TOKEN)
         os.environ.pop("BATC_DEVICE_ID", None)
         mock = MockBat()

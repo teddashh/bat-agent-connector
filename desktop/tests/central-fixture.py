@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth
+from bat_agent_connector import api_auth, platform_files
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import adopt, make_config
 from tests.mockbat import TOKEN, MockBat
@@ -17,6 +17,8 @@ from tests.mockbat import TOKEN, MockBat
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-central-ui-") as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / "config"), BATC_STATE_DIR=str(root / "state"),
                           BATC_TEST_TOKEN=TOKEN)
         mock = MockBat()
