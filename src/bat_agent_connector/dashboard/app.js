@@ -3659,6 +3659,8 @@ function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, erro
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		managed_recovery_title: "本機背景服務尚未就緒",
+		managed_recovery_help: "既有資料與背景工作會保留。若舊版本仍有工作，先讓它完成，再結束並重新開啟桌面程式。下方提供此次啟動錯誤；加入另一個中央仍可從進階選項設定。",
 		...instructionReceiptStrings["zh-TW"],
 		repair_title: "建立修復工作",
 		repair_help: "選擇歸屬專案，讀取這次失敗的固定證據，再建立或查回修復工作。派工前仍會讓你核對目的地與版本。",
@@ -4348,6 +4350,9 @@ var STRINGS = {
 		attachment_input: "輸入",
 		attachment_result: "成果",
 		attachments_not_ready: "請先完成附件上傳或移除未完成的檔案。",
+		attachment_unsupported_image: "僅支援 PNG、JPEG 與 WebP 圖片格式。",
+		dispatch_inspect_images: "請檢視所附檔案",
+		dispatch_attachment_prompt: "未填指示時，會以「{request}」開始工作。",
 		source_unavailable: "無法讀取來源 HEAD，保留草稿；恢復連線後再試。",
 		confirm_source: "確認保留原版本與附件，繼續同一派工",
 		materializations: "附件傳輸",
@@ -5086,6 +5091,8 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		managed_recovery_title: "Local background service is not ready",
+		managed_recovery_help: "Existing data and background work are retained. If an older version still has work, let it finish, then quit and reopen the desktop app. The startup error appears below; joining another central remains an advanced option.",
 		...instructionReceiptStrings["en-US"],
 		repair_title: "Create repair work",
 		repair_help: "Choose a project and read fixed evidence from this failure. Create or recover repair work, then review its destination and version before starting it.",
@@ -5776,6 +5783,9 @@ var STRINGS = {
 		attachment_input: "Input",
 		attachment_result: "Result",
 		attachments_not_ready: "Finish uploading or remove the unfinished files first.",
+		attachment_unsupported_image: "Only PNG, JPEG, and WebP images are supported.",
+		dispatch_inspect_images: "Review attached files",
+		dispatch_attachment_prompt: "Without written instructions, work starts with: “{request}”.",
 		source_unavailable: "Source HEAD is unavailable. Your draft is kept; retry after reconnecting.",
 		confirm_source: "Keep the original commit and attachments; resume this run",
 		materializations: "Attachment transfer",
@@ -10481,6 +10491,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		target: saved.target,
 		source_ref: branchRef(saved.source_ref)
 	});
+	const effectivePrompt = () => saved.prompt.trim() ? saved.prompt : attachments?.refs().length ? t("dispatch_inspect_images") : saved.prompt;
 	const request = () => ({
 		action: "repository.continue",
 		target: saved.target,
@@ -10488,7 +10499,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			source_ref: preview?.source_ref,
 			source_sha: preview?.source_sha,
 			agent: saved.agent,
-			prompt: saved.prompt,
+			prompt: effectivePrompt(),
 			...saved.title ? { title: saved.title } : {},
 			...saved.model && expanded() ? { model: saved.model } : {},
 			...attachments?.refs().length ? { artifacts: attachments.refs() } : {},
@@ -12136,7 +12147,46 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 	saved.attachments = saved.attachments.filter((a) => a && typeof a === "object");
 	for (const a of saved.attachments) delete a.busy;
 	if (typeof saved.text === "string") text.value = saved.text;
-	const files = new Map(), rows = h("div", { class: "attachment-list" });
+	const files = new Map(), previews = new Map(), rows = h("div", { class: "attachment-list" });
+	const ALLOWED_IMAGE_TYPES = new Set([
+		"image/png",
+		"image/jpeg",
+		"image/webp"
+	]);
+	const generateThumbnail = (file, onReady) => {
+		if (!ALLOWED_IMAGE_TYPES.has(file.type) || file.size > 16777216) return;
+		try {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const img = new Image();
+				img.onload = () => {
+					try {
+						const maxDim = 96;
+						let w = img.width, h = img.height;
+						if (w <= 0 || h <= 0) return;
+						if (w > maxDim || h > maxDim) {
+							if (w > h) {
+								h = Math.max(1, Math.round(h * maxDim / w));
+								w = maxDim;
+							} else {
+								w = Math.max(1, Math.round(w * maxDim / h));
+								h = maxDim;
+							}
+						}
+						const canvas = document.createElement("canvas");
+						canvas.width = w;
+						canvas.height = h;
+						const ctx = canvas.getContext("2d");
+						if (!ctx) return;
+						ctx.drawImage(img, 0, 0, w, h);
+						onReady(canvas.toDataURL("image/png"));
+					} catch {}
+				};
+				img.src = reader.result;
+			};
+			reader.readAsDataURL(file);
+		} catch {}
+	};
 	let pendingSelections = 0;
 	const changed = () => queueMicrotask(() => {
 		if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();
@@ -12145,6 +12195,10 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 		class: "muted",
 		role: "status"
 	});
+	const promptHint = h("p", {
+		class: "muted",
+		hidden: true
+	}, t("dispatch_attachment_prompt", { request: t("dispatch_inspect_images") }));
 	const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
 	const nativeUploadAllowed = state.caps?.actions?.some((a) => a.action === "artifact.upload" && a.allowed === true);
 	let native;
@@ -12161,17 +12215,20 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 	const box = h("div", {
 		class: "attachments",
 		hidden: !supported
-	}, nativeFiles ? h("div", { class: "actions" }, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
+	}, nativeFiles ? h("div", { class: "actions" }, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, promptHint, status);
 	const guard = (mounted = false) => {
 		assertView(connection);
 		if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
 	};
-	const persist = () => {
+	const persist = (required = false) => {
 		guard();
 		saved.text = text.value;
 		try {
 			localStorage.setItem(key, JSON.stringify(saved));
-		} catch {}
+		} catch (error) {
+			if (required === true) throw error;
+		}
+		promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some((a) => a.ref);
 		changed();
 	};
 	const removeStored = () => {
@@ -12197,7 +12254,12 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 	const ready = () => pendingSelections === 0 && saved.attachments.every((a) => a.ref);
 	const render = () => {
 		changed();
-		return fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
+		promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some((a) => a.ref);
+		return fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row attachment-row" }, previews.has(a) ? h("img", {
+			class: "attachment-thumb",
+			src: previews.get(a),
+			alt: a.name || t("attachments")
+		}) : null, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
 			"aria-label": t("attachment_role"),
 			onchange: (e) => {
 				guard();
@@ -12221,6 +12283,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 				}
 				saved.attachments = saved.attachments.filter((x) => x !== a);
 				files.delete(a);
+				previews.delete(a);
 				persist();
 				render();
 			}
@@ -12308,7 +12371,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 				action: "artifact.upload",
 				target: {},
 				params: {
-					display_name: file.name,
+					display_name: a.name || file.name,
 					media_type: file.type || "application/octet-stream",
 					size_bytes: file.size,
 					expected_digest: digest
@@ -12318,14 +12381,14 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 			if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
 			a.request ||= request;
 			a.key ||= crypto.randomUUID();
-			persist();
+			persist(true);
 			let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
 			guard(true);
 			if (op && ["failed", "cancelled"].includes(op.status)) {
 				op = null;
 				a.key = crypto.randomUUID();
 				delete a.operation_id;
-				persist();
+				persist(true);
 			}
 			if (!op) op = (await api("POST", "/operations?wait=3", a.request, a.key)).operation;
 			guard(true);
@@ -12378,12 +12441,113 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 				saved.attachments.push(a);
 			}
 			files.set(a, file);
+			if (ALLOWED_IMAGE_TYPES.has(file.type)) generateThumbnail(file, (thumb) => {
+				if (box.isConnected && saved.attachments.includes(a)) {
+					previews.set(a, thumb);
+					render();
+				}
+			});
 			upload(a);
 		}
 		choose.value = "";
 		persist();
 		render();
 	};
+	const handleIncomingFile = (file) => {
+		guard();
+		fill(status);
+		const limit = Math.min(state.caps?.artifacts?.limits?.max_file_bytes || 16777216, nativeDesktop ? 16777216 : Number.MAX_SAFE_INTEGER);
+		if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+			fill(status, errorBox(new Error(t("attachment_unsupported_image"))));
+			return;
+		}
+		if (file.size > limit) {
+			fill(status, errorBox(new Error(`ARTIFACT_TOO_LARGE (${limit})`)));
+			return;
+		}
+		let name = file.name;
+		const ext = file.type === "image/jpeg" ? ".jpg" : file.type === "image/webp" ? ".webp" : ".png";
+		if (!name || name === "image.png" || name === "blob") name = `pasted-image-${Date.now()}${ext}`;
+		name = name.replace(/[^\w.-]/g, "_").replace(/^(\.+)/, "image_");
+		let uniqueName = name;
+		let counter = 1;
+		while (saved.attachments.some((x) => x.name === uniqueName)) {
+			const dot = name.lastIndexOf(".");
+			uniqueName = dot > 0 ? `${name.slice(0, dot)}-${counter}${name.slice(dot)}` : `${name}-${counter}`;
+			counter++;
+		}
+		const a = { name: uniqueName };
+		saved.attachments.push(a);
+		files.set(a, file);
+		generateThumbnail(file, (thumb) => {
+			if (box.isConnected && saved.attachments.includes(a)) {
+				previews.set(a, thumb);
+				render();
+			}
+		});
+		upload(a);
+		persist();
+		render();
+	};
+	const onPaste = (e) => {
+		if (e.isComposing) return;
+		const cd = e.clipboardData;
+		if (!cd) return;
+		const items = cd.items ? Array.from(cd.items) : [];
+		const cdFiles = cd.files ? Array.from(cd.files) : [];
+		const imageCandidates = [];
+		if (cdFiles.length > 0) {
+			for (const f of cdFiles) if (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name)) imageCandidates.push(f);
+		} else if (items.length > 0) {
+			for (const it of items) if (it.kind === "file") {
+				const f = it.getAsFile();
+				if (f && (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name) || it.type.startsWith("image/"))) imageCandidates.push(f);
+			}
+		}
+		if (!imageCandidates.length) return;
+		e.preventDefault();
+		if (!supported || !may("manage") || nativeFiles && !nativeUploadAllowed || !state.online || !state.viewReady) {
+			fill(status, errorBox(new Error(t("offline_actions_paused"))));
+			return;
+		}
+		for (const file of imageCandidates) handleIncomingFile(file);
+	};
+	const onDragOver = (e) => {
+		if (nativeFiles) return;
+		if (e.dataTransfer?.types?.includes("Files")) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = "copy";
+			box.classList.add("drag-over");
+			if (text && text.classList) text.classList.add("drag-over");
+		}
+	};
+	const onDragLeave = (e) => {
+		if (!box.contains(e.relatedTarget) && e.target !== text) {
+			box.classList.remove("drag-over");
+			if (text && text.classList) text.classList.remove("drag-over");
+		}
+	};
+	const onDrop = (e) => {
+		box.classList.remove("drag-over");
+		if (text && text.classList) text.classList.remove("drag-over");
+		if (nativeFiles || !e.dataTransfer?.files?.length) return;
+		e.preventDefault();
+		if (!supported || !may("manage") || nativeFiles && !nativeUploadAllowed || !state.online || !state.viewReady) {
+			fill(status, errorBox(new Error(t("offline_actions_paused"))));
+			return;
+		}
+		for (const file of e.dataTransfer.files) handleIncomingFile(file);
+	};
+	text.addEventListener("paste", onPaste);
+	box.addEventListener("paste", onPaste);
+	box.addEventListener("dragover", onDragOver);
+	box.addEventListener("dragleave", onDragLeave);
+	box.addEventListener("drop", onDrop);
+	if (text && text.addEventListener) {
+		text.addEventListener("dragover", onDragOver);
+		text.addEventListener("dragleave", onDragLeave);
+		text.addEventListener("drop", onDrop);
+	}
 	const existing = h("select", { "aria-label": t("existing_artifact") }, h("option", { value: "" }, t("existing_artifact")));
 	box.append(h("div", { class: "actions" }, existing, h("button", {
 		class: "secondary",
@@ -12493,6 +12657,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 		}
 		const intent = saved.submission;
 		try {
+			persist(true);
 			const op = intent.operation_id ? (await api("GET", `/operations/${intent.operation_id}`)).operation : (await api("POST", "/operations?wait=3", intent.request, intent.key)).operation;
 			guard(true);
 			intent.operation_id = op.operation_id;
@@ -12567,6 +12732,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 			};
 			text.value = "";
 			files.clear();
+			previews.clear();
 			persist();
 			render();
 		}
@@ -13886,13 +14052,14 @@ function checkpointPanel(host, sid) {
 		const go = h("button", {
 			class: "primary",
 			onclick: async () => {
-				if (!instr.value.trim()) return;
+				const instructions = instr.value.trim() ? instr.value : draft.refs().length ? t("dispatch_inspect_images") : "";
+				if (!instructions) return;
 				go.disabled = true;
 				try {
 					if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
 					if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
 					const op = await draft.perform("checkpoint.continue", { checkpoint_id: cp.checkpoint_id }, {
-						instructions: instr.value,
+						instructions,
 						agent: agent.value,
 						...state.caps?.artifacts ? { artifacts: draft.refs() } : {}
 					}, state.caps?.artifacts ? { expected_source_head_sha: expectedHead } : {}, `continue.${cp.checkpoint_id}`);
@@ -15440,14 +15607,17 @@ async function viewNativeSettings(main) {
 					contract_version: "2026-10-08"
 				});
 			} }, h("p", {}, t("desktop_setup_help")), h("div", { class: "capture-fields" }, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)), h("p", { class: "muted" }, t("desktop_setup_origin")), h("div", { class: "actions" }, review));
-			setup.append(form);
+			if (status.configuration_source === "managed" && status.error) {
+				setup.append(h("h3", {}, t("managed_recovery_title")), h("p", {}, t("managed_recovery_help")), h("details", {}, h("summary", {}, t("managed_join_existing")), form));
+				introduction.hidden = true;
+			} else setup.append(form);
 			connectionDetails.append(h("div", { class: "actions" }, reload));
 		}
 		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
 		row("desktop_expected_actor", status.expected_actor);
 		if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
 		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-		if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
+		if (status.error && (!status.configuration_setup || status.configuration_source === "managed")) info.append(errorBox(new Error(status.error)));
 		else if (!status.credential_available && !status.configuration_setup) info.append(h("p", {}, t("desktop_credential_missing")));
 		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
 		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
@@ -16347,13 +16517,15 @@ function continueFrom(w, checkpointId, notice, children = []) {
 	const go = h("button", {
 		class: "primary",
 		onclick: async () => {
+			const instructions = instr.value.trim() ? instr.value : draft.refs().length ? t("dispatch_inspect_images") : "";
+			if (!instructions) return;
 			go.disabled = true;
 			let op;
 			try {
 				if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
 				if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
 				op = await draft.perform("checkpoint.continue", { checkpoint_id: checkpointId }, {
-					instructions: instr.value,
+					instructions,
 					agent: agent.value,
 					...state.caps?.artifacts ? {
 						artifacts: draft.refs(),
