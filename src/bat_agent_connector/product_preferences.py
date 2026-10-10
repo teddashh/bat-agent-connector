@@ -15,7 +15,7 @@ import re
 import time
 from datetime import datetime
 
-from . import dashboard_sync
+from . import catalog_sources, dashboard_sync
 from .operations import ActionDef, OperationError
 from .orchestrate import PRESETS
 
@@ -201,21 +201,31 @@ def _models(raw, agent):
 
 async def _observe(ops, host, kind, scope, channel, params, normalize, *, refresh=False):
     now = time.time()
+    binding = catalog_sources.host_binding(ops, host)
     row = ops.db.execute("SELECT * FROM product_host_observations WHERE host=? AND kind=? AND scope=?",
                          (host, kind, scope)).fetchone()
+    cached = catalog_sources.cached_document(row, binding)
+    if cached is None:
+        row = None
     base = {"source": "bat_host", "observed_at": row["observed_at"] if row else None, "stale": False}
     if row and not refresh and now - row["observed_at"] < 30:
-        return {**base, **json.loads(row["document"])}
+        return {**base, **cached}
     try:
         raw = await asyncio.wait_for(ops.context["fleet"].client(host).invoke(channel, params), 10)
         value = normalize(raw)
     except Exception:  # noqa: BLE001 - do not expose host errors or credentials in a read model
+        if catalog_sources.host_binding(ops, host) != binding:
+            return {"source": "bat_host", "observed_at": None, "status": "unavailable",
+                    "stale": True, "reason": "host_binding_changed"}
         if row:
-            return {**base, **json.loads(row["document"]), "stale": True, "reason": "host_unavailable"}
+            return {**base, **cached, "stale": True, "reason": "host_unavailable"}
         return {**base, "status": "unavailable", "stale": True, "reason": "host_unavailable"}
+    if catalog_sources.host_binding(ops, host) != binding:
+        return {"source": "bat_host", "observed_at": None, "status": "unavailable",
+                "stale": True, "reason": "host_binding_changed"}
     ops.db.execute("""INSERT INTO product_host_observations VALUES(?,?,?,?,?)
         ON CONFLICT(host,kind,scope) DO UPDATE SET document=excluded.document,observed_at=excluded.observed_at""",
-        (host, kind, scope, json.dumps(value, sort_keys=True), now))
+        (host, kind, scope, json.dumps({**value, "_source_binding": binding}, sort_keys=True), now))
     return {**base, **value, "observed_at": now}
 
 
