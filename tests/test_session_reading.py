@@ -1,11 +1,13 @@
 """Reading metadata is personal, durable and independent of acknowledgement."""
 from __future__ import annotations
 
+import asyncio
 import copy
+import json
 
 import pytest
 
-from bat_agent_connector import api_auth, dashboard_sync
+from bat_agent_connector import api_auth, cli, dashboard_sync, mcp_server
 from bat_agent_connector import session_reading as reading
 from bat_agent_connector.operations import OperationError, OperationService
 from bat_agent_connector.task_journal import Journal
@@ -188,6 +190,64 @@ async def test_actual_http_prefix_resolves_exact_session_and_same_identity_share
     assert not api.write_frames(mock)
     assert result["operation"]["action"] == "session.read"
     assert dashboard_sync.identity(d.journal, READER)["principal_id"]
+
+
+@pytest.mark.parametrize("method", ["inventory_sessions", "inventory_session", "project_get"])
+async def test_http_mcp_cli_reading_parity_is_personal_and_never_marks_read(
+        served, mock, monkeypatch, capsys, method):
+    from tests.test_work_items import project
+
+    d, port = served
+    await d.inventory.refresh_host("h1")
+    pid = await project(d, task_project="reading-project")
+    task = d.journal.submit(project="reading-project", host="h1", workspace="demo-project",
+                            original_words="Fixture work", idempotency_key="reading-work")
+    d.journal.change(task["task_id"], "dispatching")
+    d.journal.change(task["task_id"], "accepted", fields={"session_id": TARGET["session_id"]})
+    doc = observe(d)
+    mark(d, doc["messages"][0])
+    position(d, doc["messages"][1])
+    await settle_operations(d.ops)
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    cases = {
+        "inventory_sessions": ("/api/v1/sessions?order=id&limit=1&provider=claude",
+            {"order": "id", "limit": 1, "provider": "claude"},
+            ["inventory", "sessions", "--order", "id", "--limit", "1", "--provider", "claude"], "sessions"),
+        "inventory_session": ("/api/v1/sessions/h1/" + TARGET["session_id"], TARGET,
+            ["inventory", "session", "h1", TARGET["session_id"]], "session"),
+        "project_get": ("/api/v1/projects/" + pid, {"project_id": pid}, ["project", "show", pid], "work"),
+    }
+    path, params, command, field = cases[method]
+    tables = ("session_message_reads", "session_reading_positions", "operations")
+    before = {table: [tuple(row) for row in d.journal.db.execute(f"SELECT * FROM {table}")]
+              for table in tables}
+    server, fleet = mcp_server.build_server(d.fleet.config, read_only=True)
+    try:
+        for principal, unread in ((READER, 4), (OTHER, 5)):
+            auth = api.token(d, principal.actor, *principal.scopes)
+            monkeypatch.setenv("BATC_API_TOKEN", auth)
+            monkeypatch.setenv("BATC_TASK_CAPABILITY", auth)
+            status, expected = await api.http(port, "GET", path, tok=auth)
+            assert status == 200, expected
+            row = expected[field] if field == "session" else expected[field][0]
+            assert row["session_id"] == TARGET["session_id"]
+            assert row["reading"]["unread_count"] == unread
+            assert bool(row["reading"]["position"]) == (principal == READER)
+            result = await server.call_tool(method, params)
+            if isinstance(result, tuple):
+                content, structured = result
+                actual = structured if structured is not None else json.loads(content[0].text)
+            else:
+                content = result.content if hasattr(result, "content") else result
+                actual = json.loads(content[0].text)
+            assert actual == expected
+            assert await asyncio.to_thread(cli.main, ["--json", *command]) == 0
+            assert json.loads(capsys.readouterr().out) == expected
+    finally:
+        await fleet.close()
+    assert before == {table: [tuple(row) for row in d.journal.db.execute(f"SELECT * FROM {table}")]
+                      for table in tables}
+    assert not api.write_frames(mock)
 
 
 async def test_tool_rows_change_page_offsets_without_entering_read_counts(daemon):
