@@ -1087,7 +1087,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     static GET: OnceLock<Regex> = OnceLock::new();
     static POST: OnceLock<Regex> = OnceLock::new();
     let pattern = if input.method == "GET" {
-        GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|workspaces|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
+        GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|workspaces|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|managed/setup|",
             r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|artifacts(?:/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8})?|",
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
@@ -1097,7 +1097,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/(?:repository-previews|approval-previews|artifact-capture-previews|artifact-managed-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+            Regex::new(r"^/(?:managed/setup/secrets|repository-previews|approval-previews|artifact-capture-previews|artifact-managed-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
                 .unwrap()
         })
     } else {
@@ -1105,6 +1105,22 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     };
     if !pattern.is_match(path) {
         return Err("Central route is not allowed".into());
+    }
+    if matches!(path, "/managed/setup" | "/managed/setup/secrets") {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Managed setup accepts no query or operation key".into());
+        }
+        if path == "/managed/setup/secrets" {
+            let body = input.body.as_ref().and_then(Value::as_object)
+                .ok_or("Secret staging needs a typed body")?;
+            if body.len() != 2
+                || !matches!(body.get("kind").and_then(Value::as_str), Some("bat" | "github"))
+                || !body.get("value").and_then(Value::as_str).is_some_and(|value| {
+                    (8..=4096).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
+                }) {
+                return Err("Invalid staged credential fields".into());
+            }
+        }
     }
     if path == "/artifact-capture-previews" {
         if input.path != path || input.idempotency_key.is_some() {
@@ -1359,6 +1375,26 @@ mod tests {
         sync::mpsc,
         thread,
     };
+    #[test]
+    fn managed_setup_has_only_typed_private_staging_and_fixed_routes() {
+        assert!(validate_request(&request("GET", "/managed/setup")).is_ok());
+        let mut input = request("POST", "/managed/setup/secrets");
+        input.body = Some(serde_json::json!({"kind":"bat", "value":"synthetic-fixture-token"}));
+        assert!(validate_request(&input).is_ok());
+        for path in ["/managed/setup/secrets?", "/managed/setup/secrets?token=secret", "/managed/stop", "/managed/setup/secrets/other"] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/managed/setup/secrets".into();
+        for body in [serde_json::json!({"kind":["bat"],"value":"synthetic-fixture-token"}),
+            serde_json::json!({"kind":"github","value":"synthetic-fixture-token","path":"/tmp/token"}),
+            serde_json::json!({"kind":"bat","value":"token with whitespace"})] {
+            input.body = Some(body);
+            assert!(validate_request(&input).is_err());
+        }
+        assert!(validate_request(&request("GET", "/managed/setup?host=other")).is_err());
+        assert!(validate_request(&request("GET", "/managed/setup/secrets")).is_err());
+    }
     #[test]
     fn session_message_character_limit_is_bounded_and_route_specific() {
         assert!(validate_request(&get(
