@@ -35,6 +35,11 @@ class ThreadEntry(c.Structure):
                 ("process_id", w.DWORD), ("base_priority", w.LONG), ("delta_priority", w.LONG), ("flags", w.DWORD)]
 
 
+class ProcessIds(c.Structure):
+    # Bound local handle allocation even if an administrator command forks rapidly.
+    _fields_ = [("assigned", w.DWORD), ("count", w.DWORD), ("ids", ULONG_PTR * 4096)]
+
+
 class Accounting(c.Structure):
     _fields_ = [("user_time", c.c_longlong), ("kernel_time", c.c_longlong), ("period_user", c.c_longlong),
                 ("period_kernel", c.c_longlong), ("page_faults", w.DWORD), ("total", w.DWORD),
@@ -53,10 +58,14 @@ _next_thread = _bind(kernel, "Thread32Next", [w.HANDLE, c.POINTER(ThreadEntry)])
 _open_thread = _bind(kernel, "OpenThread", [w.DWORD, w.BOOL, w.DWORD], w.HANDLE)
 _thread_process = _bind(kernel, "GetProcessIdOfThread", [w.HANDLE], w.DWORD)
 _resume = _bind(kernel, "ResumeThread", [w.HANDLE], w.DWORD)
+_in_job = _bind(kernel, "IsProcessInJob", [w.HANDLE, w.HANDLE, c.POINTER(w.BOOL)])
+_wait = _bind(kernel, "WaitForSingleObject", [w.HANDLE, w.DWORD], w.DWORD)
 
 
 class ProcessTree:
     def __init__(self):
+        self._exiting = []
+        self._termination_total = None
         self.handle = _create_job(None, None)
         if not self.handle:
             _error()
@@ -104,19 +113,70 @@ class ProcessTree:
         finally:
             _close(thread)
 
-    def terminate(self):
-        if self.handle and not _terminate_job(self.handle, 124):
+    def _accounting(self):
+        info = Accounting()
+        if not _query_job(self.handle, 1, c.byref(info), c.sizeof(info), None):
             _error()
+        return info
+
+    def _pin_members(self):
+        self._termination_total = self._accounting().total
+        members = ProcessIds()
+        if not _query_job(self.handle, 3, c.byref(members), c.sizeof(members), None):
+            _error()  # Includes ERROR_MORE_DATA: an incomplete snapshot is not proof.
+        if members.assigned != members.count or members.count > len(members.ids):
+            raise RuntimeError("verification job process list is incomplete")
+        for pid in members.ids[:members.count]:
+            handle = _open_process(0x00101000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+            if not handle:
+                error = c.get_last_error()
+                if error == 87:  # Object already destroyed; its PID cannot name this process again.
+                    continue
+                _error(error)
+            try:
+                owned = w.BOOL()
+                if not _in_job(handle, self.handle, c.byref(owned)):
+                    _error()
+                if owned.value:
+                    self._exiting.append(handle)
+                    handle = None
+                # A recycled PID outside this job proves the old member is gone.
+                # Never terminate or wait on that unrelated process.
+            finally:
+                if handle:
+                    _close(handle)
+
+    def terminate(self):
+        if not self.handle:
+            return
+        try:
+            if self._termination_total is None:
+                self._pin_members()
+        finally:
+            # Even a refused/incomplete ownership snapshot must stop the owned job.
+            if not _terminate_job(self.handle, 124):
+                _error()
 
     def alive(self):
         if not self.handle:
             return False
-        info = Accounting()
-        if not _query_job(self.handle, 1, c.byref(info), c.sizeof(info), None):
-            _error()
-        return bool(info.active)
+        for handle in self._exiting[:]:
+            result = _wait(handle, 0)
+            if result == 0:  # WAIT_OBJECT_0: actual process object is signaled.
+                self._exiting.remove(handle)
+                _close(handle)
+            elif result != 258:  # WAIT_TIMEOUT remains pending.
+                _error()
+        info = self._accounting()
+        # A process created during snapshot/termination may be absent from both
+        # snapshots. Preserve uncertainty rather than claim an unpinned exit.
+        changed = self._termination_total is not None and info.total != self._termination_total
+        return bool(self._exiting or info.active or changed)
 
     def close(self):
+        for handle in self._exiting:
+            _close(handle)
+        self._exiting.clear()
         if self.handle:
             _close(self.handle)
             self.handle = None
