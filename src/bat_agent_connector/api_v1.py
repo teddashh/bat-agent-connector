@@ -484,6 +484,7 @@ class ApiV1:
                                   "project_dispatch": {"version": 1, "artifacts": True, "model": True},
                                   "execution_delivery": {"version": 1, "source_kinds": ["execution", "task_command"]},
                                   "work_item_reads": {"version": 1},
+                                  "session_reading": {"version": 1, "counts": "observed_history"},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
@@ -517,13 +518,15 @@ class ApiV1:
         return 200, await preview(self.daemon.ops, principal, body)
 
     async def bootstrap(self, principal, **_):
+        from .session_reading import decorate
         # Cursor first. The following existing read models are live pages, not an atomic snapshot.
         sync = dashboard_sync.checkpoint(self.daemon.journal, principal)
         _, capabilities = await self.capabilities(principal)
         db = self.daemon.journal.db
         return 200, {"sync": sync, "capabilities": capabilities,
                      "snapshot": {"hosts": self.daemon.inventory.hosts_document(),
-                         "sessions": self.daemon.inventory.list_sessions(order="id", include_gone=True, limit=50),
+                         "sessions": decorate(self.daemon.journal, principal,
+                             self.daemon.inventory.list_sessions(order="id", include_gone=True, limit=50)),
                          "projects": work_items.projects_list(db, include_archived=True),
                          "work_items": work_items.work_items_list(db, include_archived=True, limit=50,
                              principal_id=sync["principal_id"]),
@@ -539,8 +542,9 @@ class ApiV1:
     async def hosts(self, query, **_):
         return 200, self.daemon.inventory.hosts_document(host=self._q(query, "host"), discovery=bool(self._bool(query, "discovery")), after=self._int(query, "after", 0), limit=self._int(query, "limit", 20))
 
-    async def sessions(self, query, **_):
-        return 200, self.daemon.inventory.list_sessions(
+    async def sessions(self, query, principal, **_):
+        from .session_reading import decorate
+        return 200, decorate(self.daemon.journal, principal, self.daemon.inventory.list_sessions(
             host=self._q(query, "host"), provenance=self._q(query, "provenance"),
             api_access=self._q(query, "access"), attention=self._bool(query, "attention"),
             include_gone=bool(self._bool(query, "include_gone")), order=self._q(query, "order", "activity"),
@@ -548,13 +552,14 @@ class ApiV1:
             profile_id=self._q(query, "profile_id"), project_id=query.get("project_id"), work_item_id=self._q(query, "work_item_id"),
             execution_id=self._q(query, "execution_id"), provider=self._q(query, "provider"), has_tab=self._bool(query, "has_tab"),
             loaded=self._bool(query, "loaded"), streaming=self._bool(query, "streaming"), lifecycle=self._q(query, "lifecycle"),
-            stale=self._bool(query, "stale"), relation_scope=self._q(query, "relation_scope", "history"))
+            stale=self._bool(query, "stale"), relation_scope=self._q(query, "relation_scope", "history")))
 
     def _known_host(self, host: str) -> None:
         if host not in self.daemon.fleet.config.hosts:
             raise ApiError(404, "UNKNOWN_HOST", f"unknown host {host!r}")
 
-    async def session(self, query, host, sid, **_):
+    async def session(self, query, host, sid, principal, **_):
+        from .session_reading import decorate
         live = self._bool(query, "live")
         if live:
             self._known_host(host)
@@ -570,7 +575,7 @@ class ApiV1:
                 out["session"].update(confinement.session_fields(
                     host, sid, await service._meta(self.daemon.fleet.client(host), sid),
                     account=confinement.account_status(self.daemon.fleet, host)))
-        return 200, out
+        return 200, decorate(self.daemon.journal, principal, out)
 
     def _history(self, query, resource_type, resource_id):
         return self.daemon.inventory.observation.history(resource_type, resource_id,
@@ -752,9 +757,10 @@ class ApiV1:
         return 200, work_items.projects_list(self.daemon.journal.db,
                                              include_archived=bool(self._bool(query, "include_archived")))
 
-    async def project(self, query, prj, **_):
-        return 200, work_items.project_get(self.daemon.journal.db, prj,
-                                           include_archived=bool(self._bool(query, "include_archived")), ops=self.daemon.ops)
+    async def project(self, query, prj, principal, **_):
+        from .session_reading import decorate
+        return 200, decorate(self.daemon.journal, principal, work_items.project_get(self.daemon.journal.db, prj,
+                                           include_archived=bool(self._bool(query, "include_archived")), ops=self.daemon.ops))
 
     async def work_items(self, query, principal, **_):
         return 200, work_items.work_items_list(

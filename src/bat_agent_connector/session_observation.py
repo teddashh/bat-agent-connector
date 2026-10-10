@@ -22,7 +22,7 @@ MAX_ACTIVE = 32
 MAX_PER_ACTOR = 4
 MAX_PER_HOST = 8
 _COMMON = {"host", "session_id", "after"}
-_READ = {"last_n", "offset", "include_tools", "max_chars"}
+_READ = {"last_n", "offset", "include_tools", "max_chars", "max_message_chars"}
 _WAIT = {"until", "timeout_s", "require_new"}
 
 
@@ -53,6 +53,7 @@ def validate(method: str, params: dict) -> dict:
     if method == "session_read":
         for name, default, low, high in (("last_n", 20, 1, service.MAX_LAST_N),
                                           ("max_chars", 12000, 500, service.MAX_READ_CHARS),
+                                          ("max_message_chars", 2000, 100, service.MAX_READ_CHARS),
                                           ("offset", 0, 0, 1_000_000)):
             value = out.get(name, default)
             if type(value) is not int:
@@ -84,7 +85,7 @@ def query_params(method: str, host: str, sid: str, query: dict) -> dict:
     for key, values in query.items():
         value = values[0]
         try:
-            if key in {"last_n", "offset", "max_chars"}:
+            if key in {"last_n", "offset", "max_chars", "max_message_chars"}:
                 value = int(value)
             elif key == "timeout_s":
                 value = float(value)
@@ -211,7 +212,11 @@ class SessionObservation:
         work = hangup = None
         try:
             fn = service.session_read if method == "session_read" else service.session_wait
-            work = asyncio.create_task(asyncio.wait_for(fn(fleet, **params), deadline(method, params)))
+            if method == "session_read":
+                from .session_reading import begin_observation
+                read_generation = begin_observation(self.daemon.journal)
+            kwargs = {**params, "index_reading": True} if method == "session_read" else params
+            work = asyncio.create_task(asyncio.wait_for(fn(fleet, **kwargs), deadline(method, params)))
             hangup = asyncio.create_task(reader.read(1)) if reader is not None else None
             pending = {work, hangup} if hangup else {work}
             while True:
@@ -222,7 +227,11 @@ class SessionObservation:
                     raise asyncio.CancelledError
                 authorize()  # Including the last read, before returning any body.
                 if work in done:
-                    return await work
+                    result = await work
+                    if method == "session_read":
+                        from .session_reading import observe
+                        result = observe(self.daemon.journal, principal, result, generation=read_generation)
+                    return result
         except asyncio.CancelledError:
             if writer is not None:
                 writer.close()

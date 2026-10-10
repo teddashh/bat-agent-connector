@@ -23,6 +23,7 @@
 所有型別、必要字串、有限數字、boolean 與 allowed fields 在建立 readonly Fleet 或 BAT frame
 前檢查。read 最多 100 messages、60000 characters；offset 最多 1000000，after 最多 512
 characters。沿用 read 的數值 clamp（last_n 至少 1，max_chars 至少 500），offset 不可負。
+`max_message_chars` 預設 2000，可指定 100–60000；仍受整體 max_chars 上限限制。
 wait 保留 1–1800 秒 clamp（預設 120），until 為 attention／turn-end／ask-user。
 HTTP 拒絕重複／未知 query keys；RPC 拒絕未知欄位或 caller 提供 transport／principal。
 
@@ -38,7 +39,9 @@ RPC client socket timeout 另外加 5 秒。wall deadline 到期回 504 `OBSERVA
 HTTP／RPC 在等待期間監看 client EOF，並每 10 秒重新驗證原 token；回傳資料前再驗一次。
 revoked／expired／actor 或 scopes 改變回 `FORBIDDEN`，不回舊觀察結果。
 EOF／caller cancellation／deadline 均取消自己的 reader coroutine、解除 subscription、close
-自己的 Fleet 並釋放 counts。沒有新 operation、command、schema step 或永久 transcript copy。
+自己的 Fleet 並釋放 counts。觀察不新增 operation／command，不永久複製 transcript。
+另以冪等 metadata 表記錄[對話閱讀](session-reading.md)的原 message ID／revision；觀察不會
+標記已讀。index 掃描也受同一 wall deadline 與 archive raw budget 限制。
 
 ## 驗證與尚未涵蓋
 
