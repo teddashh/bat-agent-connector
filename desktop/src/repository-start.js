@@ -1,5 +1,6 @@
 // One explicitly published head and one new managed session. Central owns every effect.
 import {composerShortcut} from './composer-shortcut.js';
+import {modelChoice} from './model-preferences.js';
 const object = v => v && typeof v === 'object' && !Array.isArray(v);
 const equal = (a, b) => a === b || (Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal(v, b[i]))) ||
   (object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => equal(a[k], b[k])));
@@ -33,7 +34,7 @@ const validPreview = (p, input) => object(p) && equal(p.target, input.target) &&
   (p.workspace.name == null || typeof p.workspace.name === 'string');
 // Both are checked after existing-key replay, before the operation is inserted.
 const noAdmission = new Set(['REPOSITORY_NOT_BOUND', 'REPOSITORY_HOST_UNAVAILABLE']);
-export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory}) {
+export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory, submitPreference}) {
   let raw; try {raw = JSON.parse(localStorage.getItem(storageKey));} catch { /* new draft */ }
   let saved = {target: target(raw?.target) ? raw.target : null, source_ref: typeof raw?.source_ref === 'string' ? raw.source_ref : '',
     agent: ['claude', 'codex'].includes(raw?.agent) ? raw.agent : 'claude', prompt: typeof raw?.prompt === 'string' ? raw.prompt : '',
@@ -66,6 +67,8 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   const prompt = h('textarea', {'aria-label': t('pub_prompt'), maxlength: 12000, rows: 5}), title = h('input', {'aria-label': t('start_title'), maxlength: 256});
   const model = h('input', {'aria-label': t('start_model'), maxlength: 256, placeholder: t('start_model_default')});
   const inputs = {source_ref: sourceRef, agent, prompt, title, model};
+  const models = modelChoice({h, t, api, caps, guard, host: () => saved.target?.host, agent, model, submit: submitPreference, storageKey});
+  let modelHost = null;
   prompt.value = saved.prompt;
   const attachments = expanded() && attachmentFactory ? attachmentFactory(prompt, () => {if (current()) update();}) : null;
   if (attachments && !saved.intent) saved.prompt = prompt.value;
@@ -158,13 +161,15 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('pub_binding', binding), label('pub_ref', sourceRef)), branchHelp, h('p', {class: 'muted'}, t('pub_head_only')),
       h('div', {class: 'actions'}, inspect), facts),
     h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('start_agent', agent), !project ? label('start_title', title) : null,
-      !project && expanded() ? label('start_model', model) : null), label('pub_prompt', prompt), shortcut.box, project ? advanced : null, attachmentBox,
+      !project && expanded() ? label('start_model', model) : null), models.box, label('pub_prompt', prompt), shortcut.box, project ? advanced : null, attachmentBox,
       h('p', {class: 'muted'}, t('pub_isolation'))), h('div', {class: 'actions'}, apply, check, another), outcome, status);
   function update() {
     const fixed = Boolean(saved.intent);
     if (attachmentBox) {attachmentBox.disabled = fixed || busy; attachmentBox.hidden = fixed;}
     binding.disabled = fixed || busy;
     for (const el of Object.values(inputs)) el.disabled = fixed || busy;
+    models.update();
+    if (modelHost !== saved.target?.host) {modelHost = saved.target?.host; models.refresh();}
     const validBranch = ref(selected().source_ref);
     branchHelp.hidden = fixed;
     branchHelp.textContent = t(saved.source_ref && !validBranch ? 'pub_branch_invalid' : 'pub_branch_help');
