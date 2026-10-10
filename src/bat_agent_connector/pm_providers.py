@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import platform_files
+
 try:
     import tomllib
 except ImportError:  # pragma: no cover
@@ -144,9 +146,11 @@ class ProviderCatalog:
     @classmethod
     def from_file(cls, path: str | Path) -> ProviderCatalog:
         p = Path(path).expanduser()
-        if stat.S_IMODE(p.stat().st_mode) & 0o077:
+        if platform_files.WINDOWS:
+            platform_files.check_private(p)
+        elif stat.S_IMODE(p.stat().st_mode) & 0o077:
             raise ValueError("PM provider config must be mode 0600")
-        raw = tomllib.loads(p.read_text())
+        raw = tomllib.loads(platform_files.read_private(p).decode() if platform_files.WINDOWS else p.read_text())
         entries = [ProviderEntry(**e) for e in raw.get("providers", [])]
         return cls(entries, tuple(raw.get("fallback_order", DEFAULT_ORDER)))
 

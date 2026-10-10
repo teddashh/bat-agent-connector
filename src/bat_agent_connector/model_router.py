@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from . import platform_files
+
 try:
     import tomllib
 except ImportError:  # pragma: no cover
@@ -139,9 +141,11 @@ class RouterConfig:
     @classmethod
     def from_provider_file(cls, path: str | Path) -> RouterConfig:
         config_path = Path(path).expanduser()
-        if stat.S_IMODE(config_path.stat().st_mode) & 0o077:
+        if platform_files.WINDOWS:
+            platform_files.check_private(config_path)
+        elif stat.S_IMODE(config_path.stat().st_mode) & 0o077:
             raise ValueError("PM router config must be mode 0600")
-        values = (tomllib.loads(config_path.read_text()).get("router") or {}).copy()
+        values = (tomllib.loads(platform_files.read_private(config_path).decode() if platform_files.WINDOWS else config_path.read_text()).get("router") or {}).copy()
         if set(values) - set(cls.__dataclass_fields__):
             raise ValueError("unknown PM router setting")
         config = cls(**values)

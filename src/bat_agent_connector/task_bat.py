@@ -16,7 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import confinement, lifecycle, orchestrate, registry, resource_policy, service, task_control
+from . import (
+    confinement,
+    lifecycle,
+    orchestrate,
+    platform_files,
+    registry,
+    resource_policy,
+    service,
+    task_control,
+)
 from .errors import BatError, TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .operations import AMBIGUOUS, AmbiguousOutcome, StepFailed, _error_code
@@ -812,9 +821,14 @@ class BatTaskAdapter:
     async def _verify_original_archive(self, task: dict, archive: dict):
         path = Path(archive["path"])
         alias = os.environ.get("BATC_TASK_ARCHIVE_VERIFY_SSH_HOST", "")
-        if (not re.fullmatch(r"[A-Za-z0-9_.-]+", alias) or
-                stat.S_IMODE(path.stat().st_mode) != 0o600 or
-                hashlib.sha256(path.read_bytes()).hexdigest() != archive["sha256"]):
+        if platform_files.WINDOWS:
+            local = platform_files.read_private(path)
+            private = True
+        else:
+            local = path.read_bytes()
+            private = stat.S_IMODE(path.stat().st_mode) == 0o600
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]+", alias) or not private or
+                hashlib.sha256(local).hexdigest() != archive["sha256"]):
             raise ValueError("complete request archive is not locally valid or host verifier is unset")
         command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", alias,
                    "sha256sum -- " + shlex.quote(str(path))]
