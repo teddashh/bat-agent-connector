@@ -247,6 +247,11 @@ class ObservedVerifier:
             if not isinstance(exc, asyncio.TimeoutError):
                 raise
             exit_code = 124
+        else:
+            if tree:
+                # A successful parent can leave descendants with detached pipes.
+                # Closing a kill-on-close job alone does not wait for their exit.
+                await self._kill_tree(proc, None, marker, tree=tree)
         finally:
             if tree:
                 tree.close()
@@ -279,14 +284,14 @@ class ObservedVerifier:
                 out = b""
             if killer.returncode != 0 or out.strip() != b"gone":
                 raise VerificationProcessStuck("remote verification process tree is not confirmed gone")
-        elif tree:
+        if tree:
             for _ in range(50):
                 if not tree.alive():
                     break
                 await asyncio.sleep(0.1)
             else:
                 raise VerificationProcessStuck("local verification job is still alive")
-        elif proc is not None:
+        elif proc is not None and not alias:
             for _ in range(50):
                 if not _group_alive(proc.pid):
                     break
