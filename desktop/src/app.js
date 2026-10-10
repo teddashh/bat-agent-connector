@@ -2121,7 +2121,7 @@ function mergeRecovery(op) {
 function viewSettings(main) {
   if (state.caps?.managed_installation) return viewManagedSettings(main);
   if (nativeDesktop) return viewNativeSettings(main);
-  if (state.token === browserSessionToken) {
+  if (state.token && state.caps && state.token === browserSessionToken) {
     main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel"},
       h("h2", {}, t("managed_browser_connected")),
       h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
@@ -2183,6 +2183,25 @@ async function viewManagedSettings(main) {
       catch (error) {if (connection.generation === generation) {login.checked = !wanted; status.replaceChildren(errorBox(error));}}
       finally {login.disabled = false;}
     });
+    try {
+      const native = await nativeStatus(); guard();
+      if (native.configuration_source === "managed" && native.configuration_setup) {
+        const draft = state.nativeSetupDraft ||= {endpoint: "", expected_actor: ""};
+        const endpoint = h("input", {type: "url", value: draft.endpoint, required: true, maxlength: 512,
+          autocomplete: "off", oninput: event => {draft.endpoint = event.target.value;}});
+        const actor = h("input", {value: draft.expected_actor, required: true, maxlength: 200,
+          autocomplete: "off", oninput: event => {draft.expected_actor = event.target.value;}});
+        const review = h("button", {type: "submit", class: "secondary"}, t("desktop_setup_review"));
+        const form = h("form", {onsubmit: event => {
+          event.preventDefault(); if (state.nativeBusy || !form.reportValidity()) return;
+          guard(); review.disabled = true;
+          return nativeTransition("configure", {endpoint: endpoint.value.trim(), expected_actor: actor.value.trim(), contract_version: "2026-10-08"});
+        }}, h("p", {class: "muted"}, t("managed_join_help")),
+          h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint),
+            h("label", {}, t("desktop_expected_actor"), actor)), review);
+        main.append(h("details", {class: "panel", "data-managed-join": ""}, h("summary", {}, t("managed_join_existing")), form));
+      }
+    } catch (error) {if (connection.generation === generation) status.append(errorBox(error));}
     disposeFleet = await mountFleet(fleetRoot, {h, t});
   } else {
     local.append(h("p", {class: "muted"}, t("managed_browser_help")),
@@ -2205,7 +2224,7 @@ async function nativeTransition(kind, config = null) {
     if (kind === "configure") {
       const saved = await nativeSetupConfiguration(config);
       if (attempt !== state.nativeAttempt) return;
-      if (saved) {state.nativeSetupDraft = null; state.connectionNotice = t("desktop_setup_saved");}
+      if (saved) {disconnect(); state.nativeSetupDraft = null; state.connectionNotice = t("desktop_setup_saved");}
       else {state.online = previousOnline; state.connectionNotice = t("desktop_setup_cancelled");}
     } else if (kind === "disconnect" || kind === "reload" || kind === "forget") {
       disconnect(); // invalidate caches/old forms before native can load another endpoint

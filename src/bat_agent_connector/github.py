@@ -80,7 +80,7 @@ class GitHubClient:
             if e.code == 429 or e.code >= 500 or rate_limited_read:
                 raise GitHubAmbiguous(f"GitHub {method} {path} answered {e.code}") from None
             out = payload.copy() if isinstance(payload, dict) else {"items": payload}
-            if "Link" in e.headers:
+            if isinstance(payload, list) and "Link" in e.headers:
                 out["_link"] = e.headers["Link"]
             return e.code, out
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
@@ -92,7 +92,7 @@ class GitHubClient:
                 out = {"items": payload}
             else:
                 out = payload.copy() if isinstance(payload, dict) else {"items": payload}
-            if "Link" in resp.headers:
+            if isinstance(payload, list) and "Link" in getattr(resp, "headers", {}):
                 out["_link"] = resp.headers["Link"]
             return status, out
         except ValueError:

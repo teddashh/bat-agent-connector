@@ -311,7 +311,12 @@ impl Bridge {
         bridge.configuration_file = Some(path);
         bridge
     }
-    pub fn managed(config_dir: &Path, config: Config, token: Zeroizing<String>, identity: Identity) -> Self {
+    pub fn managed(
+        config_dir: &Path,
+        config: Config,
+        token: Zeroizing<String>,
+        identity: Identity,
+    ) -> Self {
         let mut bridge = Self::new(Ok(config), token);
         bridge.configuration_file = Some(config_dir.join("central.json"));
         {
@@ -416,7 +421,9 @@ impl Bridge {
     }
     pub fn reload_configuration(&self) -> Result<NativeStatus, String> {
         if self.state.lock().unwrap().managed {
-            return Err("Review the existing central connection before switching this Dashboard".into());
+            return Err(
+                "Review the existing central connection before switching this Dashboard".into(),
+            );
         }
         let path = self
             .configuration_file
@@ -1108,7 +1115,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
             r"hosts/[A-Za-z0-9_.-]+/(?:discovery|preferences)|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
-            r"projects/prj_[0-9a-f]{20}(?:/skills)?|work-items/wi_[0-9a-f]{20}|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls(?:/[0-9]{1,9})?|",
+            r"projects/prj_[0-9a-f]{20}(?:/skills)?|work-items/wi_[0-9a-f]{20}(?:/result-sources)?|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls(?:/[0-9]{1,9})?|",
             r"deployments(?:/(?:preview|dep_[0-9a-f]{32}))?|deployment-environments(?:/history)?|",
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
@@ -1127,13 +1134,24 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             return Err("Managed setup accepts no query or operation key".into());
         }
         if path == "/managed/setup/secrets" {
-            let body = input.body.as_ref().and_then(Value::as_object)
+            let body = input
+                .body
+                .as_ref()
+                .and_then(Value::as_object)
                 .ok_or("Secret staging needs a typed body")?;
             if body.len() != 2
-                || !matches!(body.get("kind").and_then(Value::as_str), Some("bat" | "github"))
-                || !body.get("value").and_then(Value::as_str).is_some_and(|value| {
-                    (8..=4096).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
-                }) {
+                || !matches!(
+                    body.get("kind").and_then(Value::as_str),
+                    Some("bat" | "github")
+                )
+                || !body
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| {
+                        (8..=4096).contains(&value.len())
+                            && value.bytes().all(|b| b.is_ascii_graphic())
+                    })
+            {
                 return Err("Invalid staged credential fields".into());
             }
         }
@@ -1205,8 +1223,13 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
                 "refresh" => matches!(value.as_ref(), "true" | "false" | "1" | "0"),
                 "agent" if preferences => matches!(value.as_ref(), "claude" | "codex"),
                 "session_id" if preferences => !value.is_empty() && value.len() <= 256,
-                "host" if skills => !value.is_empty() && value.len() <= 256
-                    && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+                "host" if skills => {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                }
                 "workspace_id" if skills => !value.is_empty() && value.len() <= 256,
                 _ => false,
             };
@@ -1250,9 +1273,36 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             continue;
         }
         if path.starts_with("/repositories/") && path.ends_with("/pulls") {
-            let allowed = matches!(key.as_ref(), "state" | "page");
+            let allowed = match key.as_ref() {
+                "state" => matches!(value.as_ref(), "open" | "closed" | "all"),
+                "page" => {
+                    value.bytes().all(|b| b.is_ascii_digit())
+                        && value.parse::<u16>().is_ok_and(|n| (1..=1000).contains(&n))
+                }
+                _ => false,
+            };
             if !allowed || !query_keys.insert(key.to_string()) {
                 return Err("PR list query parameter is invalid".into());
+            }
+            continue;
+        }
+        if path.ends_with("/result-sources") {
+            let valid = match key.as_ref() {
+                "limit" => {
+                    value.bytes().all(|b| b.is_ascii_digit())
+                        && value.parse::<u16>().is_ok_and(|n| (1..=100).contains(&n))
+                }
+                "after" => {
+                    value.len() == 23
+                        && value.starts_with("wi_")
+                        && value[3..]
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                }
+                _ => false,
+            };
+            if !valid || !query_keys.insert(key.to_string()) {
+                return Err("Invalid result source page query".into());
             }
             continue;
         }
@@ -1404,20 +1454,52 @@ mod tests {
         let mut input = request("POST", "/managed/setup/secrets");
         input.body = Some(serde_json::json!({"kind":"bat", "value":"synthetic-fixture-token"}));
         assert!(validate_request(&input).is_ok());
-        for path in ["/managed/setup/secrets?", "/managed/setup/secrets?token=secret", "/managed/stop", "/managed/setup/secrets/other"] {
+        for path in [
+            "/managed/setup/secrets?",
+            "/managed/setup/secrets?token=secret",
+            "/managed/stop",
+            "/managed/setup/secrets/other",
+        ] {
             input.path = path.into();
             assert!(validate_request(&input).is_err());
         }
         input.path = "/managed/setup/secrets".into();
-        for body in [serde_json::json!({"kind":["bat"],"value":"synthetic-fixture-token"}),
+        for body in [
+            serde_json::json!({"kind":["bat"],"value":"synthetic-fixture-token"}),
             serde_json::json!({"kind":"github","value":"synthetic-fixture-token","path":"/tmp/token"}),
-            serde_json::json!({"kind":"bat","value":"token with whitespace"})] {
+            serde_json::json!({"kind":"bat","value":"token with whitespace"}),
+        ] {
             input.body = Some(body);
             assert!(validate_request(&input).is_err());
         }
         assert!(validate_request(&request("GET", "/managed/setup?host=other")).is_err());
         assert!(validate_request(&request("GET", "/managed/setup/secrets")).is_err());
     }
+    #[test]
+    fn product_reads_use_only_scoped_bounded_queries() {
+        for path in [
+            "/hosts/fixture/preferences?agent=claude&session_id=exact&refresh=1",
+            "/projects/prj_00000000000000000000/skills?host=fixture&workspace_id=one",
+            "/work-items/wi_00000000000000000000/result-sources?limit=100&after=wi_11111111111111111111",
+            "/repositories/owner/repo/pulls?state=closed&page=1000",
+        ] {
+            assert!(validate_request(&get(path)).is_ok(), "{path}");
+        }
+        for path in [
+            "/hosts/fixture/preferences?agent=other",
+            "/hosts/fixture/preferences?refresh=1&refresh=0",
+            "/projects/prj_00000000000000000000/skills?host=fixture",
+            "/projects/prj_00000000000000000000/skills?host=fixture&workspace_id=one&path=/etc",
+            "/work-items/wi_00000000000000000000/result-sources?limit=101",
+            "/work-items/wi_00000000000000000000/result-sources?after=other",
+            "/repositories/owner/repo/pulls?state=merged",
+            "/repositories/owner/repo/pulls?page=1001",
+            "/repositories/owner/repo/pulls?page=1&page=2",
+        ] {
+            assert!(validate_request(&get(path)).is_err(), "{path}");
+        }
+    }
+
     #[test]
     fn session_message_character_limit_is_bounded_and_route_specific() {
         assert!(validate_request(&get(
@@ -2496,28 +2578,48 @@ mod tests {
     #[tokio::test]
     async fn explicit_existing_central_switch_preserves_managed_binding_until_native_review() {
         let root = tempfile::tempdir().unwrap();
-        let identity = Identity { server_id: "managed-fixture-server".into(), principal_id: "managed-fixture-principal".into() };
-        let mut bridge = Bridge::managed(root.path(), config("http://127.0.0.1:23456"),
-            Zeroizing::new("synthetic-managed-fixture-token".into()), identity.clone());
+        let identity = Identity {
+            server_id: "managed-fixture-server".into(),
+            principal_id: "managed-fixture-principal".into(),
+        };
+        let mut bridge = Bridge::managed(
+            root.path(),
+            config("http://127.0.0.1:23456"),
+            Zeroizing::new("synthetic-managed-fixture-token".into()),
+            identity.clone(),
+        );
         bridge.vault = Arc::new(MockVault::default());
         {
             let mut state = bridge.state.lock().unwrap();
             let config = state.config.as_ref().unwrap().clone();
-            state.active = Some(Active { config: config.clone(), record: Record {
-                version: 1, binding: binding(&config), token: Zeroizing::new("synthetic-managed-fixture-token".into()),
-                identity: identity.clone(),
-            }});
+            state.active = Some(Active {
+                config: config.clone(),
+                record: Record {
+                    version: 1,
+                    binding: binding(&config),
+                    token: Zeroizing::new("synthetic-managed-fixture-token".into()),
+                    identity: identity.clone(),
+                },
+            });
         }
         let original = bridge.status();
         assert!(original.configuration_setup && !original.configuration_reload);
         assert_eq!(original.configuration_source, "managed");
         assert!(bridge.reload_configuration().is_err());
-        assert!(bridge.setup_configuration(config("https://central.example"), |_| false).await.unwrap().is_none());
+        assert!(bridge
+            .setup_configuration(config("https://central.example"), |_| false)
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(bridge.status().endpoint, original.endpoint);
         assert!(bridge.status().credential_available && bridge.status().connected);
         assert!(bridge.state.lock().unwrap().environment_identity.as_ref() == Some(&identity));
         assert!(!root.path().join("central.json").exists());
-        let status = bridge.setup_configuration(config("https://central.example"), |_| true).await.unwrap().unwrap();
+        let status = bridge
+            .setup_configuration(config("https://central.example"), |_| true)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(status.endpoint.as_deref(), Some("https://central.example/"));
         assert_eq!(status.configuration_source, "external");
         assert!(!status.credential_available && !status.connected && status.configuration_reload);
@@ -2525,25 +2627,43 @@ mod tests {
         assert!(bridge.state.lock().unwrap().environment.is_none());
         let saved = std::fs::read(root.path().join("central.json")).unwrap();
         assert!(!String::from_utf8_lossy(&saved).contains("synthetic-managed"));
-        assert!(bridge.setup_configuration(config("https://other.example"), |_| panic!("must not overwrite")).await.is_err());
+        assert!(bridge
+            .setup_configuration(config("https://other.example"), |_| panic!(
+                "must not overwrite"
+            ))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn existing_central_switch_conflict_keeps_managed_credential_and_original_file() {
         let root = tempfile::tempdir().unwrap();
-        let mut bridge = Bridge::managed(root.path(), config("http://127.0.0.1:23456"),
+        let mut bridge = Bridge::managed(
+            root.path(),
+            config("http://127.0.0.1:23456"),
             Zeroizing::new("synthetic-managed-fixture-token".into()),
-            Identity { server_id: "managed-fixture-server".into(), principal_id: "managed-fixture-principal".into() });
+            Identity {
+                server_id: "managed-fixture-server".into(),
+                principal_id: "managed-fixture-principal".into(),
+            },
+        );
         bridge.vault = Arc::new(MockVault::default());
         let path = root.path().join("central.json");
         let competing = path.clone();
-        assert!(bridge.setup_configuration(config("https://central.example"), move |_| {
-            std::fs::write(competing, b"operator configuration appeared during review").unwrap();
-            true
-        }).await.is_err());
+        assert!(bridge
+            .setup_configuration(config("https://central.example"), move |_| {
+                std::fs::write(competing, b"operator configuration appeared during review")
+                    .unwrap();
+                true
+            })
+            .await
+            .is_err());
         assert_eq!(bridge.status().configuration_source, "managed");
         assert!(bridge.status().credential_available);
-        assert_eq!(std::fs::read(path).unwrap(), b"operator configuration appeared during review");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"operator configuration appeared during review"
+        );
     }
 
     #[tokio::test]
@@ -2554,7 +2674,11 @@ mod tests {
         assert_eq!(bridge.status().configuration_source, "managed");
         assert!(bridge.status().configuration_setup && !bridge.status().credential_available);
         assert!(bridge.reload_configuration().is_err());
-        let status = bridge.setup_configuration(config("https://central.example"), |_| true).await.unwrap().unwrap();
+        let status = bridge
+            .setup_configuration(config("https://central.example"), |_| true)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(status.configuration_source, "external");
         assert!(!status.credential_available);
     }

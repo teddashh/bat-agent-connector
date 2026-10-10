@@ -19,6 +19,128 @@ var __exportAll = (all, no_symbols) => {
 	return target;
 };
 //#endregion
+//#region src/pr-selector.js
+function prSelector({ api, h, t, guard, repoInput, numInput, onSelect }) {
+	let page = 1, serial = 0, cached = [], scope = "", nextPage = null, busy = false, stale = false, error = "";
+	const alive = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const filter = h("select", {
+		"aria-label": t("state"),
+		onchange: () => loadList()
+	}, ...[
+		"open",
+		"closed",
+		"all"
+	].map((value) => h("option", { value }, t("pr_state_" + value))));
+	const search = h("input", {
+		type: "search",
+		"aria-label": t("delivery_search_prs"),
+		placeholder: t("delivery_search_prs"),
+		oninput: () => render()
+	});
+	const refresh = h("button", {
+		type: "button",
+		class: "secondary",
+		onclick: () => loadList()
+	}, t("delivery_refresh_prs"));
+	const list = h("div", {
+		class: "pr-list",
+		"aria-live": "polite"
+	});
+	const container = h("div", { class: "pr-selector" }, h("div", { class: "filters" }, search, filter, refresh), list);
+	function render() {
+		if (!alive()) return;
+		list.replaceChildren();
+		refresh.disabled = busy;
+		if (busy) list.append(h("p", { class: "muted" }, t("loading")));
+		if (error) list.append(h("p", { class: "note warn" }, error));
+		if (scope) list.append(h("p", { class: "muted" }, `${scope} · ${t("delivery_pr_page", { page })}`));
+		if (stale && cached.length) list.append(h("p", { class: "note warn" }, t("delivery_pr_stale")));
+		const query = search.value.trim().toLocaleLowerCase();
+		const rows = cached.filter((pr) => pr.title.toLocaleLowerCase().includes(query) || String(pr.number).includes(query));
+		if (!rows.length && !busy) list.append(h("p", { class: "muted" }, t("delivery_no_prs")));
+		for (const pr of rows) {
+			const loaded = scope, revision = serial;
+			const select = h("button", {
+				type: "button",
+				class: "secondary",
+				disabled: busy || stale,
+				onclick: () => {
+					if (!alive() || busy || stale || revision !== serial || loaded !== scope) return;
+					repoInput.value = loaded;
+					numInput.value = String(pr.number);
+					onSelect();
+				}
+			}, `#${pr.number} ${pr.title}`);
+			list.append(h("div", { class: "row" }, select, h("span", { class: "muted" }, t("pr_state_" + pr.state), pr.draft ? ` · ${t("pr_draft")}` : "")));
+		}
+		if (scope) list.append(h("div", { class: "actions" }, h("button", {
+			type: "button",
+			class: "secondary",
+			disabled: busy || stale || page <= 1,
+			onclick: () => loadList(page - 1)
+		}, t("pagination_prev")), h("button", {
+			type: "button",
+			class: "secondary",
+			disabled: busy || stale || !nextPage,
+			onclick: () => loadList(nextPage)
+		}, t("pagination_next"))));
+	}
+	async function loadList(wanted = 1) {
+		if (!alive()) return;
+		const mine = ++serial, repository = repoInput.value.trim(), selectedState = filter.value;
+		stale = true;
+		error = "";
+		if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+			busy = false;
+			error = t("delivery_choose_repository");
+			render();
+			return;
+		}
+		busy = true;
+		render();
+		try {
+			const result = await api("GET", `/repositories/${repository}/pulls?state=${selectedState}&page=${wanted}`);
+			if (!alive() || mine !== serial) return;
+			if (repoInput.value.trim() !== repository || filter.value !== selectedState) {
+				busy = false;
+				render();
+				return;
+			}
+			if (typeof result.loaded_scope !== "string" || result.loaded_scope.toLowerCase() !== repository.toLowerCase() || !Array.isArray(result.pulls) || result.pulls.length > 100 || result.pulls.some((pr) => !Number.isInteger(pr.number) || pr.number < 1 || pr.number > 999999999 || typeof pr.title !== "string" || !["open", "closed"].includes(pr.state))) throw Error(t("delivery_pr_invalid"));
+			page = wanted;
+			scope = result.loaded_scope;
+			cached = result.pulls;
+			nextPage = result.has_more && wanted < 1e3 && result.next_page === wanted + 1 ? result.next_page : null;
+			stale = false;
+		} catch (failure) {
+			if (!alive() || mine !== serial) return;
+			error = failure.message || String(failure);
+		} finally {
+			if (alive() && mine === serial) {
+				busy = false;
+				render();
+			}
+		}
+	}
+	repoInput.addEventListener("input", () => {
+		serial++;
+		busy = false;
+		stale = true;
+		render();
+	});
+	return {
+		container,
+		loadList
+	};
+}
+//#endregion
 //#region src/state/sessions.js
 var text$3 = (value) => typeof value === "string" ? value : "";
 function workspaceGroup(session) {
@@ -384,6 +506,14 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 			if (!alive()) return;
 			if (!secret) {
 				saved[name] = node.value;
+				if ([
+					"url",
+					"fingerprint",
+					"profile_id"
+				].includes(name)) {
+					saved.import_profile_id = "";
+					profile.value = "";
+				}
 				try {
 					persist();
 				} catch (error) {
@@ -560,15 +690,17 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 				secretRef = staged.secret_ref;
 				tokenField.value = "";
 			}
+			const imported = kind === "host" && !secretRef && saved.import_profile_id;
 			const params = kind === "host" ? {
-				url: value("url"),
-				fingerprint: value("fingerprint"),
-				profile_id: value("profile_id") || "default",
+				...imported ? { import_profile_id: imported } : {
+					url: value("url"),
+					fingerprint: value("fingerprint"),
+					profile_id: value("profile_id") || "default"
+				},
 				writes: checked("writes"),
 				orchestrate: checked("orchestrate"),
 				managed_roots: value("managed_roots").split(/\r?\n|;/).map((item) => item.trim()).filter(Boolean),
-				...value("ssh_alias") ? { ssh_alias: value("ssh_alias") } : {},
-				...!secretRef && saved.import_profile_id ? { import_profile_id: saved.import_profile_id } : {}
+				...value("ssh_alias") ? { ssh_alias: value("ssh_alias") } : {}
 			} : {
 				host: value("repository_host"),
 				workspace_id: value("workspace_id"),
@@ -591,11 +723,11 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 			await sendOriginal();
 			await refresh();
 		} catch (error) {
-			if (alive() && saved.intent && !saved.intent.operation_id && [
+			if (alive() && saved.intent && !saved.intent.operation_id && (error.admissionRefused || [
 				"CONFIGURATION_CHANGED",
 				"SETUP_BUSY",
 				"PRECONDITION_REQUIRED"
-			].includes(error.code)) {
+			].includes(error.code))) {
 				saved.intent.refused = error.code;
 				persist();
 			}
@@ -2542,11 +2674,28 @@ var STRINGS = {
 		setup_unverified: "等待連線驗證",
 		setup_busy: "目前仍有工作或操作；設定會等安全時機再變更。",
 		setup_profiles_unavailable: "尚無可匯入的 BAT profile，或其授權受系統保護。可在下方手動設定。",
+		managed_join_existing: "進階：加入既有中央",
+		managed_join_help: "輸入另一個中央的位址與預期帳號，再於原生視窗確認。設定後須另行加入該中央的憑證；此電腦原有的背景工作會繼續運作。",
 		managed_background_help: "Connector 在背景持續運作。關閉這個畫面不會停止工作。",
 		managed_open_browser: "在瀏覽器開啟 Dashboard",
 		managed_start_login: "登入電腦時啟動",
 		managed_browser_connected: "已連線至本機 Connector",
 		managed_browser_help: "此瀏覽器沿用桌面的個人身分。登出後，可從桌面選單重新開啟 Dashboard。",
+		delivery_list_prs: "瀏覽 Pull Requests",
+		delivery_no_prs: "找不到 PR。",
+		delivery_refresh_prs: "重新整理",
+		delivery_search_prs: "搜尋這一頁的 PR",
+		delivery_choose_repository: "請先選取或填入已連結的儲存庫。",
+		delivery_pr_page: "第 {page} 頁",
+		delivery_pr_stale: "清單尚未重新驗證；更新成功後才能選取。",
+		delivery_pr_invalid: "PR 清單回應與選取的儲存庫不一致。",
+		pagination_prev: "上一頁",
+		pagination_next: "下一頁",
+		pr_draft: "草稿",
+		pr_state_open: "開啟",
+		pr_state_closed: "關閉",
+		pr_state_all: "全部",
+		state: "狀態",
 		workspace_navigation: "專案與工作",
 		workspace_search: "搜尋已載入的專案與工作",
 		workspace_manage: "新增／管理專案",
@@ -3876,6 +4025,8 @@ var STRINGS = {
 		setup_unverified: "Awaiting connection verification",
 		setup_busy: "Work or operations are still active; configuration changes wait for a safe point.",
 		setup_profiles_unavailable: "No BAT profile can be imported, or its authorization is protected by the operating system. Configure the connection below.",
+		managed_join_existing: "Advanced: join an existing central",
+		managed_join_help: "Enter another central address and expected account, then confirm in the native window. Enroll its credential separately afterward. Existing background work on this computer keeps running.",
 		managed_background_help: "Connector keeps running in the background. Closing this view does not stop work.",
 		managed_open_browser: "Open Dashboard in browser",
 		managed_start_login: "Start when I sign in",
@@ -3906,6 +4057,22 @@ var STRINGS = {
 		mobile_compose_open: "Write message",
 		mobile_compose_close: "Collapse composer",
 		mobile_draft_indicator: "Draft",
+		delivery_list_prs: "List Pull Requests",
+		delivery_no_prs: "No PRs found.",
+		delivery_refresh_prs: "Refresh",
+		delivery_choose_pr: "Choose a repository to load PRs.",
+		delivery_search_prs: "Search this page of PRs",
+		delivery_choose_repository: "Choose or enter a configured repository first.",
+		delivery_pr_page: "Page {page}",
+		delivery_pr_stale: "This list has not been revalidated. Refresh before selecting.",
+		delivery_pr_invalid: "The PR list does not match the selected repository.",
+		pagination_prev: "Previous",
+		pagination_next: "Next",
+		pr_draft: "draft",
+		pr_state_open: "Open",
+		pr_state_closed: "Closed",
+		pr_state_all: "All",
+		state: "State",
 		connection_details: "Connection details and configuration file",
 		delivery_repository_input: "Repository or GitHub PR URL",
 		needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",
@@ -10692,7 +10859,11 @@ async function api(method, path, body, key) {
 	const epoch = state.epoch;
 	const { status, data } = await connectorRequest(method, path, body, key, state.token);
 	if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while the request was in flight");
-	if (status < 200 || status >= 300) throw new ApiError(status, data.error?.code, data.error?.message);
+	if (status < 200 || status >= 300) {
+		const error = new ApiError(status, data.error?.code, data.error?.message);
+		error.admissionRefused = data.error?.admission_refused === true;
+		throw error;
+	}
 	return data;
 }
 function errorBox(e) {
@@ -12596,6 +12767,11 @@ function checkpointPanel(host, sid) {
 }
 async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceRepository) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId ? {
 		host: sourceHost,
 		kind: sourceKind,
@@ -12637,6 +12813,18 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 	if (source) main.append(h("p", { class: "note" }, t("delivery_source_context"), " ", h("code", {}, source.id)));
 	let selectedMethod = "";
 	let reviewedPreview = null;
+	const selector = prSelector({
+		api,
+		h,
+		t,
+		guard: () => assertView(connection),
+		repoInput: repo,
+		numInput: num,
+		onSelect: () => {
+			load();
+		}
+	});
+	repo.addEventListener("change", () => selector.loadList());
 	main.append(h("h2", {}, t("dep_pull_request")), h("form", {
 		class: "filters delivery-controls",
 		onsubmit: (event) => {
@@ -12647,7 +12835,10 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 	}, h("label", {}, t("delivery_repository_input"), repo), h("label", {}, t("delivery_pr_number"), num), h("button", {
 		type: "submit",
 		class: "secondary"
-	}, t("load_pr"))), inputStatus, card);
+	}, t("load_pr"))), h("details", {}, h("summary", {}, t("delivery_list_prs") || "List Pull Requests"), selector.container), inputStatus, card);
+	setTimeout(() => {
+		if (repo.value && !num.value) selector.loadList();
+	}, 100);
 	if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
 	const load = async (flash = null, fromEvent = false) => {
 		const opens = drawerOpens;
@@ -13731,6 +13922,56 @@ async function viewManagedSettings(main) {
 				login.disabled = false;
 			}
 		});
+		try {
+			const native = await nativeStatus();
+			guard();
+			if (native.configuration_source === "managed" && native.configuration_setup) {
+				const draft = state.nativeSetupDraft ||= {
+					endpoint: "",
+					expected_actor: ""
+				};
+				const endpoint = h("input", {
+					type: "url",
+					value: draft.endpoint,
+					required: true,
+					maxlength: 512,
+					autocomplete: "off",
+					oninput: (event) => {
+						draft.endpoint = event.target.value;
+					}
+				});
+				const actor = h("input", {
+					value: draft.expected_actor,
+					required: true,
+					maxlength: 200,
+					autocomplete: "off",
+					oninput: (event) => {
+						draft.expected_actor = event.target.value;
+					}
+				});
+				const review = h("button", {
+					type: "submit",
+					class: "secondary"
+				}, t("desktop_setup_review"));
+				const form = h("form", { onsubmit: (event) => {
+					event.preventDefault();
+					if (state.nativeBusy || !form.reportValidity()) return;
+					guard();
+					review.disabled = true;
+					return nativeTransition("configure", {
+						endpoint: endpoint.value.trim(),
+						expected_actor: actor.value.trim(),
+						contract_version: "2026-10-08"
+					});
+				} }, h("p", { class: "muted" }, t("managed_join_help")), h("div", { class: "capture-fields" }, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)), review);
+				main.append(h("details", {
+					class: "panel",
+					"data-managed-join": ""
+				}, h("summary", {}, t("managed_join_existing")), form));
+			}
+		} catch (error) {
+			if (connection.generation === generation) status.append(errorBox(error));
+		}
 		disposeFleet = await mountFleet(fleetRoot, {
 			h,
 			t
@@ -13767,6 +14008,7 @@ async function nativeTransition(kind, config = null) {
 			const saved = await nativeSetupConfiguration(config);
 			if (attempt !== state.nativeAttempt) return;
 			if (saved) {
+				disconnect();
 				state.nativeSetupDraft = null;
 				state.connectionNotice = t("desktop_setup_saved");
 			} else {
