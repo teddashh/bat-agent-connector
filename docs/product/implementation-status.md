@@ -8,6 +8,17 @@
 
 ## 目前續作
 
+### 2026-10-09 原生首次連線
+
+`feat/first-connection` 接續 Delivery 修正，將缺少 `central.json` 的首次啟動接成：輸入中央
+位址／預期身分 → 原生視窗確認 → 原子建立固定設定檔 → 既有原生憑證驗證。取消或拒絕保留
+非機密輸入草稿；既有設定／symlink 不覆寫，確認期間 disconnect 或重新載入會拒絕舊保存。
+原先啟動時沒有有效設定的環境權杖仍丟棄，不會轉送到新位址。Web 的同源連線保持原路徑。
+
+Dashboard-only 可直接使用既有中央；Fleet 的 Kit／inventory／SSH 仍需先配置，登入選項與
+Rust／PowerShell 遷移沿用現有明確預覽。這一步完成中央初次設定，尚未宣稱自動安裝整套 Fleet
+或 Linux 原生憑證儲存。候選 gates 與 Windows／Mac 安裝 fixture 另由 PR/checks 留證。
+
 ### 2026-10-09 Delivery 資訊正確性與派工到 PR 的關聯
 
 `fix/delivery-lineage` 接續 #71 的 `3f4ed88`，修正候選清單以 `streaming=false` 推論完成。

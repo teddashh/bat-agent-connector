@@ -4,7 +4,7 @@ use reqwest::{redirect::Policy, Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
@@ -17,7 +17,7 @@ pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub endpoint: String,
@@ -211,6 +211,7 @@ pub struct NativeStatus {
     pub credential_saved: bool,
     pub enrollment_supported: bool,
     pub configuration_reload: bool,
+    pub configuration_setup: bool,
     pub configuration_file: Option<String>,
     pub connected: bool,
 }
@@ -370,6 +371,9 @@ impl Bridge {
             credential_saved: saved,
             enrollment_supported: self.vault.supported(),
             configuration_reload: self.configuration_file.is_some(),
+            configuration_setup: state.config.is_err() && self.configuration_file.as_ref().is_some_and(|path| {
+                matches!(path.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            }),
             configuration_file: self
                 .configuration_file
                 .as_ref()
@@ -407,6 +411,90 @@ impl Bridge {
             state.config = config;
         }
         Ok(self.status())
+    }
+    // Initial creation only. A native confirmation binds the endpoint/actor before any token
+    // can be enrolled. Existing files (including broken symlinks) are never replaced by IPC.
+    pub async fn setup_configuration<F>(
+        &self,
+        config: Config,
+        confirm: F,
+    ) -> Result<Option<NativeStatus>, String>
+    where
+        F: FnOnce(&Config) -> bool + Send + 'static,
+    {
+        let _guard = self
+            .connecting
+            .try_lock()
+            .map_err(|_| "Connection or enrollment already in progress")?;
+        let config = normalize(config)?;
+        let path = self
+            .configuration_file
+            .as_ref()
+            .ok_or("Configuration setup is unavailable")?;
+        let generation = {
+            let state = self.state.lock().unwrap();
+            if state.config.is_ok() || state.active.is_some() {
+                return Err(
+                    "A central configuration already exists; use the fixed file and reload".into(),
+                );
+            }
+            state.generation
+        };
+        if !matches!(path.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(
+                "A central configuration already exists; use the fixed file and reload".into(),
+            );
+        }
+        let candidate = config.clone();
+        if !tokio::task::spawn_blocking(move || confirm(&candidate))
+            .await
+            .map_err(|_| "Native setup confirmation failed")?
+        {
+            return Ok(None);
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.generation != generation {
+                return Err("Connection changed during setup; review configuration again".into());
+            }
+            let parent = path
+                .parent()
+                .ok_or("Configuration directory is unavailable")?;
+            std::fs::create_dir_all(parent)
+                .map_err(|_| "Unable to create configuration directory")?;
+            let temporary = parent.join(format!(".central-setup-{}.json", uuid::Uuid::new_v4()));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temporary)
+                .map_err(|_| "Unable to prepare central configuration")?;
+            let saved = (|| {
+                let bytes = serde_json::to_vec_pretty(&config)
+                    .map_err(|_| "Unable to encode configuration")?;
+                file.write_all(&bytes)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|_| "Unable to save central configuration")?;
+                // Atomic, same-directory publication with no overwrite on all supported platforms.
+                std::fs::hard_link(&temporary, path).map_err(|_| {
+                    "Configuration appeared or could not be created; reload before retrying"
+                })
+            })();
+            drop(file);
+            let _ = std::fs::remove_file(&temporary);
+            saved?;
+            state.generation += 1;
+            state.config = Ok(config);
+            state.environment = None;
+            state.environment_identity = None;
+            state.active = None;
+        }
+        Ok(Some(self.status()))
     }
     pub fn forget_credential(&self) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
@@ -2286,6 +2374,94 @@ mod tests {
             .unwrap()
             .contains("bound"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn first_configuration_needs_native_review_and_never_forwards_a_launch_token() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("central.json");
+        let mut bridge = Bridge::load(root.path(), Zeroizing::new("discarded-launch-token".into()));
+        bridge.vault = Arc::new(MockVault::default());
+        assert!(bridge.status().configuration_setup);
+        assert!(bridge
+            .setup_configuration(config("https://central.example"), |_| false)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!path.exists());
+        let status = bridge
+            .setup_configuration(config("https://central.example"), |candidate| {
+                assert_eq!(candidate.endpoint, "https://central.example/");
+                assert_eq!(candidate.expected_actor, "fixture-operator");
+                true
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.endpoint.as_deref(), Some("https://central.example/"));
+        assert!(!status.configuration_setup && !status.credential_available && !status.connected);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("token"));
+        assert_eq!(
+            read_configuration(&path).unwrap().expected_actor,
+            "fixture-operator"
+        );
+        assert!(bridge
+            .setup_configuration(config("https://other.example"), |_| panic!(
+                "must not ask again"
+            ))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+    #[tokio::test]
+    async fn first_configuration_refuses_invalid_input_and_files_created_during_review() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("central.json");
+        let mut bridge = Bridge::load(root.path(), Zeroizing::new(String::new()));
+        bridge.vault = Arc::new(MockVault::default());
+        for endpoint in [
+            "http://remote.example",
+            "https://central.example/path",
+            "https://user:pass@central.example",
+        ] {
+            assert!(bridge
+                .setup_configuration(config(endpoint), |_| panic!(
+                    "invalid origin reached native confirmation"
+                ))
+                .await
+                .is_err());
+            assert!(!path.exists());
+        }
+        let competing = path.clone();
+        assert!(bridge
+            .setup_configuration(config("https://central.example"), move |_| {
+                std::fs::write(competing, b"existing configuration").unwrap();
+                true
+            })
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing configuration");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert!(!bridge.status().credential_available);
+    }
+    #[tokio::test]
+    async fn disconnect_during_first_configuration_refuses_the_pending_save() {
+        let root = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge::load(root.path(), Zeroizing::new(String::new()));
+        bridge.vault = Arc::new(MockVault::default());
+        let bridge = Arc::new(bridge);
+        let second = bridge.clone();
+        assert!(bridge
+            .setup_configuration(config("https://central.example"), move |_| {
+                second.disconnect();
+                true
+            })
+            .await
+            .err()
+            .unwrap()
+            .contains("changed"));
+        assert!(!root.path().join("central.json").exists());
     }
     #[tokio::test]
     async fn launch_credential_keeps_first_backend_identity_across_disconnect() {
