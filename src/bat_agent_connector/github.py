@@ -79,13 +79,22 @@ class GitHubClient:
                 return 429, {"retry_after": e.headers.get("Retry-After", "30")}
             if e.code == 429 or e.code >= 500 or rate_limited_read:
                 raise GitHubAmbiguous(f"GitHub {method} {path} answered {e.code}") from None
-            return e.code, payload if isinstance(payload, dict) else {"items": payload}
+            out = payload.copy() if isinstance(payload, dict) else {"items": payload}
+            if "Link" in e.headers:
+                out["_link"] = e.headers["Link"]
+            return e.code, out
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
             # HTTPException covers a body cut short (IncompleteRead) after GitHub may already have acted.
             raise GitHubAmbiguous(redact(f"GitHub {method} {path} failed: {type(e).__name__}")) from None
         try:
             payload = json.loads(raw) if raw else {}
-            return status, {"items": payload} if isinstance(payload, list) else payload
+            if isinstance(payload, list):
+                out = {"items": payload}
+            else:
+                out = payload.copy() if isinstance(payload, dict) else {"items": payload}
+            if "Link" in resp.headers:
+                out["_link"] = resp.headers["Link"]
+            return status, out
         except ValueError:
             raise GitHubAmbiguous(f"GitHub {method} {path} answered {status} with an unreadable body") from None
 
