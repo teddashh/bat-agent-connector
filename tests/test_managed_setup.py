@@ -348,3 +348,15 @@ async def test_profile_import_respects_encryption_and_never_returns_credentials(
     result = await settle(installed, create(installed, "setup.host", {"host": "fixture"}, {"import_profile_id": "remote-1"}))
     assert result["status"] == "succeeded"
     assert daemon.fleet.config.host("fixture").token_ref == "bat-profile:remote-1"
+
+
+async def test_verification_http_admission_refusal_preserves_configuration_without_operation(installed):
+    daemon, principal, _ = installed
+    before = setup.state(daemon, principal)
+    status, response = await daemon.api.create_operation(principal=principal, query={},
+        body={"action": "setup.verification", "target": {}, "params": {"commands": {"project": []}, "timeout_s": 120},
+              "preconditions": {"config_revision": before["revision"]}}, headers={"idempotency-key": "invalid-verification"})
+    assert status == 422 and response["error"]["admission_refused"] is True
+    assert response["error"]["code"] == "INVALID_PARAMS"
+    assert not daemon.ops.list(action="setup.verification")["operations"]
+    assert setup.state(daemon, principal)["revision"] == before["revision"]

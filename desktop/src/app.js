@@ -2329,11 +2329,15 @@ async function viewManagedSettings(main) {
     h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
     h("p", {class: "muted"}, t("managed_background_help")), status);
   main.append(h("h1", {}, t("nav_settings")), local);
-  const setup = managedSetupPanel({h, t, api, guard, namespace: state.namespace, errorBox, opStatus,
+  const setup = managedSetupPanel({h, t, api, guard, namespace: state.namespace, errorBox, opStatus, caps: () => state.caps,
     onConfigured: async () => {const caps = await api("GET", "/capabilities"); guard(); state.caps = caps;}});
   main.append(setup.box);
   await setup.load();
-  try {guard();} catch (error) {setup.dispose(); throw error;}
+  try {guard();} catch (error) {
+    setup.dispose();
+    if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(error.code)) return;
+    throw error;
+  }
   const fleetRoot = h("div"); main.append(fleetRoot);
   let disposeFleet;
   if (nativeDesktop) {

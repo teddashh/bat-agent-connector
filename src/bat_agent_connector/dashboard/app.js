@@ -456,7 +456,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 }
 //#endregion
 //#region src/managed-setup.js
-function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, onConfigured }) {
+function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, onConfigured, caps }) {
 	const key = `batc.managed.setup.${namespace}`;
 	let saved = {}, snapshot = null, busy = false, disposed = false, operation = null;
 	try {
@@ -469,7 +469,15 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((k) => [k, canonical(value[k])]));
 		return value;
 	}
-	const validIntent = (intent) => intent && typeof intent.key === "string" && intent.key.length <= 200 && ["setup.host", "setup.repository"].includes(intent.request?.action) && /^[0-9a-f]{64}$/.test(intent.request?.preconditions?.config_revision) && intent.request?.params && typeof intent.request.params === "object" && intent.request?.target && Object.keys(intent.request.target).length === 1 && typeof intent.request.target[intent.request.action === "setup.host" ? "host" : "repository"] === "string" && (!intent.operation_id || /^op_[0-9a-f]{32}$/.test(intent.operation_id));
+	const object = (value) => value && typeof value === "object" && !Array.isArray(value);
+	const validCommands = (commands) => object(commands) && Object.keys(commands).length <= 200 && Object.entries(commands).every(([project, argv]) => project.length > 0 && project.length <= 256 && !/[\x00-\x1f]/.test(project) && Array.isArray(argv) && argv.length > 0 && argv.length <= 64 && argv.every((arg) => typeof arg === "string" && arg.length > 0 && arg.length <= 4096 && !/[\x00-\x1f]/.test(arg)) && !argv[0].startsWith("-") && argv.reduce((size, arg) => size + arg.length, 0) <= 16e3);
+	const validVerification = (value) => object(value) && validCommands(value.commands) && Number.isInteger(value.timeout_s) && value.timeout_s >= 1 && value.timeout_s <= 3600;
+	const validIntent = (intent) => intent && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200 && [
+		"setup.host",
+		"setup.repository",
+		"setup.verification"
+	].includes(intent.request?.action) && /^[0-9a-f]{64}$/.test(intent.request?.preconditions?.config_revision) && object(intent.request?.params) && object(intent.request?.target) && (intent.request.action === "setup.verification" ? Object.keys(intent.request.target).length === 0 && validVerification(intent.request.params) : Object.keys(intent.request.target).length === 1 && typeof intent.request.target[intent.request.action === "setup.host" ? "host" : "repository"] === "string") && (!intent.operation_id || /^op_[0-9a-f]{32}$/.test(intent.operation_id));
+	const allowed = (kind) => caps()?.scopes?.includes("manage") && caps()?.actions?.some((action) => action.action === `setup.${kind}` && action.allowed === true);
 	const damaged = !!saved.intent && !validIntent(saved.intent);
 	const alive = () => {
 		try {
@@ -496,14 +504,16 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 	const fields = new Map();
 	const input = (name, label, options = {}) => {
 		const secret = options.type === "password";
-		const node = h("input", {
+		const { multiline, ...attributes } = options;
+		const node = h(multiline ? "textarea" : "input", {
 			autocomplete: "off",
 			maxlength: secret ? 4096 : 1024,
-			...options
+			...attributes
 		});
 		if (!secret) node.value = typeof saved[name] === "string" ? saved[name] : "";
 		node.addEventListener("input", () => {
-			if (!alive()) return;
+			if (!alive() || saved.intent || busy) return;
+			if (name.startsWith("verification_")) seedVerificationBase();
 			if (!secret) {
 				saved[name] = node.value;
 				if ([
@@ -529,10 +539,14 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		const node = h("input", { type: "checkbox" });
 		node.checked = saved[name] === true;
 		node.addEventListener("change", () => {
-			if (!alive()) return;
+			if (!alive() || saved.intent || busy) return;
 			saved[name] = node.checked;
-			persist();
-			unsaved.hidden = false;
+			try {
+				persist();
+				unsaved.hidden = false;
+			} catch (error) {
+				showError(error);
+			}
 		});
 		fields.set(name, node);
 		return h("label", {}, node, " ", t(label));
@@ -550,8 +564,12 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 			fields.get(name).value = selected[name] || "";
 			saved[name] = fields.get(name).value;
 		}
-		persist();
-		unsaved.hidden = false;
+		try {
+			persist();
+			unsaved.hidden = false;
+		} catch (error) {
+			showError(error);
+		}
 	});
 	const hostForm = h("form", {
 		"data-setup-host": "",
@@ -566,7 +584,7 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		type: "url",
 		required: true,
 		placeholder: "wss://host:9876/"
-	}), input("fingerprint", "setup_fingerprint", { required: true }), input("profile_id", "setup_workspace_profile", { placeholder: "default" }), input("bat_secret", "setup_bat_token", { type: "password" })), h("p", { class: "muted" }, t("setup_trust_help")), h("details", {}, h("summary", {}, t("setup_managed_work")), checkbox("writes", "setup_allow_messages"), checkbox("orchestrate", "setup_allow_start"), h("div", { class: "capture-fields" }, input("managed_roots", "setup_managed_roots"), input("ssh_alias", "setup_ssh_alias")), h("p", { class: "muted" }, t("setup_roots_help"))), h("button", {
+	}), input("fingerprint", "setup_fingerprint", { required: true }), input("profile_id", "setup_workspace_profile", { placeholder: "default" }), input("bat_secret", "setup_bat_token", { type: "password" })), h("p", { class: "muted" }, t("setup_trust_help")), h("details", {}, h("summary", {}, t("setup_managed_work")), checkbox("writes", "setup_allow_messages"), checkbox("orchestrate", "setup_allow_start"), checkbox("shared_clone_worktrees", "setup_shared_clone"), h("p", { class: "muted" }, t("setup_shared_clone_help")), h("div", { class: "capture-fields" }, input("managed_roots", "setup_managed_roots"), input("ssh_alias", "setup_ssh_alias")), h("p", { class: "muted" }, t("setup_roots_help"))), h("button", {
 		type: "submit",
 		class: "primary"
 	}, t("setup_save_host")));
@@ -590,6 +608,74 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		type: "submit",
 		class: "primary"
 	}, t("setup_save_repository")));
+	const verificationCommands = h("div", { "data-setup-verification-commands": "" });
+	const verificationNotice = h("p", {
+		class: "note warn",
+		hidden: true
+	});
+	const reloadVerification = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => {
+			if (!alive() || busy || saved.intent || !snapshot) return;
+			saved.verification_base = null;
+			fillVerification(fields.get("verification_project").value.trim());
+		}
+	}, t("setup_verification_reload"));
+	const verificationForm = h("form", {
+		"data-setup-verification": "",
+		onsubmit: (event) => {
+			event.preventDefault();
+			run("verification");
+		}
+	}, h("h3", {}, t("setup_verification_title")), h("p", { class: "muted" }, t("setup_verification_help")), verificationNotice, verificationCommands, h("div", { class: "capture-fields" }, input("verification_project", "setup_verification_project", {
+		required: true,
+		maxlength: 256
+	}), input("verification_executable", "setup_verification_executable", {
+		required: true,
+		maxlength: 4096
+	}), input("verification_timeout", "setup_verification_timeout", {
+		type: "number",
+		min: 1,
+		max: 3600,
+		step: 1,
+		required: true
+	})), input("verification_arguments", "setup_verification_arguments", {
+		multiline: true,
+		rows: 4,
+		maxlength: 16e3
+	}), h("p", { class: "muted" }, t("setup_verification_arguments_help")), h("div", { class: "actions" }, h("button", {
+		type: "submit",
+		class: "primary"
+	}, t("setup_save_verification")), reloadVerification));
+	function seedVerificationBase() {
+		if (!saved.verification_base && snapshot && validVerification(snapshot.verification)) saved.verification_base = {
+			revision: snapshot.revision,
+			...structuredClone(snapshot.verification)
+		};
+	}
+	function fillVerification(project) {
+		if (!snapshot || saved.intent || busy) return;
+		const settings = snapshot.verification, argv = settings.commands[project] || [];
+		for (const [name, value] of Object.entries({
+			verification_project: project,
+			verification_executable: argv[0] || "",
+			verification_arguments: argv.slice(1).join("\n"),
+			verification_timeout: String(settings.timeout_s)
+		})) {
+			fields.get(name).value = value;
+			saved[name] = value;
+		}
+		saved.verification_base = null;
+		seedVerificationBase();
+		try {
+			persist();
+			unsaved.hidden = false;
+			update();
+		} catch (error) {
+			showError(error);
+		}
+	}
 	const refreshButton = h("button", {
 		class: "secondary",
 		onclick: () => refresh().catch(showError)
@@ -604,17 +690,27 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		hidden: true,
 		onclick: () => {
 			if (!alive() || damaged || !terminal() && !saved.intent?.refused) return;
-			saved.intent = null;
-			operation = null;
-			persist();
-			update();
-			refresh().catch(showError);
+			const previous = saved;
+			saved = {
+				...saved,
+				intent: null
+			};
+			if (operation?.status === "succeeded" && previous.intent.request.action === "setup.verification") saved.verification_base = null;
+			try {
+				persist();
+				operation = null;
+				update();
+				refresh().catch(showError);
+			} catch (error) {
+				saved = previous;
+				showError(error);
+			}
 		}
 	}, t("setup_next_change"));
 	const box = h("section", {
 		class: "panel managed-setup",
 		"data-managed-setup": ""
-	}, h("h2", {}, t("setup_title"), " ", unsaved), h("p", { class: "muted" }, t("setup_resume_help")), summary, h("div", { class: "actions" }, refreshButton, retry, next), message, receipt, h("details", { open: true }, h("summary", {}, t("setup_host_title")), hostForm), h("details", {}, h("summary", {}, t("setup_repository_title")), repoForm), h("a", { href: "#/projects" }, t("setup_open_projects")));
+	}, h("h2", {}, t("setup_title"), " ", unsaved), h("p", { class: "muted" }, t("setup_resume_help")), summary, h("div", { class: "actions" }, refreshButton, retry, next), message, receipt, h("details", { open: true }, h("summary", {}, t("setup_host_title")), hostForm), h("details", {}, h("summary", {}, t("setup_repository_title")), repoForm), h("details", {}, h("summary", {}, t("setup_verification_title")), verificationForm), h("a", { href: "#/projects" }, t("setup_open_projects")));
 	function showError(error) {
 		if (alive()) {
 			message.replaceChildren(errorBox(error));
@@ -624,11 +720,26 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 	function update() {
 		if (!alive()) return;
 		const locked = busy || !snapshot || !!saved.intent || snapshot.busy;
-		for (const field of [
-			...fields.values(),
-			profile,
-			...box.querySelectorAll("button[type=submit]")
-		]) field.disabled = !!locked;
+		for (const [kind, form] of [
+			["host", hostForm],
+			["repository", repoForm],
+			["verification", verificationForm]
+		]) {
+			for (const field of form.querySelectorAll("input,textarea,select,button")) field.disabled = !!locked || !allowed(kind);
+			let scope = form.querySelector("[data-setup-scope]");
+			if (!scope) {
+				scope = h("p", {
+					class: "note",
+					"data-setup-scope": ""
+				}, t("setup_scope_required"));
+				form.prepend(scope);
+			}
+			scope.hidden = !!allowed(kind);
+		}
+		const base = saved.verification_base;
+		const stale = base && base.revision !== snapshot?.revision;
+		verificationNotice.hidden = !stale;
+		verificationNotice.textContent = t("setup_verification_changed");
 		refreshButton.disabled = busy;
 		retry.hidden = !saved.intent || terminal();
 		retry.disabled = busy;
@@ -641,7 +752,7 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 	}
 	function accept(candidate) {
 		const intent = saved.intent;
-		if (!candidate || candidate.action !== intent.request.action || !equal(candidate.target, intent.request.target) || !equal(candidate.params, intent.request.params) || !equal(candidate.preconditions, intent.request.preconditions) || candidate.idempotency_key && candidate.idempotency_key !== intent.key || intent.operation_id && candidate.operation_id !== intent.operation_id) throw Error(t("setup_receipt_mismatch"));
+		if (!candidate || !/^op_[0-9a-f]{32}$/.test(candidate.operation_id) || candidate.actor !== caps()?.actor || candidate.action !== intent.request.action || !equal(candidate.target, intent.request.target) || !equal(candidate.params, intent.request.params) || !equal(candidate.preconditions, intent.request.preconditions) || candidate.idempotency_key !== intent.key || intent.operation_id && candidate.operation_id !== intent.operation_id) throw Error(t("setup_receipt_mismatch"));
 		operation = candidate;
 		intent.operation_id = candidate.operation_id;
 		persist();
@@ -670,18 +781,19 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		}
 	}
 	async function run(kind) {
-		const form = kind === "host" ? hostForm : repoForm;
-		if (!alive() || busy || !snapshot || saved.intent || !form.reportValidity()) return;
+		const form = kind === "host" ? hostForm : kind === "repository" ? repoForm : verificationForm;
+		if (!alive() || busy || !snapshot || snapshot.busy || saved.intent || !allowed(kind) || !form.reportValidity()) return;
 		busy = true;
 		update();
 		message.replaceChildren();
 		try {
+			if (kind === "verification" && saved.verification_base && (!validVerification(saved.verification_base) || !/^[0-9a-f]{64}$/.test(saved.verification_base.revision))) throw Error(t("setup_verification_invalid"));
 			persist();
 			const value = (name) => fields.get(name).value.trim();
 			const checked = (name) => fields.get(name).checked;
-			const tokenField = fields.get(kind === "host" ? "bat_secret" : "github_secret");
+			const tokenField = kind === "verification" ? null : fields.get(kind === "host" ? "bat_secret" : "github_secret");
 			let secretRef;
-			if (tokenField.value) {
+			if (tokenField?.value) {
 				const staged = await api("POST", "/managed/setup/secrets", {
 					kind: kind === "host" ? "bat" : "github",
 					value: tokenField.value
@@ -699,24 +811,32 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 				},
 				writes: checked("writes"),
 				orchestrate: checked("orchestrate"),
+				shared_clone_worktrees: checked("shared_clone_worktrees"),
 				managed_roots: value("managed_roots").split(/\r?\n|;/).map((item) => item.trim()).filter(Boolean),
 				...value("ssh_alias") ? { ssh_alias: value("ssh_alias") } : {}
-			} : {
+			} : kind === "repository" ? {
 				host: value("repository_host"),
 				workspace_id: value("workspace_id"),
 				remote_url: value("remote_url"),
 				allow_integrate: checked("allow_integrate"),
 				allow_merge: checked("allow_merge"),
 				allow_pr_update: checked("allow_pr_update")
+			} : {
+				commands: {
+					...(saved.verification_base || snapshot.verification).commands,
+					[value("verification_project")]: [value("verification_executable"), ...fields.get("verification_arguments").value.split(/\r?\n/).filter((arg) => arg !== "")]
+				},
+				timeout_s: Number(value("verification_timeout"))
 			};
+			if (kind === "verification" && !validVerification(params)) throw Error(t("setup_verification_invalid"));
 			if (secretRef) params.secret_ref = secretRef;
 			saved.intent = {
 				key: crypto.randomUUID(),
 				request: {
 					action: `setup.${kind}`,
-					target: kind === "host" ? { host: value("host") } : { repository: value("repository") },
+					target: kind === "host" ? { host: value("host") } : kind === "repository" ? { repository: value("repository") } : {},
 					params,
-					preconditions: { config_revision: snapshot.revision }
+					preconditions: { config_revision: kind === "verification" ? saved.verification_base?.revision || snapshot.revision : snapshot.revision }
 				}
 			};
 			persist();
@@ -759,7 +879,20 @@ function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, on
 		const result = await api("GET", "/managed/setup");
 		guard();
 		if (disposed) return;
+		if (!validVerification(result.verification)) {
+			if (allowed("verification")) throw Error(t("setup_verification_invalid"));
+			result.verification = {
+				commands: {},
+				timeout_s: 600
+			};
+		}
 		snapshot = result;
+		if (!saved.verification_timeout) fields.get("verification_timeout").value = String(result.verification.timeout_s);
+		verificationCommands.replaceChildren(...Object.entries(result.verification.commands).map(([project, argv]) => h("details", {}, h("summary", {}, project), h("pre", { class: "pre" }, argv.join("\n")), h("button", {
+			type: "button",
+			class: "mini",
+			onclick: () => fillVerification(project)
+		}, t("setup_verification_edit", { project })))));
 		summary.replaceChildren(h("p", {}, t("setup_counts", {
 			hosts: result.hosts?.length || 0,
 			repositories: result.repositories?.length || 0
@@ -3561,6 +3694,21 @@ var STRINGS = {
 		setup_allow_start: "允許在獨立管理工作區開工",
 		setup_managed_roots: "遠端管理目錄（多個目錄用分號分隔）",
 		setup_ssh_alias: "此電腦已設定的 SSH alias",
+		setup_shared_clone: "允許共享 clone 的 Git worktree",
+		setup_shared_clone_help: "新 worktree 會與來源 clone 共用 Git metadata。只有明確開啟才允許；人工 session 和工作目錄仍保持唯讀。",
+		setup_verification_title: "3. 設定驗證命令",
+		setup_verification_help: "依 Task Service 的專案名稱設定明確命令。儲存只變更設定，不執行命令；其他專案的命令會保留。逾時秒數套用到所有專案。",
+		setup_verification_project: "Task Service 專案名稱",
+		setup_verification_executable: "執行程式",
+		setup_verification_arguments: "參數（每行一個）",
+		setup_verification_timeout: "逾時秒數（1–3600）",
+		setup_verification_arguments_help: "每個非空白行是一個完整參數，行內空格會保留。不解析 shell 引號、管線或展開；請勿填入憑證。",
+		setup_save_verification: "儲存驗證命令",
+		setup_verification_reload: "重新載入已存驗證設定",
+		setup_verification_edit: "編輯 {project} 的命令",
+		setup_verification_changed: "中央設定已變動；目前草稿保留。重新載入已存驗證設定後，再檢視並儲存。",
+		setup_verification_invalid: "請輸入有效專案、執行程式、最多 63 個非空參數，以及 1–3600 秒逾時。",
+		setup_scope_required: "目前中央身分未獲准修改此設定。",
 		setup_roots_help: "指定專供新管理工作使用的遠端目錄；人工專案保持唯讀。Git 同步與成果操作使用你選擇的 SSH 連線。",
 		setup_save_host: "驗證並儲存主機",
 		setup_repository_title: "2. 連結 GitHub 儲存庫",
@@ -4973,6 +5121,21 @@ var STRINGS = {
 		setup_allow_start: "Allow starts in separate managed workspaces",
 		setup_managed_roots: "Remote managed directories (separate with semicolons)",
 		setup_ssh_alias: "SSH alias configured on this computer",
+		setup_shared_clone: "Allow Git worktrees sharing a clone",
+		setup_shared_clone_help: "New worktrees share Git metadata with the source clone. This requires an explicit choice; manual sessions and working directories remain read-only.",
+		setup_verification_title: "3. Configure verification commands",
+		setup_verification_help: "Configure an explicit command by Task Service project name. Saving changes configuration only; it never runs the command. Other project commands are preserved. The timeout applies to every project.",
+		setup_verification_project: "Task Service project name",
+		setup_verification_executable: "Executable",
+		setup_verification_arguments: "Arguments (one per line)",
+		setup_verification_timeout: "Timeout in seconds (1–3600)",
+		setup_verification_arguments_help: "Each nonempty line is one exact argument; spaces within a line are preserved. Shell quotes, pipes and expansion are not interpreted. Do not enter credentials.",
+		setup_save_verification: "Save verification command",
+		setup_verification_reload: "Reload saved verification settings",
+		setup_verification_edit: "Edit command for {project}",
+		setup_verification_changed: "Central configuration changed; your draft is preserved. Reload saved verification settings, review, and save again.",
+		setup_verification_invalid: "Enter a valid project, executable, at most 63 nonempty arguments and a 1–3600 second timeout.",
+		setup_scope_required: "Your central identity is not permitted to change this setting.",
 		setup_roots_help: "Choose remote directories dedicated to new managed work; human projects remain read-only. Git synchronization and artifact actions use your selected SSH connection.",
 		setup_save_host: "Verify and save host",
 		setup_repository_title: "2. Bind a GitHub repository",
@@ -14959,6 +15122,7 @@ async function viewManagedSettings(main) {
 		namespace: state.namespace,
 		errorBox,
 		opStatus,
+		caps: () => state.caps,
 		onConfigured: async () => {
 			const caps = await api("GET", "/capabilities");
 			guard();
@@ -14971,6 +15135,7 @@ async function viewManagedSettings(main) {
 		guard();
 	} catch (error) {
 		setup.dispose();
+		if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(error.code)) return;
 		throw error;
 	}
 	const fleetRoot = h("div");
