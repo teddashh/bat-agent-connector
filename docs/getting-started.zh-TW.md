@@ -90,6 +90,9 @@ ssh -N -L 18796:127.0.0.1:18796 central-alias
 
 ## 5. 接上桌面 client
 
+Windows 另有原生 Fleet 連線、BAT profile 啟動與登入控制。請搭配
+[Windows 使用與資源指南](windows.zh-TW.md)；本頁中央設定與 Windows 能力是產品中互補的部分。
+
 在成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 下載對應 artifact：
 
 | 平台 | Artifact | 格式 |

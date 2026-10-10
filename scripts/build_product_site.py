@@ -31,6 +31,7 @@ nav = "".join(
         ("product", "Product", "產品"),
         ("workflow", "Workflow", "流程"),
         ("architecture", "Architecture", "架構"),
+        ("windows", "Windows Fleet", "Windows Fleet"),
         ("start", "Get started", "開始使用"),
         ("docs", "Docs", "文件"),
     ]
@@ -44,12 +45,12 @@ header = f'''<a class="skip-link" href="#main">{bi("Skip to content", "跳到主
 <a href="{repo}" class="source-link">GitHub <span aria-hidden="true">↗</span></a></nav></div></header>'''
 parts = [header, '<main id="main">']
 parts.append('<section class="hero section" id="top"><div class="hero-grid"><div>')
-parts.append(bi("Your workspace for agent work", "你的 Agent 工作台", "p", "eyebrow"))
+parts.append(bi("BAT connections, agents and delivery", "BAT 連線、Agent 與交付", "p", "eyebrow"))
 parts.append(bi("Many agents.<br>One path to delivery.", "多個 Agent，<br>一條交付流程。", "h1"))
 parts.append(
     bi(
-        "Know who needs you, where work is running, and what happened to the result. Manage it from your browser or desktop while coding stays in Better Agent Terminal.",
-        "誰在等你、工作在哪裡、成果送到哪裡，都有跡可循。用瀏覽器或桌面程式管理，你繼續在 Better Agent Terminal 裡 coding。",
+        "Connect the fleet, dispatch agents and follow their results. Windows manages local connections and BAT startup; the shared Web and Tauri Dashboard follows work on your BAT hosts.",
+        "連起主機、派出 Agent、追到成果。Windows 管理本機連線與 BAT 啟動，Web／Tauri 共用 Dashboard 追蹤 BAT 主機上的工作；你照常在 BAT 裡 coding。",
         "p",
         "hero-description",
     )
@@ -72,10 +73,10 @@ parts.append('</div><aside class="hero-aside" aria-label="Product focus / 產品
 for n, en, zh, desc, dz in [
     (
         "01",
-        "Understand the situation",
-        "先看清狀況",
-        "Replies, review and uncertain outcomes stay distinct.",
-        "待回答、待審閱與結果未知，分開呈現。",
+        "Connect & start",
+        "連線與啟動",
+        "Windows Fleet, SSH routes and selected BAT profiles.",
+        "Windows Fleet、SSH 路由與選定的 BAT profiles。",
     ),
     (
         "02",
@@ -319,54 +320,108 @@ parts.append("</div></section>")
 parts.append(
     '<section class="section" id="architecture">'
     + heading(
-        "One product, shared state",
-        "同一產品，共用狀態",
-        "Web and desktop. One central service.",
-        "Web 與桌面，共用一套中央。",
-        "Keep both open. The interface changes its transport; your work keeps the same identity.",
-        "兩邊可以同時開著。入口使用不同連線方式，工作仍是同一份。",
+        "Connections, control and execution",
+        "連線、中央控制與執行",
+        "Fleet connects. Connector coordinates. BAT runs the work.",
+        "Fleet 管連線，Connector 管派工，BAT 執行工作。",
+        "Windows startup and native resources remain part of the product. Projects organize work across this system; they do not replace it.",
+        "Windows 啟動與原生資源一直是產品的一部分。專案管理把這些工作整理起來，並沒有取代底下的系統。",
     )
 )
 parts.append(
-    '<figure class="architecture"><div class="client-row"><div>'
-    + bi("Web Dashboard", "Web Dashboard", "strong")
-    + bi("Browser interface", "瀏覽器介面", "small")
-    + "</div><div>"
-    + bi("Tauri Dashboard", "Tauri Dashboard", "strong")
-    + bi("Native window & local lifecycle", "原生視窗與本機生命週期", "small")
-    + "</div><div>"
-    + bi("MCP + CLI", "MCP + CLI", "strong")
-    + bi("Agents & scripts", "Agent 與腳本", "small")
-    + '</div></div><div class="central-node">'
-    + bi("Python Connector / Task Service", "Python Connector / Task Service", "strong")
-    + bi("Identity · permissions · operations · history", "身分 · 權限 · 操作 · 歷史", "span")
-    + '</div><div class="target-row"><div>'
-    + bi("BAT hosts & workspaces", "BAT 主機與工作區")
-    + "</div><div>"
-    + bi("GitHub & deployment recipes", "GitHub 與部署 recipe")
-    + "</div></div><figcaption>"
+    '<figure class="architecture"><div class="native-lane">'
+    + bi("Windows Tauri → native Fleet", "Windows Tauri → 原生 Fleet", "h3")
     + bi(
-        "The service provides the Web UI and API. Tauri uses the same frontend source, with local credentials, files and platform controls.",
-        "中央提供 Web UI 與 API。Tauri 使用同一份前端，另有本機憑證、檔案與平台控制。",
+        "Owns selected SSH tunnels, route/readiness checks, BAT profile windows and sign-in startup. Rust or the existing PowerShell backend; one proven owner. Provides connection paths to BAT / central and optional configured central bootstrap.",
+        "管理選定 SSH tunnels、路由／就緒檢查、BAT profile 視窗與登入啟動。Rust 或既有 PowerShell backend 共用唯一 owner 規則；提供 BAT／中央連線，並支援已配置的中央 bootstrap。",
+        "p",
+    )
+    + '</div><div class="client-row"><div>'
+    + bi("Windows Tauri", "Windows Tauri", "strong")
+    + bi("Dashboard + native Fleet above", "Dashboard ＋ 上方原生 Fleet", "small")
+    + "</div><div>"
+    + bi("Web / Mac Tauri", "Web／Mac Tauri", "strong")
+    + bi("Same Dashboard; platform-specific native support", "同一 Dashboard；原生能力依平台提供", "small")
+    + "</div><div>"
+    + bi("Hermes / Grokbot", "Hermes／Grokbot", "strong")
+    + bi("Scoped MCP / CLI entry", "有獨立權限的 MCP／CLI 入口", "small")
+    + '</div></div><div class="central-node">'
+    + bi("Python Connector / Task Service", "Python Connector／Task Service", "strong")
+    + bi("Dispatch · identity · permissions · operations · task journal", "派工 · 身分 · 權限 · operations · task journal", "span")
+    + '</div>'
+    + bi("↓ bat-remote/v2 and governed operations ↓", "↓ bat-remote/v2 與受控操作 ↓", "p", "flow-label")
+    + bi("BAT hosts / workspaces", "BAT 主機／workspaces", "h3", "bat-node")
+    + '<div class="resource-row"><div>'
+    + bi("Human sessions & worktrees", "人工 sessions／worktrees", "strong")
+    + bi("You code through BAT desktop / mobile. Connector reads; continuation creates separate managed resources.", "你透過 BAT desktop／mobile coding。Connector 保持唯讀；接續時建立另一份 managed 資源。", "p")
+    + "</div><div>"
+    + bi("Agent-owned sessions & worktrees", "Agent 自有 sessions／worktrees", "strong")
+    + bi("Central dispatches work into the selected host. Fixed results retain their session, worktree and operation links.", "中央派工到選定主機；固定成果保留 session、worktree 與 operation 關聯。", "p")
+    + '</div></div><div class="delivery-node">'
+    + bi("Managed results → GitHub PR → merge / deploy → reviewed cleanup", "Managed 成果 → GitHub PR → merge／deploy → 審閱後整理", "strong")
+    + bi("Central governs each delivery step and retains receipts.", "每個交付步驟由中央管理並保存回執。", "p")
+    + '</div><figcaption>'
+    + bi(
+        "Fleet handles local connectivity; Python remains the sole business authority. BAT profile launch opens desktop windows; mobile remains an independent BAT client. Project Hub contributes interaction references, with no runtime, backend or importer dependency.",
+        "Fleet 負責本機連線，Python 仍是唯一中央業務後端。BAT profile 啟動開啟桌面視窗，mobile 是另一個 BAT client。Project Hub 僅供互動參考，沒有 runtime、後端或 importer 依賴。",
     )
     + "</figcaption></figure>"
 )
 parts.append(
     '<div class="two-column"><div>'
-    + bi("Work outlives the window.", "關視窗，不是結束工作。", "h3")
+    + bi("One shared Dashboard.", "共用一份 Dashboard。", "h3")
     + bi(
-        "Central work continues when a Dashboard window or browser tab closes. The managed installer must own background startup and connection recovery; that provisioning is still being completed.",
-        "Dashboard 視窗或分頁關閉後，中央工作繼續。Managed 安裝器還必須負責背景啟動與連線恢復，這段 provisioning 正在補齊。",
+        "Web and Tauri use desktop/src and the same central state. Windows-native Fleet stays on Windows; Mac Dashboard support is not a Fleet port. Drafts and conversation position remain local to each client.",
+        "Web 與 Tauri 使用 desktop/src 及同一中央資料。Windows 原生 Fleet 保留在 Windows；支援 Mac Dashboard 不等於 Fleet 已移植。草稿與對話位置仍各入口獨立保存。",
         "p",
     )
     + "</div><div>"
-    + bi("Shared work, local drafts.", "工作共用，草稿各自保存。", "h3")
+    + bi("Keep the existing central identity.", "保留既有中央身分與工作。", "h3")
     + bi(
-        "Projects and operations live in central. Versioned work-item reading markers sync for the same identity; drafts and conversation position remain local.",
-        "專案與操作存在中央；同一身分的工作項目版本已讀會同步，草稿和對話位置仍留在各自 client。",
+        "Today's Windows Fleet can reach a configured Linux central. Future managed installation must prepare the full environment while preserving ownership and history; a disconnected client must never invent a replacement central.",
+        "現有 Windows Fleet 可連接已配置的 Linux 中央。完整自動安裝仍須補齊，並保留 ownership 與歷史；client 斷線不能自行另造一套中央。",
         "p",
     )
     + "</div></div></section>"
+)
+parts.append(
+    '<section class="section" id="windows">'
+    + heading(
+        "Windows Fleet & resources",
+        "Windows Fleet 與資源",
+        "Your connections and startup, still here.",
+        "連線、啟動與本機資源，都在這裡。",
+        "These native controls are integrated today for configured Windows installations. Full automatic environment provisioning and live Fleet acceptance are separate remaining work.",
+        "以下原生控制已整合，可用於已配置的 Windows 環境；完整自動建立環境與 Fleet 實機驗收，是另外仍須完成的工作。",
+    )
+    + '<div class="feature-list">'
+)
+for en, zh, desc, dz, path in [
+    ("Connections & route recovery", "連線與路由復原",
+     "Selected SSH tunnels, Tailscale status, configured route fallbacks and bounded recovery. Readiness checks TLS / BAT / central, not just an open port.",
+     "選定 SSH tunnels、Tailscale 狀態、已配置的備援路由與有次數上限的復原；就緒檢查涵蓋 TLS／BAT／中央，不只看 port。", "fleet-routes.md"),
+    ("BAT windows & Windows sign-in", "BAT 視窗與 Windows 登入",
+     "Choose connections, BAT profiles and Dashboard independently. Preview prerequisites, keep the login picker or use saved launch choices.",
+     "背景連線、BAT profiles 與 Dashboard 獨立選擇；預覽必要連線，保留登入選擇器或使用已保存的啟動選項。", "desktop-fleet-native.md"),
+    ("Rust / PowerShell ownership", "Rust／PowerShell ownership",
+     "Rust is wired into the native runtime. Legacy configuration defaults to PowerShell; migration proves the old owner stopped before the replacement starts.",
+     "Rust 已接入原生 runtime；舊設定預設沿用 PowerShell。遷移須先證明舊 owner 已停止，再啟新 owner。", "fleet-migration.md"),
+    ("Tailscale & central startup", "Tailscale 與中央啟動",
+     "Open the installed Tailscale app for sign-in. A separately configured fixed SSH bootstrap recipe can query / start the selected central service.",
+     "可開啟已安裝的 Tailscale 程式完成登入；另以已配置的固定 SSH bootstrap recipe 查詢／啟動指定中央服務。", "fleet-bootstrap.md"),
+]:
+    parts.append("<article>" + bi(en, zh, "h3") + bi(desc, dz, "p")
+                 + link(repo + "/blob/main/docs/design/" + path, "Implementation guide →", "實作說明 →") + "</article>")
+parts.append(
+    '</div><div class="actions">'
+    + link(repo + "/blob/main/docs/windows.md", "Windows guide & resources", "Windows 使用與資源", "button secondary lang-en")
+    + link(repo + "/blob/main/docs/windows.zh-TW.md", "Windows guide & resources", "Windows 使用與資源", "button secondary lang-zh")
+    + link(repo + "/actions/workflows/desktop.yml", "NSIS validation packages →", "NSIS 驗證安裝包 →", "text-link")
+    + link(repo + "/blob/main/desktop/fleet.example.json", "Fleet configuration example →", "Fleet 設定範例 →", "text-link")
+    + "</div>"
+    + bi("Credential Manager, native files and tray controls also remain. No private inventory or host configuration is published here.",
+         "Credential Manager、原生檔案與系統匣控制也保留；這裡不公開私人 inventory 或主機設定。", "p", "section-note")
+    + "</section>"
 )
 parts.append(
     '<section class="installation-band" id="start"><div class="section">'
@@ -459,8 +514,8 @@ platforms = [
     (
         "Windows x64",
         "Windows x64",
-        "NSIS validation installer; Credential Manager; configured Fleet",
-        "NSIS 驗證包、Credential Manager、已配置的 Fleet",
+        "NSIS; Credential Manager; native Fleet, BAT profile and sign-in controls",
+        "NSIS、Credential Manager、原生 Fleet／BAT profile／登入控制",
         "Unsigned; automatic local central provisioning is not included yet.",
         "尚未正式簽署；未包含本機中央自動建立。",
     ),
@@ -603,6 +658,15 @@ parts.append(
 )
 docs = [
     (
+        "W",
+        "Windows Fleet & resources",
+        "Windows Fleet 與資源",
+        "Connections, BAT profiles, login, Tailscale, backend migration and native resources.",
+        "連線、BAT profiles、登入、Tailscale、backend 遷移與原生資源。",
+        "docs/windows.md",
+        "docs/windows.zh-TW.md",
+    ),
+    (
         "01",
         "Installation & first use",
         "安裝與首次使用",
@@ -728,8 +792,8 @@ parts.append(
 )
 title = "Better Agent Dashboard · From agent work to reviewed delivery"
 zt = "Better Agent Dashboard · 從 Agent 工作到成果交付"
-desc = "Manage coding-agent projects, sessions, artifacts and GitHub delivery with one shared Web and Tauri Dashboard. Explore the workflow, platform support and installation status."
-zd = "用共用 Web 與 Tauri Dashboard 管理 coding agent 的專案、工作階段、附件成果與 GitHub 交付。了解工作流程、平台支援及安裝現況。"
+desc = "Windows Fleet connects and starts BAT; Python Connector coordinates agents. Manage hosts, sessions, worktrees and GitHub delivery through the shared Web and Tauri Dashboard."
+zd = "Windows Fleet 管理連線與 BAT 啟動，Python Connector 負責 Agent 派工；Web／Tauri 共用 Dashboard 追蹤主機、sessions、worktrees 與 GitHub 交付。"
 head = f'''<!doctype html>
 <!-- Generated by scripts/build_product_site.py. Edit the bilingual content there; see site/README.md. -->
 <html lang="en" data-lang="en" data-title-en="{title}" data-title-zh="{zt}" data-desc-en="{desc}" data-desc-zh="{zd}">

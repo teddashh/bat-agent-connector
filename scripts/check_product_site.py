@@ -96,6 +96,8 @@ for path in [
     ROOT / "README.zh-TW.md",
     ROOT / "docs/getting-started.md",
     ROOT / "docs/getting-started.zh-TW.md",
+    ROOT / "docs/windows.md",
+    ROOT / "docs/windows.zh-TW.md",
     ROOT / "docs/design/managed-installation.md",
     SITE / "README.md",
     SITE / "images/README.md",
