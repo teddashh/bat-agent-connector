@@ -300,7 +300,7 @@ def _tree(items: list[dict], scope: str, db, key: str, decorate: Callable[[dict]
     return roots
 
 
-def _check_order(current: list[dict], key: str, before, order) -> None:
+def _check_order(current: list[dict], key: str, before, order, versions=None) -> None:
     def valid(ids) -> bool:
         return isinstance(ids, list) and all(isinstance(i, str) for i in ids) and len(set(ids)) == len(ids)
 
@@ -311,6 +311,11 @@ def _check_order(current: list[dict], key: str, before, order) -> None:
     now_ids = [x[key] for x in current]
     if before != now_ids or sorted(order) != sorted(now_ids):
         raise _bad("ORDER_CHANGED", "the order changed since you read it; read it again", 409)
+    if versions is not None:
+        if not isinstance(versions, dict) or set(versions) != set(now_ids) or any(type(v) is not int or v < 1 for v in versions.values()):
+            raise _bad("PRECONDITION_REQUIRED", "expected_versions must name every displayed sibling version")
+        if any(versions[row[key]] != row["version"] for row in current):
+            raise _bad("VERSION_CONFLICT", "a sibling changed since you read it; read it again", 409)
     pinned = {x[key] for x in current if x["pinned"]}
     if any((a in pinned) != (b in pinned) for a, b in zip(order, now_ids, strict=True)):
         raise _bad("PINNED_FIRST", "pinned entries stay above the others; unpin one to move it down", 409)
@@ -619,13 +624,13 @@ def _check_project_order(ops: OperationService, params: dict) -> tuple[str, list
 
 def _admit_project_order(ops, principal, target, params, pre) -> None:
     _, current = _check_project_order(ops, params)
-    _check_order(current, "project_id", pre.get("before"), params.get("order"))
+    _check_order(current, "project_id", pre.get("before"), params.get("order"), pre.get("expected_versions"))
 
 
 async def _run_project_order(ctx: OpContext) -> dict:
     def change(db, now):
         parent, current = _check_project_order(ctx.service, ctx.params)
-        _check_order(current, "project_id", ctx.preconditions.get("before"), ctx.params.get("order"))
+        _check_order(current, "project_id", ctx.preconditions.get("before"), ctx.params.get("order"), ctx.preconditions.get("expected_versions"))
         everyone = [_project(r) for r in db.execute("""SELECT * FROM projects WHERE parent_id IS ?
             ORDER BY created_at, project_id""", (parent or None,))]
         order = _save_order(db, "projects", parent, current, "project_id", ctx.params["order"], everyone)
@@ -832,13 +837,13 @@ def _check_item_order(ops: OperationService, target: dict, params: dict) -> tupl
 
 def _admit_item_order(ops, principal, target, params, pre) -> None:
     _, _, current = _check_item_order(ops, target, params)
-    _check_order(current, "work_item_id", pre.get("before"), params.get("order"))
+    _check_order(current, "work_item_id", pre.get("before"), params.get("order"), pre.get("expected_versions"))
 
 
 async def _run_item_order(ctx: OpContext) -> dict:
     def change(db, now):
         scope, parent, current = _check_item_order(ctx.service, ctx.target, ctx.params)
-        _check_order(current, "work_item_id", ctx.preconditions.get("before"), ctx.params.get("order"))
+        _check_order(current, "work_item_id", ctx.preconditions.get("before"), ctx.params.get("order"), ctx.preconditions.get("expected_versions"))
         everyone = [_item(r) for r in db.execute("""SELECT * FROM work_items WHERE project_id=? AND parent_id IS ?
             ORDER BY created_at, work_item_id""", (ctx.target["project_id"], parent or None))]
         order = _save_order(db, scope, parent, current, "work_item_id", ctx.params["order"], everyone)

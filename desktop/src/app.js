@@ -8,6 +8,8 @@ import {parsePullRequest} from "./delivery-input.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
 import {conversationPanel} from "./conversation.js";
+import {composerShortcut} from "./composer-shortcut.js";
+import {treeInteractions} from "./tree-interactions.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -1074,8 +1076,10 @@ async function viewSession(main, host, sid, context = null) {
       assertView(connection); status.replaceChildren(opStatus(op));
     } catch (e) { status.replaceChildren(errorBox(e)); }
   } }, t("interrupt"));
+  const shortcut = composerShortcut({h, t, input: box, button: send,
+    storageKey: `batc.composer-shortcut.${connection.namespace}`, guard: () => assertView(connection)});
   const composer = h("div", {hidden: true, id: "workspace-message-input"}, box, h("div", { class: "actions" }, send, stop,
-    h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+    h("label", { class: "muted" }, queue, " ", t("queue_behind"))), shortcut.box);
   const readonly = h("p", { class: "note" }, t("session_access_unknown"));
   let capture, permissions, batHandoff;
   const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
@@ -1267,7 +1271,7 @@ async function viewSession(main, host, sid, context = null) {
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose(); mobileLayout?.dispose();};
+  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose(); mobileLayout?.dispose(); shortcut.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
@@ -2367,7 +2371,7 @@ function orderButtons(sibs, i, key, run) {
   const swap = j => () => {
     const before = sibs.map(x => x[key]);
     const order = before.slice(); [order[i], order[j]] = [order[j], order[i]];
-    run("order", before, order);
+    run("order", before, order, Object.fromEntries(sibs.map(x => [x[key], x.version])));
   };
   const can = j => j >= 0 && j < sibs.length && sibs[j].pinned === me.pinned;
   return [h("button", { class: "mini", title: t("move_up"), "aria-label": t("move_up"), disabled: !can(i - 1), onclick: swap(i - 1) }, "↑"),
@@ -2383,13 +2387,21 @@ function setEditing(n) {
   if (!editing && idleReload) { const fn = idleReload; idleReload = null; fn(); }
 }
 function drawer(...children) {
-  const box = h("div", { class: "drawer", hidden: true }, ...children);
-  const toggle = h("button", { class: "mini", title: t("more"), "aria-label": t("more"), onclick: () => {
+  const box = h("div", { class: "drawer", id: `drawer-${crypto.randomUUID()}`, hidden: true }, ...children);
+  const toggle = h("button", { class: "mini", title: t("more"), "aria-label": t("more"),
+    "aria-controls": box.id, "aria-expanded": "false", onclick: () => {
     box.hidden = !box.hidden;
+    toggle.setAttribute("aria-expanded", String(!box.hidden));
     if (!box.hidden) drawerOpens += 1;
     setEditing(editing + (box.hidden ? -1 : 1));
   } }, "…");
-  const open = () => { if (box.hidden) toggle.click(); };
+  const open = (focus = false) => {
+    if (box.hidden) toggle.click();
+    if (focus) box.querySelector("input:not(:disabled),textarea:not(:disabled),select:not(:disabled),button:not(:disabled),a")?.focus();
+  };
+  box.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !event.isComposing) {event.preventDefault(); if (!box.hidden) toggle.click(); toggle.focus();}
+  });
   return { box, toggle, open, close: () => { if (!box.hidden) toggle.click(); } };
 }
 function freshPage() { editing = 0; idleReload = null; } // a render rebuilt every drawer closed
@@ -2431,6 +2443,7 @@ function liveReload(fn, kinds, prepare = null) {
 
 async function viewProjects(main) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const out = h("div", {});
   const tree = h("div", { class: "panel" });
   const archived = h("div", {});
@@ -2465,8 +2478,8 @@ async function viewProjects(main) {
       const rows = [];
       const walk = (sibs, depth, parent) => sibs.forEach((p, i) => {
         const msg = out; // outside the tree: it survives the re-render below
-        const run = async (what, before, order) => {
-          if (what === "order") await change(msg, "project.order", {}, { parent_id: parent, order }, { before }, `project.order.${parent}`);
+        const run = async (what, before, order, versions) => {
+          if (what === "order") await change(msg, "project.order", {}, { parent_id: parent, order }, { before, expected_versions: versions }, `project.order.${parent}`);
           else await change(msg, "project.pin", { project_id: p.project_id }, { pinned: !before }, { before }, `project.pin.${p.project_id}`);
           render();
         };
@@ -2488,12 +2501,16 @@ async function viewProjects(main) {
               { expected_version: p.version }, `project.archive.${p.project_id}`);
             if (ok || STALE.includes(lastFailure)) render();
           } }, t("archive"))));
-        rows.push(indent(h("div", { class: "row tree" },
+        const row = indent(h("div", { class: "row tree" },
           h("div", { class: "grow" }, h("a", { class: "title", href: `#/project/${p.project_id}` }, p.name),
             p.description ? h("div", { class: "muted clamp" }, p.description) : null),
           ...counts(p.counts),
-          may("manage") ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "project_id", run), d.toggle) : null), depth),
-        d.box);
+          may("manage") ? h("span", { class: "tree-actions" }, d.toggle) : null), depth);
+        if (may("manage")) d.box.prepend(h("div", {class: "actions"}, ...orderButtons(sibs, i, "project_id", run)));
+        if (may("manage")) row.querySelector(".tree-actions").prepend(treeInteractions({h, t, row, scope: `${connection.namespace}.project.${parent}`,
+          siblings: sibs, index: i, key: "project_id", run, open: () => d.open(true), guard: () => assertView(connection),
+          editing: active => setEditing(editing + (active ? 1 : -1))}));
+        rows.push(row, d.box);
         walk(p.children, depth + 1, p.project_id);
       });
       walk(data.projects, 0, "");
@@ -2514,6 +2531,7 @@ async function viewProjects(main) {
 
 async function viewProject(main, pid) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   let draft = null; // the project form's values after a stale save, put back into the reloaded form
   const head = h("div", { class: "panel" });
   const items = h("div", { class: "panel" });
@@ -2576,8 +2594,8 @@ async function viewProject(main, pid) {
     const rows = [];
     const walk = (sibs, depth, parent) => sibs.forEach((w, i) => {
       const rowMsg = out; // outside the tree: it survives the re-render below
-      const run = async (what, before, order) => {
-        if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, { parent_id: parent, order }, { before }, `wi.order.${pid}.${parent}`);
+      const run = async (what, before, order, versions) => {
+        if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, { parent_id: parent, order }, { before, expected_versions: versions }, `wi.order.${pid}.${parent}`);
         else await change(rowMsg, "work_item.pin", { work_item_id: w.work_item_id }, { pinned: !before }, { before }, `wi.pin.${w.work_item_id}`);
         render();
       };
@@ -2597,13 +2615,17 @@ async function viewProject(main, pid) {
           if (ok || STALE.includes(lastFailure)) render();
         } }, t("archive_with_children"))));
       const done = w.steps.filter(s => s.done).length;
-      rows.push(indent(h("div", { class: "row tree" }, stateChip(w.completion),
+      const row = indent(h("div", { class: "row tree" }, stateChip(w.completion),
         h("div", { class: "grow" }, h("a", { class: "title", href: `#/item/${w.work_item_id}` }, w.title),
           w.derived_from ? h("span", { class: "muted" }, " ⑂") : null),
         w.steps.length ? chip(`${done}/${w.steps.length}`) : null,
         w.completion.pending ? chip(t("needs_decision"), "warn") : null,
-        may("manage") && !p.archived ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "work_item_id", run), dr.toggle) : null), depth),
-      dr.box);
+        may("manage") && !p.archived ? h("span", { class: "tree-actions" }, dr.toggle) : null), depth);
+      if (may("manage") && !p.archived) dr.box.prepend(h("div", {class: "actions"}, ...orderButtons(sibs, i, "work_item_id", run)));
+      if (may("manage") && !p.archived) row.querySelector(".tree-actions").prepend(treeInteractions({h, t, row,
+        scope: `${connection.namespace}.item.${pid}.${parent}`, siblings: sibs, index: i, key: "work_item_id", run,
+        open: () => dr.open(true), guard: () => assertView(connection), editing: active => setEditing(editing + (active ? 1 : -1))}));
+      rows.push(row, dr.box);
       walk(w.children, depth + 1, w.work_item_id);
     });
     walk(data.work_items, 0, "");

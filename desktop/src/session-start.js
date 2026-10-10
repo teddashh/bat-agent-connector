@@ -1,4 +1,5 @@
 // One fixed standalone start. Reload and events only read accepted operations.
+import {composerShortcut} from './composer-shortcut.js';
 const object = v => v && typeof v === "object" && !Array.isArray(v);
 const operationId = v => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
 const terminal = op => ["succeeded", "failed", "cancelled"].includes(op?.status);
@@ -125,11 +126,12 @@ export function sessionStartPanel({h, t, api, caps, guard, ready, errorBox, opSt
     try {persist();} catch (e) {showError(e);} update(); if (key === "host") discover();
   });
   const label = (name, control) => h("label", {}, t(name), control);
+  const shortcut = composerShortcut({h, t, input: prompt, button: apply, storageKey: `${storageKey}.shortcut`, guard});
   const box = h("section", {class: "session-start", "data-session-start": ""},
     h("div", {class: "panel"}, h("div", {class: "capture-fields"}, label("host", host), label("start_workspace", workspace)),
       h("div", {class: "actions"}, reload), discoveryStatus, h("p", {class: "muted"}, t("start_isolation"))),
     h("div", {class: "panel"}, h("div", {class: "capture-fields"}, label("start_agent", agent), label("start_model", model), label("start_title", title)),
-      label("start_prompt", prompt), h("p", {class: "muted"}, t("start_prompt_help"))),
+      label("start_prompt", prompt), shortcut.box, h("p", {class: "muted"}, t("start_prompt_help"))),
     h("div", {class: "actions"}, apply, check, another), result, status);
   function update() {
     const fixed = Boolean(saved.intent);
