@@ -1,6 +1,13 @@
+import {instructionReceiptStrings} from './instruction-receipts.js';
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    ...instructionReceiptStrings['zh-TW'],
+    repair_title: "建立修復工作", repair_help: "選擇歸屬專案，讀取這次失敗的固定證據，再建立或查回修復工作。派工前仍會讓你核對目的地與版本。",
+    repair_project: "修復工作的專案", repair_choose_project: "選取專案", repair_read: "讀取修復證據", repair_create: "建立或查回修復工作",
+    repair_recover: "查回原修復請求", repair_review_new: "檢視下一筆證據", repair_fixed_evidence: "本次證據摘要", repair_evidence_details: "查看證據內容",
+    repair_open_work: "開啟修復工作", repair_open_dispatch: "查看原派工", repair_review_dispatch: "核對並派工", repair_unavailable: "目前無法派出這筆修復工作。請重新查回證據。",
+    repair_dispatched: "這筆修復工作已有派工紀錄，可從原操作查回結果。", repair_dispatch_help: "修復指示取自這筆工作的固定證據。選取儲存庫與分支、核對版本後，再開始新的管理工作。",
     setup_title: "準備開始工作", setup_unsaved: "有未儲存設定", setup_resume_help: "可稍後繼續。非機密草稿會保留；帳號授權與主機信任仍須由你確認。",
     setup_host_title: "1. 連線至 BAT", setup_host_help: "選取已有的 BAT profile，或填入要連線的主機。先確認主機，再選擇可執行的工作。",
     setup_profile: "BAT 連線 profile", setup_manual_profile: "手動設定主機", setup_host_name: "主機名稱", setup_host_url: "BAT 連線位址",
@@ -850,6 +857,12 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    ...instructionReceiptStrings['en-US'],
+    repair_title: "Create repair work", repair_help: "Choose a project and read fixed evidence from this failure. Create or recover repair work, then review its destination and version before starting it.",
+    repair_project: "Repair project", repair_choose_project: "Choose a project", repair_read: "Read repair evidence", repair_create: "Create or recover repair work",
+    repair_recover: "Recover original repair request", repair_review_new: "Review new evidence", repair_fixed_evidence: "Fixed evidence digest", repair_evidence_details: "View evidence",
+    repair_open_work: "Open repair work", repair_open_dispatch: "View original dispatch", repair_review_dispatch: "Review and dispatch", repair_unavailable: "This repair cannot be dispatched yet. Read its current evidence again.",
+    repair_dispatched: "This repair already has a dispatch record. Check the original operation for its result.", repair_dispatch_help: "Repair instructions come from this work item's fixed evidence. Select a repository and branch, review the version, then start new managed work.",
     setup_title: "Get ready to work", setup_unsaved: "Unsaved settings", setup_resume_help: "Continue later without losing non-secret drafts. You still confirm account authorization and host trust.",
     setup_host_title: "1. Connect BAT", setup_host_help: "Choose an existing BAT profile or enter a host. Verify the host, then choose which work it may run.",
     setup_profile: "BAT connection profile", setup_manual_profile: "Configure a host manually", setup_host_name: "Host name", setup_host_url: "BAT endpoint",
