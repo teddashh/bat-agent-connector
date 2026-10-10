@@ -441,5 +441,8 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .workspace-conversation .conversation-scroll { height: 48dvh; min-height: 260px; }
   .workspace-inspector > summary, .workspace-evidence > summary { min-height: 44px; align-content: center; }
   .workspace-inspector button { min-height: 44px; font-size: 14px; }
+  .workspace-composer button, .workspace-composer label { min-height: 44px; }
+  .workspace-composer label { display: flex; align-items: center; }
+  .workspace-result .actions a { min-height: 44px; display: inline-flex; align-items: center; }
   .workspace-session-meta .chip { white-space: normal; }
 }

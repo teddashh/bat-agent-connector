@@ -62,7 +62,7 @@ export async function publishedFixture(page: Page, native: boolean, options: any
       return {status: 200, data: {operation: mismatch(state.operation)}};
     }
     state.reads.push(input.path);
-    if (path === '/projects') return {status: 200, data: {projects: [], archived: []}};
+    if (path === '/projects') return {status: 200, data: {projects: state.dispatch && !state.project.archived ? [state.project] : [], archived: []}};
     if (path.startsWith('/projects/')) {
       if (state.failProject) return {status: 503, data: {error: {code: 'READ_FAILED', message: 'Project read failed'}}};
       const project = structuredClone({...state.project, project_id: path.split('/').at(-1)});

@@ -53,7 +53,7 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
         'aria-label': t(open ? 'workspace_collapse' : 'workspace_expand', {name: project.name}),
         'aria-expanded': String(open), onclick: () => {
           if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
-          persist(); render(); if (expanded.has(id) && !projects.has(id)) refresh().catch(() => {});
+          persist(); render(); if (expanded.has(id)) refresh().catch(() => {});
         }}, open ? '▾' : '▸');
       return [h('li', {}, h('div', {class: 'workspace-project-row'}, toggle,
         link(`#/project/${encodeURIComponent(id)}`, project.name),
@@ -91,7 +91,9 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
           walk(p.children || [], [...ancestors, p.project_id]);
         }};
         walk(roots);
-        for (const id of projects.keys()) if (!ids.has(id)) projects.delete(id);
+        // A hidden project can change while collapsed. Invalidate it instead of
+        // making its old activity appear current when searching or reopening it.
+        for (const id of projects.keys()) if (!ids.has(id) || !expanded.has(id)) projects.delete(id);
         // Lazy project reads bound work to expanded projects, not every session on every host.
         for (const id of expanded) if (ids.has(id)) {
           const detail = await api('GET', `/projects/${encodeURIComponent(id)}`); alive(); projects.set(id, detail);
