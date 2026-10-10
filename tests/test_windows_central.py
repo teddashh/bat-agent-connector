@@ -191,31 +191,57 @@ def test_windows_directory_chain_cannot_be_replaced_while_open(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows verification process-tree contract")
-async def test_windows_verifier_timeout_terminates_its_descendants(tmp_path):
+@pytest.mark.parametrize("parent_exits", [False, True], ids=["timeout", "successful-parent"])
+async def test_windows_verifier_terminates_its_descendants_before_return(tmp_path, parent_exits):
     from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
     from bat_agent_connector.windows_files import _bind, _close, kernel
     from bat_agent_connector.windows_processes import w
 
-    pidfile = tmp_path / "child.pid"
+    pidfile, pinned = tmp_path / "child.pid", tmp_path / "pinned"
+    child_script = ("import os,time; from pathlib import Path; "
+                    f"Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)")
     script = ("import subprocess,sys,time; from pathlib import Path; "
-              "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)']); "
-              f"Path({str(pidfile)!r}).write_text(str(child.pid)); "
-              "print('started',flush=True);time.sleep(120)")
+              f"subprocess.Popen([sys.executable,'-c',{child_script!r}],"
+              "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+              "print('started',flush=True);"
+              + (f"\nwhile not Path({str(pinned)!r}).exists(): time.sleep(.01)" if parent_exits
+                 else "time.sleep(120)"))
     verifier = ObservedVerifier(VerificationSettings())
-    log = tmp_path / "verify.log"
-    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        result = await verifier._group_run("local", str(tmp_path), (sys.executable, "-c", script),
-                                          4, fd, hashlib.sha256())
-    finally:
-        os.close(fd)
-    assert result == 124
-    assert pidfile.exists(), "the verifier must actually start its descendant before timeout"
     open_process = _bind(kernel, "OpenProcess", [w.DWORD, w.BOOL, w.DWORD], w.HANDLE)
     wait = _bind(kernel, "WaitForSingleObject", [w.HANDLE, w.DWORD], w.DWORD)
-    handle = open_process(0x00100000, False, int(pidfile.read_text()))  # SYNCHRONIZE only
-    if handle:  # an already-destroyed process object is also proof of exit
+    fd = os.open(tmp_path / "verify.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    task = asyncio.create_task(verifier._group_run("local", str(tmp_path), (sys.executable, "-c", script),
+                                                  4, fd, hashlib.sha256()))
+    handle = None
+    try:
+        child_pid = None
+        while not task.done():
+            try:
+                child_pid = int(pidfile.read_text())
+            except (FileNotFoundError, ValueError):
+                pass
+            else:
+                break
+            await asyncio.sleep(.01)
+        if task.done():
+            await task
+        assert child_pid, "the verifier must actually start its descendant before timeout"
+        handle = open_process(0x00100000, False, child_pid)  # SYNCHRONIZE only
+        assert handle, "pin the live descendant before termination, excluding PID reuse"
+        assert wait(handle, 0) == 258
+        pinned.write_text("pinned")
+        result = await task
+        assert result == (0 if parent_exits else 124)
+        assert wait(handle, 0) == 0
+    finally:
         try:
-            assert wait(handle, 0) == 0
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         finally:
-            _close(handle)
+            os.close(fd)
+            if handle:
+                _close(handle)
