@@ -83,6 +83,26 @@ def test_hardlinked_private_file_is_not_truncated_or_replaced(tmp_path):
     assert victim.read_bytes() == alias.read_bytes() == b"preserve"
 
 
+async def test_registry_first_use_leaves_state_ready_for_service_owner(mock, tmp_path):
+    from bat_agent_connector import registry
+    from bat_agent_connector.task_daemon import TaskDaemon
+    from tests.conftest import adopt, make_config
+
+    adopt("fixture-before-service")
+    files.check_private(registry.registry_path().parent, directory=True)
+    daemon = TaskDaemon(make_config(mock), tmp_path / "journal" / "tasks.sqlite3")
+    try:
+        daemon.acquire_owner()
+        assert daemon._lease_fd is not None
+        assert registry.get("h1", "fixture-before-service")["status"] == "active"
+    finally:
+        await daemon.artifact_store.close_reaper()
+        await daemon.api.session_observation.close()
+        await daemon.inventory.close()
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows junction and ACL cases have native fixtures")
 def test_symlink_ancestor_cannot_redirect_private_creation(tmp_path):
     target = tmp_path / "outside"
