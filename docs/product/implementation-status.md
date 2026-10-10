@@ -361,7 +361,6 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
 | #39 Hub import | `0018b58` | 明確排除，不合併、不作依賴；通用 project/work-item 已在 main |
 | Delivery Part B（local） | `b2e2050` | 既有已審成果需在 #35/#36 後整合；data step 3、history adapter、owner lease、固定 UI key 等 pending notes 仍適用 |
 | Artifacts Part A（local） | `3c59f4f` | 保留已有成果；在 confinement/cleanup 後整合 exact replica manifest，無 Hub import 依賴 |
-| Fleet Kit main | `4ca47d0`（計畫 pin） | #7 已合併；既有 inventory/readiness/ownership 是 R03 基礎，Rust parity 尚未交付 |
 
 四個舊 worker 接手時仍活著；不在它們的 dirty clones 同時編輯。Review 完成的 SHA
 才能作整合來源；查 remote head 並以 expected head 合併，避免合入未審的新 push。
