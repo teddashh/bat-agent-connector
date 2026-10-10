@@ -335,6 +335,7 @@ async def test_profile_import_respects_encryption_and_never_returns_credentials(
         "type": "remote", "remoteHost": endpoint.hostname, "remotePort": endpoint.port,
         "remoteFingerprint": mock.fingerprint}]}))
     (directory / "remote-tokens.enc.json").write_text(json.dumps({"enc": True, "data": "opaque-encrypted"}))
+    (directory / "remote-tokens.enc.json").chmod(0o600)
     monkeypatch.setattr(setup, "_profile_directory", lambda _: directory)
     state = setup.state(daemon, principal)
     assert state["profiles"][0]["token_available"] is False
@@ -382,3 +383,24 @@ async def test_profile_discovery_skips_damaged_fingerprints(installed, tmp_path,
     assert state["profiles"][0]["token_available"] is False
     assert state["profiles"][0]["token_state"] == "unavailable"
 
+
+
+async def test_profile_token_state_requires_private_token_store(installed, mock, tmp_path, monkeypatch):
+    daemon, principal, _ = installed
+    directory = tmp_path / "bat-profiles"
+    directory.mkdir()
+    from urllib.parse import urlsplit
+    endpoint = urlsplit(mock.url)
+    (directory / "index.json").write_text(json.dumps({"profiles": [{"id": "remote-1", "name": "Fixture BAT",
+        "type": "remote", "remoteHost": endpoint.hostname, "remotePort": endpoint.port,
+        "remoteFingerprint": mock.fingerprint}]}))
+    store = directory / "remote-tokens.enc.json"
+    store.write_text(json.dumps({"enc": False, "data": {"tokens": {"remote-1": mock.token}}}))
+    store.chmod(0o644)
+    monkeypatch.setattr(setup, "_profile_directory", lambda _: directory)
+    state = setup.state(daemon, principal)
+    assert state["profiles"][0]["token_available"] is False
+    assert state["profiles"][0]["token_state"] == "unavailable"
+    assert mock.token not in json.dumps(state)
+    store.chmod(0o600)
+    assert setup.state(daemon, principal)["profiles"][0]["token_available"] is True
