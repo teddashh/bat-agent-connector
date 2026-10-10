@@ -76,6 +76,10 @@ jobs:
       - name: Prepare central service fixtures
         working-directory: .
         run: uv sync --locked --extra dev --extra desktop-build
+      - name: Windows central locking, private storage and artifact fixtures
+        if: runner.os == 'Windows'
+        working-directory: .
+        run: uv run --locked --extra dev python desktop/tests/windows-central-fixture.py
       - name: Build the matching self-contained managed central runtime
         working-directory: .
         run: uv run --locked --extra desktop-build python desktop/scripts/build-managed-runtime.py
@@ -83,10 +87,6 @@ jobs:
         working-directory: .
         timeout-minutes: 8
         run: uv run --locked --extra desktop-build python desktop/tests/managed-runtime-fixture.py
-      - name: Windows central locking, private storage and artifact fixtures
-        if: runner.os == 'Windows'
-        working-directory: .
-        run: uv run --locked --extra dev python desktop/tests/windows-central-fixture.py
       - name: Shared UI with actual central service (temporary resources only)
         if: runner.os == 'Linux'
         timeout-minutes: 10
