@@ -103,3 +103,25 @@ async def test_verification_admission_rejection_is_explicit_without_operation(in
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_product_catalog_and_result_queries_reject_ambiguous_values_before_reads(served, mock):
+    d, port = served
+    observer = token(d, "product-query-reader", "observe")
+    for path in [
+        "/hosts/h1/preferences?agent=claude&agent=codex",
+        "/hosts/h1/preferences?agent=",
+        "/hosts/h1/preferences?session_id=",
+        "/hosts/h1/preferences?refresh=",
+        "/hosts/h1/preferences?refresh=1&refresh=0",
+        "/hosts/h1/preferences?refresh=yes",
+        "/projects/prj_00000000000000000000/skills?host=h1&workspace_id=one&workspace_id=two",
+        "/projects/prj_00000000000000000000/skills?host=h1&workspace_id=",
+        "/projects/prj_00000000000000000000/skills?host=h1&workspace_id=one&refresh=YES",
+        "/work-items/wi_00000000000000000000/result-sources?limit=1&limit=2",
+        "/work-items/wi_00000000000000000000/result-sources?limit=",
+        "/work-items/wi_00000000000000000000/result-sources?limit=%2B1",
+        "/work-items/wi_00000000000000000000/result-sources?after=",
+    ]:
+        assert (await http(port, "GET", "/api/v1" + path, tok=observer))[0] == 422, path
+    assert mock.invokes == []

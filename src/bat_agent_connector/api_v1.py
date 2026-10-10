@@ -324,7 +324,8 @@ class ApiV1:
                 query = parse_qs(parts.query, keep_blank_values=True)
                 kwargs.update(reader=reader, writer=writer,
                               check_authorization=authorizer(self.daemon, token, principal))
-            if fn in {self.repair_evidence, self.work_item_repair, self.session_instructions}:
+            if fn in {self.repair_evidence, self.work_item_repair, self.session_instructions,
+                      self.host_preferences, self.project_skills, self.work_item_results}:
                 # Empty or repeated selectors cannot silently become defaults.
                 query = parse_qs(parts.query, keep_blank_values=True)
             status, payload = await fn(principal=principal, query=query, body=body, headers=headers, **kwargs)
@@ -559,10 +560,12 @@ class ApiV1:
 
     async def work_item_results(self, principal, wid, query, **_):
         from . import work_item_results
-        if set(query) - {"after", "limit"}:
-            raise ApiError(422, "INVALID_REQUEST", "unknown result source query")
+        self._exact_query(query, {"after", "limit"})
+        limit = self._q(query, "limit", "50")
+        if not re.fullmatch(r"[0-9]{1,3}", limit):
+            raise ApiError(422, "INVALID_REQUEST", "limit must be 1-100")
         return 200, work_item_results.read(self.daemon.ops, principal, wid,
-            limit=self._int(query, "limit", 50), after=self._q(query, "after"))
+            limit=int(limit), after=self._q(query, "after"))
 
     async def approval_preview(self, principal, body, **_):
         from .bulk_approval import preview
@@ -595,16 +598,18 @@ class ApiV1:
 
     async def host_preferences(self, principal, host, query, **_):
         from . import product_preferences
-        if set(query) - {"agent", "session_id", "refresh"}:
-            raise ApiError(422, "INVALID_REQUEST", "unknown preference query")
+        self._exact_query(query, {"agent", "session_id", "refresh"})
+        if self._q(query, "refresh", "false") not in {"0", "1", "true", "false"}:
+            raise ApiError(422, "INVALID_REQUEST", "refresh must be true or false")
         return 200, await product_preferences.read(self.daemon.ops, principal, host,
             agent=self._q(query, "agent"), session_id=self._q(query, "session_id"),
             refresh=bool(self._bool(query, "refresh")))
 
     async def project_skills(self, principal, prj, query, **_):
         from . import project_skills
-        if set(query) - {"host", "workspace_id", "refresh"}:
-            raise ApiError(422, "INVALID_REQUEST", "unknown skill query")
+        self._exact_query(query, {"host", "workspace_id", "refresh"})
+        if self._q(query, "refresh", "false") not in {"0", "1", "true", "false"}:
+            raise ApiError(422, "INVALID_REQUEST", "refresh must be true or false")
         return 200, await project_skills.read(self.daemon.ops, principal, prj,
             self._q(query, "host"), self._q(query, "workspace_id"), refresh=bool(self._bool(query, "refresh")))
 
