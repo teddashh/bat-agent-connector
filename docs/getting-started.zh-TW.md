@@ -216,6 +216,6 @@ MCP 位址是 `http://127.0.0.1:8765/mcp`，不是 Dashboard 網址。Durable �
 | 發送／開工後回覆遺失 | 保留 operation ID 與 request key，先查回，不再派一次。 |
 | 原生 BAT merge ACK 持續未知 | 保留原操作與資源；另外的人工裁決 API 不在目前 merge 合約範圍。 |
 | 整理被拒絕 | 閱讀保留原因，未解 writer 與唯一內容須保留。 |
-| Fleet 沒有啟動 | 檢查所選連線、Kit 配置、前置條件及 ownership。未指定 backend 時沿用 PowerShell；安裝 Dashboard 不會自行遷移成 Rust。 |
+| Fleet 沒有啟動 | 新安裝使用[公開 Rust 設定](design/fleet-configuration.md)，再核對所選連線、前置條件及 ownership。未指定 backend 時沿用 PowerShell；既有 owner 需經預覽後遷移。 |
 
 真實 Fleet、帳號與部署驗收由使用者執行。[46 項驗收參考](product/acceptance-v2.md)供這項工作使用，不列入 Agent 完成清單，也不宣稱已經通過。

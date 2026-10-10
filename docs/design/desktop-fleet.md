@@ -1,5 +1,9 @@
 # Desktop Fleet adapter (R03, PowerShell stage)
 
+This document describes the optional legacy PowerShell adapter. For a new standalone
+Rust installation, use the [public configuration guide](fleet-configuration.md);
+its runtime and templates are shipped in this repository.
+
 The Rust client calls the installed Fleet Kit's fixed `client/fleet-desktop.ps1`
 entry point. That Kit remains the only owner of monitors and tunnels. This slice
 adds native transport and connection settings in the shared frontend. Rust ownership
@@ -59,8 +63,7 @@ namespace. If either changes, it stays visible but cannot apply until the user r
 the current selection. An uncertain write never resends automatically; a matching
 status read settles it. Closing the page stops its poll, with no monitor lifecycle effect.
 
-Synthetic JSON fixtures originate from the Fleet Kit facade tests developed
-at `875e7d8ee74487def96cd32b41796777b166418b` (based on upstream `4ca47d0`) and are copied explicitly
+Synthetic JSON fixtures from the Fleet Kit compatibility implementation are retained
 for the native contract tests. They contain no live configuration. Unit tests cover
 forbidden IPC inputs, contract/reply mismatch, installation containment, output
 filtering, subprocess EOF/bounds, uncertain exits and cancellation. Linux process

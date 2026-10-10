@@ -7,7 +7,7 @@ continue to apply.
 
 ## Source and configuration boundary
 
-The reviewed Kit source `2ec4b11bc010bfd669040e942648c741b63d0b7c` has local monitor
+The reviewed Kit source has local monitor
 bootstrap in `client/fleet-monitor.ps1` (`Start-Monitor`). It has no remote Connector
 service recipe or remote query/ensure protocol. The strict Connector inventory
 schema has no bootstrap field. This client capability is therefore an explicit new

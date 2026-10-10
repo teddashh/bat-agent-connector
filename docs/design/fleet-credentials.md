@@ -1,6 +1,6 @@
 # Native Fleet credential resolution
 
-This is a native-only reader for the reviewed Kit `2ec4b11` `Resolve-FleetCredential` /
+This is a native-only reader for the reviewed Kit `Resolve-FleetCredential` /
 `Set-FleetCredential` formats. It adds no IPC, credential editor, store migration, environment
 lookup or supervisor wiring. Private deployment files and installed credentials are never fixtures.
 

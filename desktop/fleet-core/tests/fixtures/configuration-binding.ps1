@@ -1,4 +1,4 @@
-# Read-only oracle copied from reviewed Kit 2ec4b11 client/fleet-desktop-core.ps1.
+# Read-only oracle copied from reviewed Fleet Kit client/fleet-desktop-core.ps1.
 # Only synthetic fixture paths are supplied through this child process environment.
 $ErrorActionPreference='Stop'
 function Get-FleetDesktopBinding([string]$inventoryPath,[string]$profileIndexPath,[string]$kitRoot=$PSScriptRoot) {

@@ -1,9 +1,7 @@
 # Windows Fleet process adapter
 
 This implements the OS ownership boundary of [the Fleet port contract](fleet-rust.md), not the
-supervisor, migration UI or installed parity. Source basis remains the reviewed Kit
-`2ec4b11bc010bfd669040e942648c741b63d0b7c`; `4744507354466b1424b8ea369a00a94f1ca3a933`
-contains no intervening client/tests changes. No private inventory, credential, host or service
+supervisor, migration UI or installed parity. The public source and synthetic tests define the ownership contract. No private inventory, credential, host or service
 configuration is copied. The module is not registered as a Tauri command.
 
 ## Interfaces and authority
