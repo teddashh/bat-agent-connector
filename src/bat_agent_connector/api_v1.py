@@ -117,6 +117,9 @@ class ApiV1:
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
+        from . import product_preferences, project_skills
+        product_preferences.install(daemon.ops)
+        project_skills.install(daemon.ops)
         from .session_observation import SessionObservation
         self.session_observation = SessionObservation(daemon)
         self.allowed_origins = allowed_origins
@@ -139,6 +142,7 @@ class ApiV1:
             ("GET", r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)", self.artifact, "observe"),
             ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
             ("GET", r"/api/v1/hosts", self.hosts, "observe"),
+            ("GET", r"/api/v1/hosts/(?P<host>[^/]+)/preferences", self.host_preferences, "observe"),
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)", self.session, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/messages", self.messages, "observe"),
@@ -177,6 +181,7 @@ class ApiV1:
             ("GET", r"/api/v1/integrations/(?P<op>op_[0-9a-f]{32})", self.integration, "observe"),
             ("GET", r"/api/v1/projects", self.projects, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})", self.project, "observe"),
+            ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})/skills", self.project_skills, "observe"),
             ("GET", r"/api/v1/work-items", self.work_items, "observe"),
             ("GET", r"/api/v1/work-items/(?P<wi>wi_[0-9a-f]{20})", self.work_item, "observe"),
         ]
@@ -485,6 +490,8 @@ class ApiV1:
                                   "execution_delivery": {"version": 1, "source_kinds": ["execution", "task_command"]},
                                   "work_item_reads": {"version": 1},
                                   "session_reading": {"version": 1, "counts": "observed_history"},
+                                  "host_preferences": {"version": 1, "model_catalog": True, "usage": True, "personal_models": True},
+                                  "project_skills": {"version": 1, "pinned_selection": True, "application": False},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
@@ -541,6 +548,21 @@ class ApiV1:
 
     async def hosts(self, query, **_):
         return 200, self.daemon.inventory.hosts_document(host=self._q(query, "host"), discovery=bool(self._bool(query, "discovery")), after=self._int(query, "after", 0), limit=self._int(query, "limit", 20))
+
+    async def host_preferences(self, principal, host, query, **_):
+        from . import product_preferences
+        if set(query) - {"agent", "session_id", "refresh"}:
+            raise ApiError(422, "INVALID_REQUEST", "unknown preference query")
+        return 200, await product_preferences.read(self.daemon.ops, principal, host,
+            agent=self._q(query, "agent"), session_id=self._q(query, "session_id"),
+            refresh=bool(self._bool(query, "refresh")))
+
+    async def project_skills(self, principal, prj, query, **_):
+        from . import project_skills
+        if set(query) - {"host", "workspace_id", "refresh"}:
+            raise ApiError(422, "INVALID_REQUEST", "unknown skill query")
+        return 200, await project_skills.read(self.daemon.ops, principal, prj,
+            self._q(query, "host"), self._q(query, "workspace_id"), refresh=bool(self._bool(query, "refresh")))
 
     async def sessions(self, query, principal, **_):
         from .session_reading import decorate

@@ -1091,8 +1091,8 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|artifacts(?:/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8})?|",
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
-            r"hosts/[A-Za-z0-9_.-]+/discovery|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
-            r"projects/prj_[0-9a-f]{20}|work-items/wi_[0-9a-f]{20}|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[0-9]{1,9}|",
+            r"hosts/[A-Za-z0-9_.-]+/(?:discovery|preferences)|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
+            r"projects/prj_[0-9a-f]{20}(?:/skills)?|work-items/wi_[0-9a-f]{20}|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[0-9]{1,9}|",
             r"deployments(?:/(?:preview|dep_[0-9a-f]{32}))?|deployment-environments(?:/history)?|",
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
@@ -1165,6 +1165,23 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key.chars().chain(value.chars()).any(char::is_control) {
             return Err("Control characters in central query are refused".into());
+        }
+        let preferences = path.starts_with("/hosts/") && path.ends_with("/preferences");
+        let skills = path.starts_with("/projects/") && path.ends_with("/skills");
+        if preferences || skills {
+            let valid = match key.as_ref() {
+                "refresh" => matches!(value.as_ref(), "true" | "false" | "1" | "0"),
+                "agent" if preferences => matches!(value.as_ref(), "claude" | "codex"),
+                "session_id" if preferences => !value.is_empty() && value.len() <= 256,
+                "host" if skills => !value.is_empty() && value.len() <= 256
+                    && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+                "workspace_id" if skills => !value.is_empty() && value.len() <= 256,
+                _ => false,
+            };
+            if !valid || !query_keys.insert(key.to_string()) {
+                return Err("Invalid preferences or skill catalog query".into());
+            }
+            continue;
         }
         if key == "max_message_chars" {
             if input.method != "GET"
@@ -1303,6 +1320,11 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     }
     if query_keys.contains("source_kind") != query_keys.contains("source_id") {
         return Err("Delivery source selector requires kind and ID".into());
+    }
+    if path.ends_with("/skills")
+        && !(query_keys.contains("host") && query_keys.contains("workspace_id"))
+    {
+        return Err("Skill catalog requires host and workspace ID".into());
     }
     if input.method == "GET" && input.body.is_some() {
         return Err("GET requests cannot have a body".into());
