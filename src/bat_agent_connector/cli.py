@@ -904,7 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--repo", required=True, help="owner/name")
     c.add_argument("--pr", type=int, required=True)
     c.add_argument("--source", action="append", required=True,
-                   help="kind:id, in order (checkpoint:cp_..., checkpoint_run:op_..., branch:NAME)")
+                   help="kind:id, in order (checkpoint:cp_..., checkpoint_run:op_..., execution:op_..., task_command:COMMAND_ID, branch:NAME)")
     c.add_argument("--pick", action="append", default=[], help="SEQ=SHA,SHA: copy only these commits of source SEQ")
     c.add_argument("--key", help="idempotency key (default: a new one; the same key returns the same preview)")
     c = isp.add_parser("apply", help="compose a reviewed preview and push it to the PR head")

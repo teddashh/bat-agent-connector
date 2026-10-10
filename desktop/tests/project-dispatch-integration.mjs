@@ -48,6 +48,7 @@ try {
   });
   const original = '  Keep the project request.\nUse the attached bytes.  ';
   let count = 0;
+  const operations = [];
   for (const page of [web, desktop]) {
     await page.goto(origin+'/dashboard/#/project/'+project.project_id);
     await page.getByRole('link', {name: 'Quick project dispatch'}).click();
@@ -74,6 +75,7 @@ try {
     }
     await expect(form).toContainText('Start confirmed', {timeout: 30000});
     const id = (await form.locator('a[href^="#/op/"]').getAttribute('href')).split('/').at(-1);
+    operations.push(id);
     await page.reload(); await expect(form).toContainText('Start confirmed');
     count++;
     await control({action: 'verify-project', ...project, operation_id: id, operations: count, frames: count * 2,
@@ -84,9 +86,32 @@ try {
     }
   }
   assert.equal(posts.length, 3); assert.notEqual(posts[1].idempotency_key, posts[2].idempotency_key);
+  const delivered = await control({action: 'prepare-delivery', operations});
+  for (const [index, page] of [web, desktop].entries()) {
+    await page.goto(origin+'/dashboard/#/project/'+project.project_id);
+    const work = page.locator('[data-project-work="'+operations[index]+'"]');
+    await expect(work).toContainText('Result unverified');
+    await expect(work).not.toContainText('done');
+    await work.getByRole('link', {name: 'Review result and add to PR'}).click();
+    await expect(page.getByPlaceholder('owner/name')).toHaveValue('o/r');
+    await page.getByPlaceholder('123').fill('1');
+    await page.getByRole('button', {name: 'Load PR', exact: true}).click();
+    const source = page.locator('[data-delivery-source="'+operations[index]+'"]');
+    await expect(source).toContainText('not streaming');
+    await source.getByRole('button', {name: 'Add', exact: true}).click();
+    try {
+      await expect(page.getByRole('button', {name: 'Update PR results', exact: true})).toBeEnabled({timeout: 30000});
+    } catch (error) {
+      console.error(await page.locator('[data-integration-review]').innerText());
+      throw error;
+    }
+    await page.getByRole('button', {name: 'Update PR results', exact: true}).click();
+    await expect(source.getByRole('link', {name: 'sent to #1', exact: true})).toBeVisible({timeout: 30000});
+  }
+  await control({action: 'verify-delivery', results: delivered.results});
   assert.equal(await desktop.evaluate(() => JSON.stringify({...localStorage, ...sessionStorage}).includes('batc.dashboard.token')), false);
   assert.deepEqual(errors, []);
-  console.log('Real central project dispatch passed: HTTP and IPC share project/version, fixed GitHub head, model and attachment bytes; reply loss replays the original key after archival/tier changes; reload only reads receipts; manual checkout and remote refs unchanged.');
+  console.log('Real central project dispatch/delivery passed: HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
 } finally {
   await browser.close();
   if (child.exitCode === null && child.signalCode === null) child.stdin.end(JSON.stringify({action: 'stop'})+'\n');

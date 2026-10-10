@@ -1121,6 +1121,21 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             }
             continue;
         }
+        if matches!(key.as_ref(), "source_kind" | "source_id") {
+            let valid = if key == "source_kind" {
+                matches!(value.as_ref(), "execution" | "task_command")
+            } else {
+                !value.is_empty() && value.len() <= 256
+            };
+            if input.method != "GET"
+                || path != "/integrations/candidates"
+                || !valid
+                || !query_keys.insert(key.to_string())
+            {
+                return Err("Delivery source selector is invalid".into());
+            }
+            continue;
+        }
         if !matches!(
             key.as_ref(),
             "after"
@@ -1175,6 +1190,9 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         ) {
             return Err("Central query parameter is not allowed".into());
         }
+    }
+    if query_keys.contains("source_kind") != query_keys.contains("source_id") {
+        return Err("Delivery source selector requires kind and ID".into());
     }
     if input.method == "GET" && input.body.is_some() {
         return Err("GET requests cannot have a body".into());
@@ -1642,6 +1660,40 @@ mod tests {
         input.idempotency_key = Some("wrong-key".into());
         assert!(validate_request(&input).is_err());
         assert!(validate_request(&request("GET", "/artifact-capture-previews")).is_err());
+    }
+
+    #[test]
+    fn delivery_source_selector_is_scoped_and_complete() {
+        for kind in ["execution", "task_command"] {
+            assert!(validate_request(&request(
+                "GET",
+                &format!(
+                    "/integrations/candidates?host=demo&source_kind={kind}&source_id=op_{}",
+                    "a".repeat(32)
+                )
+            ))
+            .is_ok());
+        }
+        for path in [
+            "/sessions?source_kind=execution&source_id=x",
+            "/integrations/candidates?source_kind=branch&source_id=x",
+            "/integrations/candidates?source_kind=execution",
+            "/integrations/candidates?source_id=x",
+            "/integrations/candidates?source_kind=execution&source_id=",
+            "/integrations/candidates?source_kind=execution&source_id=x&source_id=y",
+            "/integrations/candidates?source_kind=execution&source_kind=task_command&source_id=x",
+            "/integrations/candidates?source_kind=execution&source_id=x%0Ay",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err(), "{path}");
+        }
+        assert!(validate_request(&request(
+            "GET",
+            &format!(
+                "/integrations/candidates?source_kind=execution&source_id={}",
+                "x".repeat(257)
+            )
+        ))
+        .is_err());
     }
 
     #[test]

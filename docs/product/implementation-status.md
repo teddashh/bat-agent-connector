@@ -8,6 +8,26 @@
 
 ## 目前續作
 
+### 2026-10-09 Delivery 資訊正確性與派工到 PR 的關聯
+
+`fix/delivery-lineage` 接續 #71 的 `3f4ed88`，修正候選清單以 `streaming=false` 推論完成。
+活動三值、待回覆、觀測過期／缺失、成果未驗證與交付 receipt 分開呈現；派工成功只標受理。
+新 `execution`／`task_command` source 使用中央 accepted execution 證據，將一般 start、
+published continuation 與 Task Service 原命令接到既有固定 commit preview/apply。preview digest
+固定 lineage／registry incarnation／worktree identity；送出前重查、送出後仍查回原 push。
+
+專案直接列出明確關聯的派工、session／worktree 與 PR 入口，不增設 task、不依 repository 名稱
+推論專案歸屬。新來源也接入 cleanup 的固定身分交付覆蓋與有效預覽保留。Worktree 改為資訊摘要，
+unknown BAT merge 顯示保留目錄與 ACK 證據／結案限制。桌面連接頁補使用順序，Fleet 顯示實際
+backend 及 PowerShell 相容預設；完整無設定檔首次安裝精靈、正式簽章／更新仍未完成。
+
+本分支用暫存 Git、MockBat／FakeGitHub 驗證來源與交付；190 項派工／整合回歸、85 項
+來源／整理檢查、674 項共用 UI 與 31 項 Rust bridge 檢查已通過。實際中央 HTTP／IPC 的
+兩次原派工已各自接到同一個測試 PR，固定來源 receipt 一致，人工 checkout 不變。預覽選擇
+不再被自己的事件刷新清除；Tauri bridge 限定開放指定成果的查詢。完整候選 gates 另留紀錄於
+`~/agent-work/artifacts/delivery-lineage-20261009/`；合併、固定候選安裝及使用者真實主機驗收
+不能由這些 fixture 結果推論。實機目標尚待指定，見 [固定候選驗收](acceptance-v2.md)。
+
 ### 2026-10-09 專案快速派工、進階設定與附件草稿
 
 `feat/project-quick-dispatch` 接續 #70 的 `f33b837`，推進 Project Hub 審查 P1-3。
@@ -22,7 +42,8 @@ BAT frame 前重查專案／目的地與 bytes。回覆丟失、專案封存或 
 
 相關 128 項後端與 57 項初次 UI 回歸已通過；實際中央的 HTTP／IPC 派工與原 published 流程亦通過。
 `test:dispatch` 已加入 desktop CI；候選完整 gate 與平台證據由 PR/checks 及
-`~/agent-work/artifacts/project-quick-dispatch-20261009/` 記錄。分支尚未合併、安裝或 live 驗收。
+`~/agent-work/artifacts/project-quick-dispatch-20261009/` 記錄。#71 已合併為 `481f407`，tree
+與通過 Python 3.10–3.13、Windows／Linux／Mac 兩架構 CI 的 `3f4ed88` 相同；尚未安裝或 live 驗收。
 P1-4 手機資訊／輸入區收合及可調側欄、P1-5 設定分組／首次使用導引仍在後續 backlog。
 
 ### 2026-10-09 共用待處理分類與工作更新已讀
@@ -43,7 +64,7 @@ principal 與 unread filter；Rust bridge 只允許 work-items 的布林 unread 
 另驗證 14 項身份切換、延遲回覆與草稿保留回歸：初次完整 UI run 抓出的舊首頁請求晚到問題
 已修正。`test:attention` 已加入 desktop CI；完整 shared UI 與 Python 3.13／3.10 gate 的
 候選結果另由 PR/checks 與 `~/agent-work/artifacts/shared-attention-states-20261009/` 記錄。
-尚未合併、安裝或進行 Mac/Windows 實機驗收。
+#70 已合併為 `3072af9`，tree 與通過完整 CI 的 `f33b837` 相同；尚未安裝或進行 Mac/Windows 實機驗收。
 
 ### 2026-10-09 共用 Web／Tauri 與對話閱讀
 

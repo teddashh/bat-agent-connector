@@ -104,6 +104,8 @@ export async function mountFleetDesktop(main, {h, t}) {
       "data-fleet-choice":field + ":" + id, disabled:!enabled() || !!stale(), onchange:e => edit(field,field === "dashboard" ? e.target.checked : e.target.checked ? [...selected[field],id] : selected[field].filter(v=>v!==id))}), " ", text);
     const button = (text,fn,disabled=false,primary=false) => h("button", {class:primary?"primary":"secondary",disabled:busy||disabled,onclick:fn},t(text));
     const fields = [
+      h("p", {"data-fleet-current-backend": true}, t("delivery_fleet_current_backend", {backend: t(["rust", "powershell"].includes(snapshot.backend) ? "fleet_backend_" + snapshot.backend : "obs_unknown")})),
+      snapshot.backend === "powershell" ? h("p", {class: "note"}, t("delivery_fleet_legacy_default")) : null,
       h("p", {}, t("fleet_monitor_"+snapshot.monitor.state), " · ", t("fleet_"+snapshot.readiness.state)),
       snapshot.monitor.state === "running" && !snapshot.monitor.controllable ? h("p",{class:"note"},t("fleet_other_owner")):null,
       snapshot.login_launch?h("p",{class:"note"},t("fleet_login_"+snapshot.login_launch.state),snapshot.login_launch.code?` (${snapshot.login_launch.code})`:null):null,
