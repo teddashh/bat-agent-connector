@@ -16,7 +16,7 @@ export function conversationPanel({h, t, when, guard, readingActions = null}) {
     if (messages.length) run(() => readingActions.mark(messages));
   }}, t("conversation_mark"));
   const remember = h("button", {class: "mini", type: "button", onclick: () => {
-    const row = visible()[0];
+    const row = visible().find(row => row.reading);
     if (row?.reading) run(() => readingActions.remember({message_id: row.id, revision: row.reading.revision,
       offset: Math.round(row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top)}, reading?.position?.version || 0));
   }}, t("conversation_remember"));
@@ -41,7 +41,7 @@ export function conversationPanel({h, t, when, guard, readingActions = null}) {
     latest.hidden = !olderWindow && atBottom();
     if (!readingActions) return;
     mark.disabled = busy || !visible().some(row => row.reading?.can_mark && row.reading?.unread);
-    remember.disabled = busy || !visible()[0]?.reading;
+    remember.disabled = busy || !visible().some(row => row.reading);
     older.disabled = busy;
   };
   const run = async action => {
@@ -94,12 +94,30 @@ export function conversationPanel({h, t, when, guard, readingActions = null}) {
         row.node = h("article", {class: "msg"}, h("div", {class: "message-meta"}, row.who,
           h("button", {class: "mini", type: "button", onclick: () => copy(row.text)}, t("message_copy"))), row.body);
       }
-      const meta = `${message.role || ""} · ${when(message.ts)}`;
+      const metadata = [message.role || "", when(message.ts)];
+      if (message.role === "tool") metadata.push(message.tool || t("obs_unknown"),
+        t("message_tool_status", {status: message.denied ? "denied" : message.deferred ? "deferred" : message.status || t("obs_unknown")}));
+      else if (typeof message.status === "string") metadata.push(t("message_tool_status", {status: message.status}));
+      if (typeof message.agent === "string") metadata.push(t("message_agent", {agent: message.agent}));
+      if (typeof message.model === "string") metadata.push(t("message_model", {model: message.model}));
+      if (typeof message.duration_ms === "number" && Number.isFinite(message.duration_ms) && message.duration_ms >= 0)
+        metadata.push(t("message_duration", {ms: message.duration_ms}));
+      const meta = metadata.join(" · ");
       if (row.meta !== meta) {row.who.textContent = meta; row.meta = meta;}
       row.node.className = `msg${message.role === "user" ? " user" : ""}`;
       row.id = message.id; row.reading = message.reading;
       row.node.dataset.messageId = typeof message.id === "string" ? message.id : "";
-      if (row.text !== text) {row.body.replaceChildren(...renderMessage(h, t, text, copy)); row.text = text;}
+      const tool = message.role === "tool", completed = tool && message.status === "completed" && !message.denied && !message.deferred;
+      if (row.tool !== tool) {row.body.replaceChildren(); row.text = null; row.tool = tool; row.toolDetails = null;}
+      if (tool && !row.toolDetails) {
+        row.toolContent = h("div", {});
+        row.toolDetails = h("details", {class: "message-tool", open: !completed}, h("summary", {}, t("message_tool_details")), row.toolContent);
+        row.toolDetails.addEventListener("toggle", indicator); row.body.append(row.toolDetails);
+      }
+      if (tool && !completed) row.toolDetails.open = true; // errors, pending and unknown never fold out of sight
+      if (row.text !== text) {
+        (tool ? row.toolContent : row.body).replaceChildren(...renderMessage(h, t, text, copy)); row.text = text;
+      }
       next.set(key, row);
     }
     // Keep unchanged nodes in place so refresh does not erase focus or selected text.

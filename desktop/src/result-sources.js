@@ -1,8 +1,8 @@
 const itemHref = item => `#/item/${encodeURIComponent(item.work_item_id)}`;
 const artifactHref = artifact => `#/artifact-review/artifact/${encodeURIComponent(artifact.artifact_id)}/${artifact.revision}`;
 const date = value => typeof value === 'number' ? new Date(value * 1000).toLocaleString() : '—';
-export function resultSourcesPanel({h, t, api, guard, workItemId, linkTarget, onEvents}) {
-  let doc = null, serial = 0, children = [], busy = false;
+export function resultSourcesPanel({h, t, api, guard, workItemId, linkTarget, onEvents, errorBox}) {
+  let doc = null, serial = 0, children = [], refreshing = null;
   const warning = h('div', {'data-child-warning': ''}), status = h('p', {class: 'muted', role: 'status'}), body = h('div');
   const refresh = h('button', {class: 'mini', type: 'button', onclick: () => load()}, t('results_refresh'));
   const more = h('button', {class: 'secondary', type: 'button', hidden: true, onclick: () => load(doc?.children_next_cursor)}, t('results_more'));
@@ -17,7 +17,9 @@ export function resultSourcesPanel({h, t, api, guard, workItemId, linkTarget, on
       const observation = link.observation;
       if (observation) row.append(h('p', {class: 'muted'}, t('results_activity', {
         state: observation.status !== 'available' || observation.stale || observation.fields_stale || observation.gone_at ? t('obs_unknown')
-          : observation.streaming === true ? t('results_streaming') : typeof observation.pending === 'number' && observation.pending > 0 ? t('results_pending', {count: observation.pending}) : t('results_no_activity'),
+          : observation.streaming === true ? t('results_streaming') : observation.pending && typeof observation.pending === 'object' ? t('results_waiting')
+            : typeof observation.pending === 'number' && observation.pending > 0 ? t('results_pending', {count: observation.pending})
+            : observation.streaming === false && (observation.pending === null || observation.pending === 0) ? t('results_no_activity') : t('obs_unknown'),
         time: date(observation.observed_at)})));
       for (const receipt of link.delivered_to || []) row.append(h('p', {class: 'note ok'}, t('results_delivered'), ' ',
         h('a', {href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`, target: '_blank', rel: 'noopener'}, `${receipt.repository}#${receipt.pull_number}`),
@@ -62,17 +64,21 @@ export function resultSourcesPanel({h, t, api, guard, workItemId, linkTarget, on
     status.textContent = t('models_source', {source: doc.source, time: date(doc.read_at)});
     more.hidden = !doc.children_next_cursor;
   }
-  async function load(after = '') {
-    if (busy) return;
-    const request = ++serial; busy = true; refresh.disabled = more.disabled = true;
+  function load(after = '') {
+    if (refreshing) return refreshing.then(() => load(after));
+    refreshing = loadNow(after).finally(() => {refreshing = null;});
+    return refreshing;
+  }
+  async function loadNow(after) {
+    const request = ++serial; refresh.disabled = more.disabled = true;
     try {
       const next = await api('GET', `/work-items/${encodeURIComponent(workItemId)}/result-sources?limit=50${after ? `&after=${encodeURIComponent(after)}` : ''}`);
       guard(); if (request !== serial) return;
       if (next.version !== 1 || next.item?.work_item_id !== workItemId || !Array.isArray(next.children)) throw Error(t('results_invalid'));
       doc = next; children = after ? [...new Map([...children, ...next.children].map(child => [child.work_item_id, child])).values()] : next.children;
       render();
-    } catch (error) {try {guard(); if (request === serial) status.textContent = `${t('models_not_refreshed')} ${error.message || error}`;} catch { /* retired */ }}
-    finally {busy = false; refresh.disabled = more.disabled = false;}
+    } catch (error) {try {guard(); if (request === serial) {errorBox?.(error); status.textContent = `${t('models_not_refreshed')} ${error.message || error}`;}} catch { /* retired */ }}
+    finally {refresh.disabled = more.disabled = false;}
   }
   const off = onEvents(event => ['work_item', 'integration', 'artifact', 'operation', 'session'].includes(event.resource_type) ? load() : undefined);
   load(); return {box, dispose() {serial++; off();}};

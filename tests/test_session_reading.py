@@ -188,3 +188,26 @@ async def test_actual_http_prefix_resolves_exact_session_and_same_identity_share
     assert not api.write_frames(mock)
     assert result["operation"]["action"] == "session.read"
     assert dashboard_sync.identity(d.journal, READER)["principal_id"]
+
+
+async def test_tool_rows_change_page_offsets_without_entering_read_counts(daemon):
+    raw = [{"id": "text-old", "role": "assistant", "content": "Read this"},
+           {"id": "tool", "toolName": "Bash", "input": {"command": "echo hi"}, "status": "completed", "result": "hi"},
+           {"id": "text-new", "role": "assistant", "content": "Latest"}]
+    from bat_agent_connector.summarize import summarize_message
+    def document(include_tools):
+        return {**TARGET, "messages": [s for m in raw if (s := summarize_message(m, include_tools=include_tools, max_chars=1000))],
+                "_reading_index": reading.index_messages(raw, complete=True, include_tools=include_tools)}
+    doc = reading.observe(daemon.journal, READER, document(True))
+    assert doc["reading"]["known_count"] == 2
+    assert "reading" not in doc["messages"][1]
+    op = position(daemon, doc["messages"][0])
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(op["operation_id"])["status"] == "succeeded"
+    # A delayed tools view can race with a newer plain transcript observation.
+    old = reading.begin_observation(daemon.journal)
+    plain = reading.observe(daemon.journal, READER, document(False))
+    assert plain["reading"]["position"]["page_offset"] == 1
+    with_tools = reading.observe(daemon.journal, READER, document(True), generation=old)
+    assert with_tools["reading"]["position"]["page_offset"] == 2
+    assert with_tools["reading"]["unread_count"] == 2

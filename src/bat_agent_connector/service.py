@@ -751,7 +751,7 @@ async def session_read(
     reading_index = {}
     if index_reading:
         from .session_reading import index_messages
-        reading_index["_reading_index"] = index_messages(chronological, complete=archive_complete)
+        reading_index["_reading_index"] = index_messages(chronological, complete=archive_complete, include_tools=include_tools)
     return {
         **reading_index,
         **since,

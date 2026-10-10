@@ -7,7 +7,9 @@ effective principal（actor／scopes／admin digest）、完整 host／session I
 ## 訊息與閱讀證據
 
 - `session_read` 依 BAT 原有 message ID 與完整文字摘要的 SHA-256 建立 metadata index，
-  中央只存 ID／digest／順序，不複製另一份對話。工具呼叫不計入對話未讀數。
+  中央只存 ID／digest／順序，不複製另一份對話。工具呼叫不計入對話未讀數，也不會取得 human read receipt。
+  `include_tools=true` 時工具佔用頁面 offset；回傳的位置以該次請求的 filter 計算，
+  不借用另一個並行請求的頁碼。
 - 同一 ID 的文字改變會有新 revision，舊 receipt 不會清除新版未讀。沒有唯一穩定 ID
   的訊息仍可閱讀，但不虛構閱讀 ID，完整度標示為部分紀錄。
 - `messages` 回傳個別 `reading={revision,unread,can_mark}` 與整體 `reading`；後者包含
@@ -42,3 +44,14 @@ effect 與 receipt 同一交易，其他 principal 不可借同 actor replay／r
 新表是冪等 DDL，不配置新的 `user_version`，不搬動 Connector 自有 IDs／歷史。
 測試涵蓋 actual HTTP 與 MockBat、principal 隔離、token rotation、skipped messages、內容更新、
 晚到 observation、journal restart、原 key replay、位置競爭，以及共用 Web／IPC 操作與草稿保存。
+
+## 訊息來源與工具細節
+
+Dashboard 使用同一中央 transcript 載入工具列；已完成的工具輸入／結果預設折疊，
+error、running、denied、deferred 與未知狀態保持展開，狀態一直顯示在訊息表頭。
+保留原工具結果文字，輸入摘要與整份訊息仍受既有長度限制；工具紀錄不參與未讀標記。
+
+原 BAT `ClaudeMessage` 契約通常只提供 role/content/timestamp，不能從 session 當前模型
+推算歷史訊息的 agent、model 或耗時。中央僅保留原訊息本身明確提供且有效的
+`agent`、`model`、`durationMs`；工具耗時只由其真實 timestamp/completedAt 計算。
+缺少的欄位不補值，也不把訂閱額度或 session 累計 token/cost 當成單則訊息資料。

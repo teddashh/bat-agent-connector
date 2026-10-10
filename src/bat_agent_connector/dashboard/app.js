@@ -1866,7 +1866,7 @@ function conversationPanel({ h, t, when, guard, readingActions = null }) {
 		class: "mini",
 		type: "button",
 		onclick: () => {
-			const row = visible()[0];
+			const row = visible().find((row) => row.reading);
 			if (row?.reading) run(() => readingActions.remember({
 				message_id: row.id,
 				revision: row.reading.revision,
@@ -1904,7 +1904,7 @@ function conversationPanel({ h, t, when, guard, readingActions = null }) {
 		latest.hidden = !olderWindow && atBottom();
 		if (!readingActions) return;
 		mark.disabled = busy || !visible().some((row) => row.reading?.can_mark && row.reading?.unread);
-		remember.disabled = busy || !visible()[0]?.reading;
+		remember.disabled = busy || !visible().some((row) => row.reading);
 		older.disabled = busy;
 	};
 	const run = async (action) => {
@@ -1987,7 +1987,13 @@ function conversationPanel({ h, t, when, guard, readingActions = null }) {
 					onclick: () => copy(row.text)
 				}, t("message_copy"))), row.body);
 			}
-			const meta = `${message.role || ""} · ${when(message.ts)}`;
+			const metadata = [message.role || "", when(message.ts)];
+			if (message.role === "tool") metadata.push(message.tool || t("obs_unknown"), t("message_tool_status", { status: message.denied ? "denied" : message.deferred ? "deferred" : message.status || t("obs_unknown") }));
+			else if (typeof message.status === "string") metadata.push(t("message_tool_status", { status: message.status }));
+			if (typeof message.agent === "string") metadata.push(t("message_agent", { agent: message.agent }));
+			if (typeof message.model === "string") metadata.push(t("message_model", { model: message.model }));
+			if (typeof message.duration_ms === "number" && Number.isFinite(message.duration_ms) && message.duration_ms >= 0) metadata.push(t("message_duration", { ms: message.duration_ms }));
+			const meta = metadata.join(" · ");
 			if (row.meta !== meta) {
 				row.who.textContent = meta;
 				row.meta = meta;
@@ -1996,8 +2002,25 @@ function conversationPanel({ h, t, when, guard, readingActions = null }) {
 			row.id = message.id;
 			row.reading = message.reading;
 			row.node.dataset.messageId = typeof message.id === "string" ? message.id : "";
+			const tool = message.role === "tool", completed = tool && message.status === "completed" && !message.denied && !message.deferred;
+			if (row.tool !== tool) {
+				row.body.replaceChildren();
+				row.text = null;
+				row.tool = tool;
+				row.toolDetails = null;
+			}
+			if (tool && !row.toolDetails) {
+				row.toolContent = h("div", {});
+				row.toolDetails = h("details", {
+					class: "message-tool",
+					open: !completed
+				}, h("summary", {}, t("message_tool_details")), row.toolContent);
+				row.toolDetails.addEventListener("toggle", indicator);
+				row.body.append(row.toolDetails);
+			}
+			if (tool && !completed) row.toolDetails.open = true;
 			if (row.text !== text) {
-				row.body.replaceChildren(...renderMessage(h, t, text, copy));
+				(tool ? row.toolContent : row.body).replaceChildren(...renderMessage(h, t, text, copy));
 				row.text = text;
 			}
 			next.set(key, row);
@@ -2236,6 +2259,10 @@ function modelChoice({ h, t, api, caps, guard, host, agent, model, submit = null
 		class: "muted",
 		role: "status"
 	});
+	const current = h("p", {
+		class: "model-current muted",
+		hidden: true
+	});
 	if (caps()?.features?.host_preferences?.version === 1) model.setAttribute("list", list.id);
 	model.setAttribute("title", model.value);
 	const choose = (role) => {
@@ -2287,13 +2314,17 @@ function modelChoice({ h, t, api, caps, guard, host, agent, model, submit = null
 	const box = h("div", {
 		class: "model-choice",
 		hidden: true
-	}, list, note, h("div", { class: "actions" }, initial, last, remember));
+	}, list, current, note, h("div", { class: "actions" }, initial, last, remember));
 	function update() {
 		box.hidden = caps()?.features?.host_preferences?.version !== 1 || !host();
 		initial.disabled = busy || model.disabled || !doc?.model_preferences.initial_agent;
 		last.disabled = busy || model.disabled || !doc?.model_preferences.last_agent;
 		remember.disabled = busy || model.disabled || !doc || !caps()?.actions?.some((action) => action.action === "preferences.models.update" && action.allowed);
 		model.title = model.value;
+		current.hidden = !model.value;
+		current.textContent = model.value;
+		current.title = model.value;
+		current.setAttribute("aria-label", t("models_current", { model: model.value }));
 	}
 	async function refresh(force = false) {
 		update();
@@ -2344,7 +2375,7 @@ function modelChoice({ h, t, api, caps, guard, host, agent, model, submit = null
 		update
 	};
 }
-function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onEvents }) {
+function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onEvents, errorBox }) {
 	let doc = null, draft = null, intent = null, busy = false, serial = 0, loadedHost = "";
 	let drafts = {};
 	try {
@@ -2608,7 +2639,10 @@ function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onE
 		} catch (error) {
 			try {
 				guard();
-				if (request === serial) status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				if (request === serial) {
+					errorBox?.(error);
+					status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				}
 			} catch {}
 		}
 	}
@@ -2634,7 +2668,7 @@ var refs = (value) => Array.isArray(value) && value.length <= 20 && value.every(
 var record$3 = (value) => value && refs(value.selected) && Number.isInteger(value.revision) && value.revision >= 0 && digest$3(value.digest);
 var key = (host, workspace) => JSON.stringify([host, workspace]);
 var same$1 = (a, b) => a.skill_id === b.skill_id && a.digest === b.digest;
-function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storageKey, onEvents }) {
+function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storageKey, onEvents, errorBox }) {
 	let saved = {
 		host: "",
 		workspace: "",
@@ -2837,7 +2871,10 @@ function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storage
 		} catch (error) {
 			try {
 				guard();
-				if (request === serial) status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				if (request === serial) {
+					errorBox?.(error);
+					status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				}
 			} catch {}
 		}
 	}
@@ -2909,8 +2946,8 @@ function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storage
 var itemHref = (item) => `#/item/${encodeURIComponent(item.work_item_id)}`;
 var artifactHref = (artifact) => `#/artifact-review/artifact/${encodeURIComponent(artifact.artifact_id)}/${artifact.revision}`;
 var date = (value) => typeof value === "number" ? new Date(value * 1e3).toLocaleString() : "—";
-function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents }) {
-	let doc = null, serial = 0, children = [], busy = false;
+function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents, errorBox }) {
+	let doc = null, serial = 0, children = [], refreshing = null;
 	const warning = h("div", { "data-child-warning": "" }), status = h("p", {
 		class: "muted",
 		role: "status"
@@ -2938,7 +2975,7 @@ function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents
 			if (link.note) row.append(h("p", { class: "muted" }, link.note));
 			const observation = link.observation;
 			if (observation) row.append(h("p", { class: "muted" }, t("results_activity", {
-				state: observation.status !== "available" || observation.stale || observation.fields_stale || observation.gone_at ? t("obs_unknown") : observation.streaming === true ? t("results_streaming") : typeof observation.pending === "number" && observation.pending > 0 ? t("results_pending", { count: observation.pending }) : t("results_no_activity"),
+				state: observation.status !== "available" || observation.stale || observation.fields_stale || observation.gone_at ? t("obs_unknown") : observation.streaming === true ? t("results_streaming") : observation.pending && typeof observation.pending === "object" ? t("results_waiting") : typeof observation.pending === "number" && observation.pending > 0 ? t("results_pending", { count: observation.pending }) : observation.streaming === false && (observation.pending === null || observation.pending === 0) ? t("results_no_activity") : t("obs_unknown"),
 				time: date(observation.observed_at)
 			})));
 			for (const receipt of link.delivered_to || []) row.append(h("p", { class: "note ok" }, t("results_delivered"), " ", h("a", {
@@ -2978,10 +3015,15 @@ function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents
 		});
 		more.hidden = !doc.children_next_cursor;
 	}
-	async function load(after = "") {
-		if (busy) return;
+	function load(after = "") {
+		if (refreshing) return refreshing.then(() => load(after));
+		refreshing = loadNow(after).finally(() => {
+			refreshing = null;
+		});
+		return refreshing;
+	}
+	async function loadNow(after) {
 		const request = ++serial;
-		busy = true;
 		refresh.disabled = more.disabled = true;
 		try {
 			const next = await api("GET", `/work-items/${encodeURIComponent(workItemId)}/result-sources?limit=50${after ? `&after=${encodeURIComponent(after)}` : ""}`);
@@ -2994,10 +3036,12 @@ function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents
 		} catch (error) {
 			try {
 				guard();
-				if (request === serial) status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				if (request === serial) {
+					errorBox?.(error);
+					status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				}
 			} catch {}
 		} finally {
-			busy = false;
 			refresh.disabled = more.disabled = false;
 		}
 	}
@@ -4132,6 +4176,12 @@ var STRINGS = {
 		composer_newline: "Shift + Enter 換行；選字時不送出。",
 		tree_drag: "拖曳排序：{name}",
 		tree_drag_help: "只在同層移動；也可使用上移／下移按鈕。",
+		message_tool_details: "工具輸入與結果",
+		message_tool_status: "狀態：{status}",
+		message_agent: "訊息 Agent：{agent}",
+		message_model: "訊息模型：{model}",
+		message_duration: "訊息耗時：{ms} ms",
+		results_waiting: "等待回覆或權限",
 		results_title: "自己與子工作的成果來源",
 		results_refresh: "更新成果來源",
 		results_more: "載入更多子工作",
@@ -4152,7 +4202,7 @@ var STRINGS = {
 		results_parent: "返回父工作與成果",
 		results_unfinished: "目前載入的 {count} 個子工作尚未被驗收；繼續父工作前請先核對。這不表示它們目前正在執行。",
 		results_children_partial: "仍有尚未載入的子工作；目前摘要不能代表全部子工作的狀態。",
-		results_independent: "子工作成果、交付紀錄和父工作完成狀態分別判定；此檢视不會自動整合或標記完成。",
+		results_independent: "子工作成果、交付紀錄和父工作完成狀態分別判定；此檢視不會自動整合或標記完成。",
 		results_invalid: "中央成果來源回應無效。",
 		skills_title: "專案 Skill 來源與選取",
 		skills_not_applied: "已選取的 Skill 只固定來源版本；尚未套用到 Agent，也未放入 prompt。",
@@ -4169,6 +4219,7 @@ var STRINGS = {
 		skills_other_binding: "已存選取來自 {host} / {workspace}。保存目前選取會明確取代該來源。",
 		skills_invalid: "中央 Skill 回應無效。",
 		skills_workspace_missing: "目前探索中未找到",
+		models_current: "所選模型：{model}",
 		models_title: "模型偏好與主機額度",
 		models_host: "設定的 BAT 主機",
 		models_catalog_agent: "檢視模型目錄",
@@ -5521,6 +5572,12 @@ var STRINGS = {
 		composer_newline: "Shift + Enter adds a line; composition never sends.",
 		tree_drag: "Drag to reorder: {name}",
 		tree_drag_help: "Move within these siblings, or use the Move up / Move down buttons.",
+		message_tool_details: "Tool input and result",
+		message_tool_status: "Status: {status}",
+		message_agent: "Message agent: {agent}",
+		message_model: "Message model: {model}",
+		message_duration: "Message duration: {ms} ms",
+		results_waiting: "waiting for an answer or permission",
 		results_title: "Own and child result sources",
 		results_refresh: "Refresh result sources",
 		results_more: "Load more child work",
@@ -5558,6 +5615,7 @@ var STRINGS = {
 		skills_other_binding: "Saved selection belongs to {host} / {workspace}. Saving this selection explicitly replaces that source.",
 		skills_invalid: "Invalid central skill response.",
 		skills_workspace_missing: "not found in current discovery",
+		models_current: "Selected model: {model}",
 		models_title: "Model preferences and host usage",
 		models_host: "Configured BAT host",
 		models_catalog_agent: "Model catalog agent",
@@ -13007,7 +13065,7 @@ async function viewSession(main, host, sid, context = null) {
 	const loadMessages = async (offset = messageOffset, latest = false) => {
 		if (offset == null) return;
 		const request = ++messageRequest;
-		const get = (offset) => api("GET", `${path}/messages?last_n=30&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
+		const get = (offset) => api("GET", `${path}/messages?last_n=30&include_tools=true&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
 		let read = await get(offset);
 		assertView(connection);
 		if (request !== messageRequest) return;
@@ -15301,7 +15359,8 @@ async function viewWorkItem(main, wid) {
 		guard: () => assertView(connection),
 		workItemId: wid,
 		linkTarget,
-		onEvents
+		onEvents,
+		errorBox
 	}) : null;
 	main.append(manageNote() || "", notice, reading, results?.box || "", panel);
 	let displayedItem = null, renderQueue = Promise.resolve();
@@ -16466,7 +16525,8 @@ async function route() {
 			guard: () => assertView(connection),
 			submit,
 			storageKey: `batc.model-preferences.${connection.namespace}`,
-			onEvents
+			onEvents,
+			errorBox
 		});
 		main.append(preferences.box);
 	}
@@ -16485,7 +16545,8 @@ async function route() {
 			submit,
 			projectId: rest[0],
 			storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`,
-			onEvents
+			onEvents,
+			errorBox
 		});
 		main.append(skills.box);
 	}

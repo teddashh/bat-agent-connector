@@ -20,6 +20,7 @@ export function orderedModels(doc, current = '') {
 export function modelChoice({h, t, api, caps, guard, host, agent, model, submit = null, storageKey = ''}) {
   let doc = null, serial = 0, currentHost = '', busy = false;
   const list = h('datalist', {id: `models-${crypto.randomUUID()}`}), note = h('p', {class: 'muted', role: 'status'});
+  const current = h('p', {class: 'model-current muted', hidden: true});
   if (caps()?.features?.host_preferences?.version === 1) model.setAttribute('list', list.id);
   model.setAttribute('title', model.value);
   const choose = role => {
@@ -41,13 +42,15 @@ export function modelChoice({h, t, api, caps, guard, host, agent, model, submit 
       await refresh(true);
     } catch (error) {note.textContent = error.message || String(error);} finally {busy = false; update();}
   }}, t('models_remember_last'));
-  const box = h('div', {class: 'model-choice', hidden: true}, list, note, h('div', {class: 'actions'}, initial, last, remember));
+  const box = h('div', {class: 'model-choice', hidden: true}, list, current, note, h('div', {class: 'actions'}, initial, last, remember));
   function update() {
     box.hidden = caps()?.features?.host_preferences?.version !== 1 || !host();
     initial.disabled = busy || model.disabled || !doc?.model_preferences.initial_agent;
     last.disabled = busy || model.disabled || !doc?.model_preferences.last_agent;
     remember.disabled = busy || model.disabled || !doc || !caps()?.actions?.some(action => action.action === 'preferences.models.update' && action.allowed);
     model.title = model.value;
+    current.hidden = !model.value; current.textContent = model.value;
+    current.title = model.value; current.setAttribute('aria-label', t('models_current', {model: model.value}));
   }
   async function refresh(force = false) {
     update(); if (box.hidden) return;
@@ -71,7 +74,7 @@ export function modelChoice({h, t, api, caps, guard, host, agent, model, submit 
   return {box, refresh, update};
 }
 
-export function modelPreferencesPanel({h, t, api, caps, guard, submit, storageKey, onEvents}) {
+export function modelPreferencesPanel({h, t, api, caps, guard, submit, storageKey, onEvents, errorBox}) {
   let doc = null, draft = null, intent = null, busy = false, serial = 0, loadedHost = '';
   let drafts = {};
   try {drafts = JSON.parse(localStorage.getItem(storageKey) || '{}'); if (!drafts || Array.isArray(drafts) || typeof drafts !== 'object') drafts = {};} catch { /* no draft */ }
@@ -213,7 +216,7 @@ export function modelPreferencesPanel({h, t, api, caps, guard, submit, storageKe
       if (draft.revision !== next.model_preferences.revision) status.textContent = t('models_conflict');
       else if (!equal(draft.params, copyPreferences(next.model_preferences))) status.textContent = t('models_unsaved');
       renderRows(); showUsage(next.usage); update();
-    } catch (error) {try {guard(); if (request === serial) status.textContent = `${t('models_not_refreshed')} ${error.message || error}`;} catch { /* retired */ }}
+    } catch (error) {try {guard(); if (request === serial) {errorBox?.(error); status.textContent = `${t('models_not_refreshed')} ${error.message || error}`;}} catch { /* retired */ }}
   }
   host.addEventListener('change', () => load()); catalogAgent.addEventListener('change', () => load());
   box.addEventListener('toggle', () => {if (box.open && !doc) load();});
