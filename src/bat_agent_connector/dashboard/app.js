@@ -14243,7 +14243,7 @@ function mergeRecovery(op) {
 function viewSettings(main) {
 	if (state.caps?.managed_installation) return viewManagedSettings(main);
 	if (nativeDesktop) return viewNativeSettings(main);
-	if (state.token === "managed-browser-session") {
+	if (state.token && state.caps && state.token === "managed-browser-session") {
 		main.append(h("h1", {}, t("nav_settings")), h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
 			actor: state.caps.actor,
 			scopes: state.caps.scopes.join(", ")
