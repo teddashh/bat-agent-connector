@@ -14,8 +14,26 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
+
+
+def remove_stopped_fixture(directory: Path, *, timeout: float = 30) -> None:
+    # The owned stop receipt already proves the daemon released its service lease.
+    # A frozen one-file bootstrap can briefly retain inherited handles afterward;
+    # Windows refuses removal until those handles close. Never kill a recorded PID
+    # or hide a persistent sharing violation (or any unrelated filesystem error).
+    until = time.monotonic() + timeout
+    while True:
+        try:
+            shutil.rmtree(directory)
+            return
+        except OSError as error:
+            remaining = until - time.monotonic()
+            if getattr(error, "winerror", None) not in {32, 33} or remaining <= 0:
+                raise
+            time.sleep(min(0.1, remaining))
 
 
 def main() -> None:
@@ -95,19 +113,22 @@ def main() -> None:
         assert bootstrap(restarted)["sync"]["server_id"] == original["server_id"]
         assert command("stop")["stopped"] is True
         stopped = True
-        print(json.dumps({
+        receipt = {
             "status": "passed", "evidence_level": "packaged-runtime-fixture", "live_accepted": False,
             "platform": manifest["platform"], "architecture": manifest["architecture"],
             "runtime_sha256": manifest["sha256"], "no_python_on_path": True,
             "concurrent_clients": 3, "stable_identity_after_restart": True,
             "authenticated_bootstrap": True, "browser_handoff_contains_no_bearer": True,
             "owned_service_stopped": True,
-        }))
+            "fixture_directory_removed": True,
+        }
     finally:
         if not stopped and (data / "installation.json").exists():
             # Refuse silent cleanup when a service remains alive.
             assert command("stop")["stopped"] is True
-        shutil.rmtree(directory)
+        remove_stopped_fixture(directory)
+    # Passing evidence includes teardown, not just the service-level assertions.
+    print(json.dumps(receipt))
 
 
 if __name__ == "__main__":
