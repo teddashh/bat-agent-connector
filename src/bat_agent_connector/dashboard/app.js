@@ -2121,7 +2121,7 @@ function composerShortcut({ h, t, input, button, storageKey, guard }) {
 //#region src/tree-interactions.js
 var drag = null;
 var ids = (rows, key) => rows.map((row) => row[key]);
-var same$1 = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+var same$2 = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
 function treeInteractions({ h, t, row, scope, siblings, index, key, run, open, guard, editing }) {
 	const me = siblings[index];
 	const handle = h("button", {
@@ -2138,7 +2138,7 @@ function treeInteractions({ h, t, row, scope, siblings, index, key, run, open, g
 		}
 		for (const target of document.querySelectorAll(".tree-drop-target")) target.classList.remove("tree-drop-target");
 	};
-	const allowed = () => drag && drag.row.isConnected && row.isConnected && drag.scope === scope && drag.pinned === me.pinned && same$1(drag.before, ids(siblings, key));
+	const allowed = () => drag && drag.row.isConnected && row.isConnected && drag.scope === scope && drag.pinned === me.pinned && same$2(drag.before, ids(siblings, key));
 	handle.addEventListener("dragstart", (event) => {
 		if (!event.dataTransfer) {
 			event.preventDefault();
@@ -2180,7 +2180,7 @@ function treeInteractions({ h, t, row, scope, siblings, index, key, run, open, g
 		const intent = drag, order = intent.before.slice();
 		order.splice(index, 0, order.splice(intent.index, 1)[0]);
 		clear();
-		if (same$1(order, intent.before)) return;
+		if (same$2(order, intent.before)) return;
 		try {
 			guard();
 			run("order", intent.before, order, intent.versions);
@@ -2221,7 +2221,7 @@ var fields$1 = [
 ];
 var modelKey = (model) => `${model.agent}:${model.id}`;
 var copyPreferences = (prefs) => Object.fromEntries(fields$1.map((key) => [key, Array.isArray(prefs[key]) ? [...prefs[key]] : prefs[key] ?? null]));
-var date = (value) => typeof value === "number" && Number.isFinite(value) ? new Date(value * 1e3).toLocaleString() : "—";
+var date$1 = (value) => typeof value === "number" && Number.isFinite(value) ? new Date(value * 1e3).toLocaleString() : "—";
 var equal$6 = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 var validPreferences = (value) => value && typeof value === "object" && fields$1.every((key) => key in value) && ["initial_agent", "last_agent"].every((key) => value[key] === null || ["claude", "codex"].includes(value[key])) && ["initial_model", "last_model"].every((key) => value[key] === null || typeof value[key] === "string" && value[key].length <= 256) && ["hidden", "order"].every((key) => Array.isArray(value[key]) && value[key].length <= 1e3 && value[key].every((id) => typeof id === "string" && id.length <= 300));
 var validDraft = (value) => value && Number.isInteger(value.revision) && value.revision >= 0 && validPreferences(value.params);
@@ -2559,15 +2559,15 @@ function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onE
 	function showUsage(value) {
 		usage.replaceChildren(h("p", { class: "muted" }, t("models_source", {
 			source: value.source || "bat_host",
-			time: date(value.observed_at)
+			time: date$1(value.observed_at)
 		})));
 		if (value.status !== "available") usage.append(h("p", { class: "note" }, t("models_usage_unavailable", { reason: value.reason || value.status })));
 		for (const provider of value.providers || []) {
-			const row = h("section", { class: "panel" }, h("strong", {}, provider.provider), h("p", { class: "muted" }, t("models_host_account", { account: provider.account_email || t("obs_unknown") })), h("p", { class: "muted" }, [provider.plan_type, date(provider.fetched_at)].filter(Boolean).join(" · ")));
+			const row = h("section", { class: "panel" }, h("strong", {}, provider.provider), h("p", { class: "muted" }, t("models_host_account", { account: provider.account_email || t("obs_unknown") })), h("p", { class: "muted" }, [provider.plan_type, date$1(provider.fetched_at)].filter(Boolean).join(" · ")));
 			if (provider.stale) row.append(h("p", { class: "note warn" }, t("models_usage_stale", { reason: provider.reason || "unknown" })));
 			for (const [key, label] of [["five_hour", "models_five_hour"], ["seven_day", "models_seven_day"]]) {
 				const window = provider[key], known = typeof window?.utilization === "number" && window.utilization >= 0 && window.utilization <= 1;
-				row.append(h("p", {}, t(label), ": ", known ? `${Math.round(window.utilization * 100)}%` : t("obs_unknown"), " · ", t("models_resets", { time: date(window?.resets_at) })));
+				row.append(h("p", {}, t(label), ": ", known ? `${Math.round(window.utilization * 100)}%` : t("obs_unknown"), " · ", t("models_resets", { time: date$1(window?.resets_at) })));
 			}
 			usage.append(row);
 		}
@@ -2595,7 +2595,7 @@ function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onE
 			evidence.replaceChildren(...[
 				h("p", { class: "muted" }, t("models_source", {
 					source: next.model_catalog.source || "bat_host",
-					time: date(next.model_catalog.observed_at)
+					time: date$1(next.model_catalog.observed_at)
 				})),
 				next.model_catalog.stale ? h("p", { class: "note warn" }, t("models_catalog_stale", { host: selected })) : null,
 				...(next.unknown_models || []).map((model) => h("p", { class: "note" }, t("models_unknown_current", { model: `${model.agent}:${model.id}` })))
@@ -2619,6 +2619,396 @@ function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onE
 	});
 	const off = onEvents((event) => box.open && event.resource_type === "preferences" && event.resource_id === host.value ? load() : void 0);
 	update();
+	return {
+		box,
+		dispose() {
+			serial++;
+			off();
+		}
+	};
+}
+//#endregion
+//#region src/project-skills.js
+var digest$3 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+var refs = (value) => Array.isArray(value) && value.length <= 20 && value.every((ref) => ref && typeof ref.skill_id === "string" && digest$3(ref.digest)) && new Set(value.map((ref) => ref.skill_id)).size === value.length;
+var record$3 = (value) => value && refs(value.selected) && Number.isInteger(value.revision) && value.revision >= 0 && digest$3(value.digest);
+var key = (host, workspace) => JSON.stringify([host, workspace]);
+var same$1 = (a, b) => a.skill_id === b.skill_id && a.digest === b.digest;
+function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storageKey, onEvents }) {
+	let saved = {
+		host: "",
+		workspace: "",
+		drafts: {}
+	};
+	try {
+		const raw = JSON.parse(localStorage.getItem(storageKey));
+		if (raw && typeof raw.host === "string" && typeof raw.workspace === "string" && raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) saved = raw;
+	} catch {}
+	let doc = null, draft = null, busy = false, discovery = 0, serial = 0, discoveredHost = "", discoveryReady = false;
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("start_choose_host")), ...(caps()?.hosts || []).map((value) => h("option", { value: value.host }, value.host)));
+	if (![...host.options].some((option) => option.value === saved.host)) saved.host = "";
+	host.value = saved.host;
+	const workspace = h("select", { "aria-label": t("start_workspace") }, h("option", { value: "" }, t("start_choose_workspace")));
+	const status = h("p", {
+		class: "muted",
+		role: "status"
+	}), source = h("div"), list = h("div");
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const coherent = () => doc && doc.host === saved.host && doc.workspace_id === saved.workspace;
+	const refresh = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => discover(true)
+	}, t("skills_refresh"));
+	const discard = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => {
+			if (busy || draft?.intent || !coherent()) return;
+			try {
+				guard();
+				const next = {
+					...saved,
+					drafts: { ...saved.drafts }
+				};
+				delete next.drafts[key(saved.host, saved.workspace)];
+				localStorage.setItem(storageKey, JSON.stringify(next));
+				saved = next;
+				draft = null;
+				load(true);
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		}
+	}, t("skills_reload"));
+	const save = h("button", {
+		class: "primary",
+		type: "button",
+		onclick: async () => {
+			if (busy || !draft || !coherent()) return;
+			if (!draft.intent && (doc.catalog.stale || doc.catalog.status !== "available")) return;
+			busy = true;
+			try {
+				guard();
+				draft.intent ||= {
+					selected: structuredClone(draft.selected),
+					revision: draft.revision,
+					digest: draft.digest
+				};
+				persist();
+				update();
+				const intent = draft.intent;
+				const op = await submit("project.skills.update", { project_id: projectId }, {
+					host: saved.host,
+					workspace_id: saved.workspace,
+					selected: intent.selected
+				}, {
+					expected_revision: intent.revision,
+					expected_catalog_digest: intent.digest
+				}, storageKey);
+				guard();
+				if (op.status === "succeeded") {
+					const next = {
+						...saved,
+						drafts: { ...saved.drafts }
+					};
+					delete next.drafts[key(saved.host, saved.workspace)];
+					localStorage.setItem(storageKey, JSON.stringify(next));
+					saved = next;
+					draft = null;
+					status.textContent = t("skills_saved");
+					await load();
+				} else {
+					if (["failed", "cancelled"].includes(op.status)) {
+						draft.intent = null;
+						persist();
+					}
+					status.textContent = op.status_reason || t("models_pending");
+				}
+			} catch (error) {
+				try {
+					guard();
+					if (error.status === 409 && [
+						"VERSION_CONFLICT",
+						"SKILL_CATALOG_CHANGED",
+						"SKILL_SOURCE_CHANGED"
+					].includes(error.code)) {
+						draft.intent = null;
+						persist();
+					}
+					status.textContent = error.message || String(error);
+				} catch {}
+			} finally {
+				busy = false;
+				update();
+			}
+		}
+	}, t("skills_save"));
+	const box = h("details", {
+		class: "panel project-skills",
+		"data-project-skills": ""
+	}, h("summary", {}, t("skills_title")), h("p", { class: "note" }, t("skills_not_applied")), h("div", { class: "capture-fields" }, h("label", {}, t("host"), host), h("label", {}, t("start_workspace"), workspace)), h("div", { class: "actions" }, refresh), status, source, list, h("div", { class: "actions" }, save, discard));
+	function update() {
+		const locked = busy || Boolean(draft?.intent), valid = coherent();
+		host.disabled = locked;
+		workspace.disabled = locked || !discoveryReady;
+		refresh.disabled = busy || !saved.host;
+		save.textContent = t(draft?.intent ? "permissions_retry" : "skills_save");
+		save.disabled = busy || !valid || !draft || !draft.intent && (doc.catalog.status !== "available" || doc.catalog.stale) || !caps()?.actions?.some((action) => action.action === "project.skills.update" && action.allowed);
+		discard.disabled = locked || !valid || !draft;
+		for (const control of list.querySelectorAll("input,button")) control.disabled = locked || !valid || control.dataset.unavailable === "true";
+	}
+	function render() {
+		if (!coherent() || !draft) {
+			list.replaceChildren();
+			update();
+			return;
+		}
+		const catalog = doc.catalog;
+		source.replaceChildren(h("p", { class: "muted" }, t("models_source", {
+			source: `${catalog.source} · ${doc.host} / ${doc.workspace_id}`,
+			time: catalog.observed_at ? new Date(catalog.observed_at * 1e3).toLocaleString() : "—"
+		})), h("p", { class: "muted" }, t("skills_compatibility")));
+		if (catalog.status !== "available" || catalog.stale || !catalog.complete) source.append(h("p", { class: "note warn" }, t("skills_catalog_state", { state: catalog.reason || (catalog.stale ? "stale" : !catalog.complete ? "partial" : catalog.status) })));
+		if (doc.selection.selected.length && (doc.selection.host !== doc.host || doc.selection.workspace_id !== doc.workspace_id)) source.append(h("p", { class: "note warn" }, t("skills_other_binding", {
+			host: doc.selection.host,
+			workspace: doc.selection.workspace_id
+		})));
+		const change = (fn) => {
+			if (busy || draft.intent || !coherent()) return;
+			fn();
+			try {
+				persist();
+				status.textContent = t("skills_unsaved");
+				render();
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		};
+		const unresolved = draft.selected.filter((ref) => !catalog.skills.some((skill) => same$1(ref, skill) && skill.available));
+		list.replaceChildren(...unresolved.map((ref) => h("div", { class: "row" }, h("div", { class: "grow" }, h("strong", {}, t("skills_unresolved")), h("p", {}, ref.skill_id), h("code", {}, ref.digest)), h("button", {
+			class: "mini",
+			type: "button",
+			onclick: () => change(() => {
+				draft.selected = draft.selected.filter((value) => !same$1(value, ref));
+			})
+		}, t("remove")))), ...catalog.skills.map((skill) => {
+			const input = h("input", {
+				type: "checkbox",
+				checked: draft.selected.some((ref) => same$1(ref, skill)),
+				"data-unavailable": String(!skill.available),
+				onchange: () => change(() => {
+					if (input.checked && draft.selected.length >= 20 && !draft.selected.some((ref) => ref.skill_id === skill.skill_id)) return;
+					draft.selected = draft.selected.filter((ref) => ref.skill_id !== skill.skill_id);
+					if (input.checked) draft.selected.push({
+						skill_id: skill.skill_id,
+						digest: skill.digest
+					});
+				})
+			});
+			return h("section", { class: "panel" }, h("label", {}, input, " ", skill.name || skill.skill_id), h("p", { class: "muted" }, `${skill.scope} · ${skill.agent} · ${skill.relative_path}`), skill.description ? h("p", {}, skill.description) : null, h("details", {}, h("summary", {}, t("skills_version")), h("code", {}, skill.digest || "—"), h("p", {}, `${skill.files} files · ${skill.size_bytes} bytes`)), !skill.available ? h("p", { class: "note warn" }, skill.reason || t("obs_unknown")) : null);
+		}));
+		update();
+	}
+	async function load(force = false) {
+		if (!saved.host || !saved.workspace || discoveredHost !== saved.host || !discoveryReady) return;
+		const selectedHost = saved.host, selectedWorkspace = saved.workspace, request = ++serial;
+		update();
+		try {
+			const next = await api("GET", `/projects/${encodeURIComponent(projectId)}/skills?host=${encodeURIComponent(selectedHost)}&workspace_id=${encodeURIComponent(selectedWorkspace)}${force ? "&refresh=1" : ""}`);
+			guard();
+			if (request !== serial || selectedHost !== saved.host || selectedWorkspace !== saved.workspace) return;
+			if (next.version !== 1 || next.project_id !== projectId || next.host !== selectedHost || next.workspace_id !== selectedWorkspace || !Array.isArray(next.catalog?.skills) || !refs(next.selection?.selected) || !Number.isInteger(next.selection.revision)) throw Error(t("skills_invalid"));
+			doc = next;
+			const draftKey = key(selectedHost, selectedWorkspace), stored = saved.drafts[draftKey];
+			draft = record$3(stored) ? stored : {
+				selected: next.selection.host === selectedHost && next.selection.workspace_id === selectedWorkspace ? structuredClone(next.selection.selected) : [],
+				revision: next.selection.revision,
+				digest: next.catalog.catalog_digest,
+				intent: null
+			};
+			if (draft.intent && !record$3(draft.intent)) draft.intent = null;
+			saved.drafts[draftKey] = draft;
+			if (draft.revision !== next.selection.revision || draft.digest !== next.catalog.catalog_digest) status.textContent = t("skills_conflict");
+			render();
+		} catch (error) {
+			try {
+				guard();
+				if (request === serial) status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+			} catch {}
+		}
+	}
+	async function discover(force = false) {
+		if (!saved.host) return;
+		const request = ++discovery, selectedHost = saved.host;
+		discoveryReady = false;
+		update();
+		try {
+			const next = await api("GET", `/workspaces?host=${encodeURIComponent(selectedHost)}&limit=200`);
+			guard();
+			if (request !== discovery || selectedHost !== saved.host) return;
+			if (!Array.isArray(next.workspaces) || !next.errors || Object.keys(next.errors).length || next.workspaces.some((value) => value.host !== selectedHost || typeof value.workspace_id !== "string")) throw Error(t("start_discovery_failed"));
+			workspace.replaceChildren(h("option", { value: "" }, t("start_choose_workspace")), ...next.workspaces.map((value) => h("option", { value: value.workspace_id }, `${value.name || value.workspace_id} · ${value.workspace_id}`)));
+			if (saved.workspace && !next.workspaces.some((value) => value.workspace_id === saved.workspace)) workspace.append(h("option", { value: saved.workspace }, `${saved.workspace} · ${t("skills_workspace_missing")}`));
+			workspace.value = saved.workspace;
+			discoveredHost = selectedHost;
+			discoveryReady = true;
+			if (next.has_more) status.textContent = t("start_truncated");
+			update();
+			await load(force);
+		} catch (error) {
+			try {
+				guard();
+				if (request === discovery) status.textContent = error.message || String(error);
+			} catch {}
+		}
+	}
+	host.addEventListener("change", () => {
+		if (busy || draft?.intent) return;
+		saved.host = host.value;
+		saved.workspace = "";
+		doc = draft = null;
+		serial++;
+		source.replaceChildren();
+		list.replaceChildren();
+		workspace.replaceChildren();
+		try {
+			persist();
+		} catch {}
+		discover();
+	});
+	workspace.addEventListener("change", () => {
+		if (busy || draft?.intent) return;
+		saved.workspace = workspace.value;
+		doc = draft = null;
+		serial++;
+		try {
+			persist();
+		} catch {}
+		load();
+	});
+	box.addEventListener("toggle", () => {
+		if (box.open && !discoveryReady) discover();
+	});
+	const off = onEvents((event) => box.open && event.resource_type === "project" && event.resource_id === projectId ? load() : void 0);
+	update();
+	return {
+		box,
+		dispose() {
+			serial++;
+			discovery++;
+			off();
+		}
+	};
+}
+//#endregion
+//#region src/result-sources.js
+var itemHref = (item) => `#/item/${encodeURIComponent(item.work_item_id)}`;
+var artifactHref = (artifact) => `#/artifact-review/artifact/${encodeURIComponent(artifact.artifact_id)}/${artifact.revision}`;
+var date = (value) => typeof value === "number" ? new Date(value * 1e3).toLocaleString() : "—";
+function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents }) {
+	let doc = null, serial = 0, children = [], busy = false;
+	const warning = h("div", { "data-child-warning": "" }), status = h("p", {
+		class: "muted",
+		role: "status"
+	}), body = h("div");
+	const refresh = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => load()
+	}, t("results_refresh"));
+	const more = h("button", {
+		class: "secondary",
+		type: "button",
+		hidden: true,
+		onclick: () => load(doc?.children_next_cursor)
+	}, t("results_more"));
+	const box = h("section", {
+		class: "result-sources panel",
+		"data-result-sources": ""
+	}, warning, h("details", {}, h("summary", {}, t("results_title")), status, h("div", { class: "actions" }, refresh), body, more));
+	function renderSource(item, own = false) {
+		const content = h("div", {}, h("p", { class: "muted" }, t("results_completion", { state: t(`wi_state_${item.completion.display_state}`) })));
+		if (!item.links.length && !item.result_artifacts.length) content.append(h("p", { class: "muted" }, t("results_empty")));
+		for (const link of item.links) {
+			const row = h("div", { class: "panel" }, linkTarget(link));
+			if (link.note) row.append(h("p", { class: "muted" }, link.note));
+			const observation = link.observation;
+			if (observation) row.append(h("p", { class: "muted" }, t("results_activity", {
+				state: observation.status !== "available" || observation.stale || observation.fields_stale || observation.gone_at ? t("obs_unknown") : observation.streaming === true ? t("results_streaming") : typeof observation.pending === "number" && observation.pending > 0 ? t("results_pending", { count: observation.pending }) : t("results_no_activity"),
+				time: date(observation.observed_at)
+			})));
+			for (const receipt of link.delivered_to || []) row.append(h("p", { class: "note ok" }, t("results_delivered"), " ", h("a", {
+				href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`,
+				target: "_blank",
+				rel: "noopener"
+			}, `${receipt.repository}#${receipt.pull_number}`), " · ", h("a", { href: `#/op/${encodeURIComponent(receipt.operation_id)}` }, t("results_receipt")), " · ", h("code", {}, receipt.delivered_sha?.slice(0, 12) || "—")));
+			if (link.delivery_truncated) row.append(h("p", { class: "muted" }, t("results_partial")));
+			content.append(row);
+		}
+		for (const artifact of item.result_artifacts) {
+			const row = h("div", { class: "panel" }, h("a", { href: artifactHref(artifact) }, artifact.display_name || artifact.artifact_id), h("p", { class: "muted" }, `r${artifact.revision} · ${artifact.state || "unknown"} · ${artifact.media_type || ""}`));
+			if (!artifact.available) row.append(h("p", { class: "note warn" }, t("results_unavailable", { reason: artifact.reason || "unknown" })));
+			row.append(h("details", {}, h("summary", {}, t("results_provenance")), h("code", {}, artifact.digest), artifact.source_operation_id ? h("p", {}, h("a", { href: `#/op/${encodeURIComponent(artifact.source_operation_id)}` }, t("results_source_operation"))) : null, artifact.source?.kind === "session" && artifact.source.host && artifact.source.session_id ? h("p", {}, h("a", { href: `#/session/${encodeURIComponent(artifact.source.host)}/${encodeURIComponent(artifact.source.session_id)}` }, t("nav_sessions"))) : null));
+			const consumers = artifact.recorded_consumers || [];
+			row.append(h("p", { class: "muted" }, t("results_consumers", { count: consumers.length })), ...consumers.map((consumer) => {
+				const href = consumer.owner_kind === "work_item" ? `#/item/${encodeURIComponent(consumer.owner_id)}` : consumer.owner_kind === "operation" ? `#/op/${encodeURIComponent(consumer.owner_id)}` : null;
+				return h("p", { class: "muted" }, `${consumer.role} · ${consumer.owner_kind} · `, href ? h("a", { href }, consumer.owner_id) : consumer.owner_id);
+			}));
+			if (artifact.consumers_truncated) row.append(h("p", { class: "muted" }, t("results_partial")));
+			content.append(row);
+		}
+		if (item.links_truncated || item.artifacts_truncated) content.append(h("p", { class: "note" }, t("results_partial")));
+		return own ? content : h("details", { "data-result-child": item.work_item_id }, h("summary", {}, item.title), h("p", {}, h("a", { href: itemHref(item) }, t("results_open_child"))), content);
+	}
+	function render() {
+		const focused = document.activeElement?.getAttribute("href"), opens = new Set([...body.querySelectorAll("details[open][data-result-child]")].map((node) => node.dataset.resultChild));
+		const unfinished = children.filter((child) => !child.archived && !child.completion.approved);
+		warning.replaceChildren(...unfinished.length ? [h("p", { class: "note warn" }, t("results_unfinished", { count: unfinished.length }), " ", ...unfinished.flatMap((child, index) => [index ? " · " : "", h("a", { href: itemHref(child) }, child.title)]))] : []);
+		if (doc.children_next_cursor) warning.append(h("p", { class: "muted" }, t("results_children_partial")));
+		body.replaceChildren(h("p", { class: "muted" }, t("results_independent")), ...[doc.parent && ["results_parent", doc.parent], doc.derived_from && ["derived_from", doc.derived_from]].filter(Boolean).map(([label, item]) => h("p", {}, t(label), ": ", h("a", { href: itemHref(item) }, item.title))), renderSource(doc.item, true), ...children.map((child) => renderSource(child)));
+		for (const node of body.querySelectorAll("details[data-result-child]")) node.open = opens.has(node.dataset.resultChild);
+		if (focused) [...body.querySelectorAll("a")].find((node) => node.getAttribute("href") === focused)?.focus({ preventScroll: true });
+		status.textContent = t("models_source", {
+			source: doc.source,
+			time: date(doc.read_at)
+		});
+		more.hidden = !doc.children_next_cursor;
+	}
+	async function load(after = "") {
+		if (busy) return;
+		const request = ++serial;
+		busy = true;
+		refresh.disabled = more.disabled = true;
+		try {
+			const next = await api("GET", `/work-items/${encodeURIComponent(workItemId)}/result-sources?limit=50${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+			guard();
+			if (request !== serial) return;
+			if (next.version !== 1 || next.item?.work_item_id !== workItemId || !Array.isArray(next.children)) throw Error(t("results_invalid"));
+			doc = next;
+			children = after ? [...new Map([...children, ...next.children].map((child) => [child.work_item_id, child])).values()] : next.children;
+			render();
+		} catch (error) {
+			try {
+				guard();
+				if (request === serial) status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+			} catch {}
+		} finally {
+			busy = false;
+			refresh.disabled = more.disabled = false;
+		}
+	}
+	const off = onEvents((event) => [
+		"work_item",
+		"integration",
+		"artifact",
+		"operation",
+		"session"
+	].includes(event.resource_type) ? load() : void 0);
+	load();
 	return {
 		box,
 		dispose() {
@@ -3742,6 +4132,43 @@ var STRINGS = {
 		composer_newline: "Shift + Enter 換行；選字時不送出。",
 		tree_drag: "拖曳排序：{name}",
 		tree_drag_help: "只在同層移動；也可使用上移／下移按鈕。",
+		results_title: "自己與子工作的成果來源",
+		results_refresh: "更新成果來源",
+		results_more: "載入更多子工作",
+		results_completion: "工作完成狀態：{state}",
+		results_empty: "尚無明確連結的成果來源。",
+		results_activity: "最近觀察：{state} · {time}",
+		results_streaming: "正在回覆",
+		results_pending: "{count} 項待處理",
+		results_no_activity: "未觀察到活動；不代表已完成",
+		results_delivered: "有交付紀錄",
+		results_receipt: "檢視交付收據",
+		results_partial: "此摘要有截斷；請開啟原始工作或成果檢查完整來源。",
+		results_unavailable: "成果目前不可讀：{reason}",
+		results_provenance: "檢視固定版本與來源",
+		results_source_operation: "開啟來源操作",
+		results_consumers: "中央已記錄 {count} 筆引用；目前是否仍在執行消費尚不確定。",
+		results_open_child: "開啟子工作與對話",
+		results_parent: "返回父工作與成果",
+		results_unfinished: "目前載入的 {count} 個子工作尚未被驗收；繼續父工作前請先核對。這不表示它們目前正在執行。",
+		results_children_partial: "仍有尚未載入的子工作；目前摘要不能代表全部子工作的狀態。",
+		results_independent: "子工作成果、交付紀錄和父工作完成狀態分別判定；此檢视不會自動整合或標記完成。",
+		results_invalid: "中央成果來源回應無效。",
+		skills_title: "專案 Skill 來源與選取",
+		skills_not_applied: "已選取的 Skill 只固定來源版本；尚未套用到 Agent，也未放入 prompt。",
+		skills_refresh: "重新掃描 Skill 來源",
+		skills_reload: "重新載入已存選取",
+		skills_save: "保存 Skill 選取",
+		skills_saved: "Skill 選取已保存；尚未套用。",
+		skills_unsaved: "有尚未儲存的 Skill 選取。",
+		skills_conflict: "來源或中央選取已變動；保留目前草稿，請重新載入已存選取後再修改。",
+		skills_unresolved: "原選取已遺失或內容改變；保留固定版本",
+		skills_version: "檢視固定內容版本",
+		skills_compatibility: "目前可掃描 Claude Skill；Agent 相容性由來源回報，保存不等於執行套用。最多選取 20 項。",
+		skills_catalog_state: "來源未完整驗證：{state}",
+		skills_other_binding: "已存選取來自 {host} / {workspace}。保存目前選取會明確取代該來源。",
+		skills_invalid: "中央 Skill 回應無效。",
+		skills_workspace_missing: "目前探索中未找到",
 		models_title: "模型偏好與主機額度",
 		models_host: "設定的 BAT 主機",
 		models_catalog_agent: "檢視模型目錄",
@@ -5094,6 +5521,43 @@ var STRINGS = {
 		composer_newline: "Shift + Enter adds a line; composition never sends.",
 		tree_drag: "Drag to reorder: {name}",
 		tree_drag_help: "Move within these siblings, or use the Move up / Move down buttons.",
+		results_title: "Own and child result sources",
+		results_refresh: "Refresh result sources",
+		results_more: "Load more child work",
+		results_completion: "Work completion: {state}",
+		results_empty: "No explicitly linked result sources yet.",
+		results_activity: "Last observation: {state} · {time}",
+		results_streaming: "responding",
+		results_pending: "{count} pending",
+		results_no_activity: "no activity observed; completion is not established",
+		results_delivered: "Delivery recorded",
+		results_receipt: "Inspect delivery receipt",
+		results_partial: "This summary is truncated. Open the original work or artifact to inspect its source.",
+		results_unavailable: "Result currently unavailable: {reason}",
+		results_provenance: "Inspect fixed version and source",
+		results_source_operation: "Open source operation",
+		results_consumers: "Central records {count} references; live consumption remains unknown.",
+		results_open_child: "Open child work and conversation",
+		results_parent: "Return to parent work and results",
+		results_unfinished: "{count} loaded child work items have not been accepted. Check them before continuing the parent; this does not establish that they are running.",
+		results_children_partial: "More child work is not loaded. This summary does not establish the state of every child.",
+		results_independent: "Child results, delivery receipts and parent completion are separate. This view does not integrate results or mark work complete.",
+		results_invalid: "Invalid central result-source response.",
+		skills_title: "Project skill sources and selection",
+		skills_not_applied: "Selected skills pin source versions only. They are not applied to an agent or inserted into a prompt.",
+		skills_refresh: "Rescan skill sources",
+		skills_reload: "Reload saved selection",
+		skills_save: "Save skill selection",
+		skills_saved: "Skill selection saved; not applied.",
+		skills_unsaved: "Unsaved skill selection.",
+		skills_conflict: "The source or central selection changed. Your draft is preserved; reload saved selection before editing again.",
+		skills_unresolved: "Previously selected source is missing or changed; fixed version retained",
+		skills_version: "Inspect fixed source version",
+		skills_compatibility: "Claude skill sources are supported. Source-reported compatibility does not establish runtime application. Select at most 20 skills.",
+		skills_catalog_state: "Source verification is incomplete: {state}",
+		skills_other_binding: "Saved selection belongs to {host} / {workspace}. Saving this selection explicitly replaces that source.",
+		skills_invalid: "Invalid central skill response.",
+		skills_workspace_missing: "not found in current discovery",
 		models_title: "Model preferences and host usage",
 		models_host: "Configured BAT host",
 		models_catalog_agent: "Model catalog agent",
@@ -14653,7 +15117,7 @@ async function viewProject(main, pid) {
 				if (ok || draft) render();
 			}
 		}, t("save"))));
-		fill(head, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])), h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null), p.description ? h("p", { class: "pre" }, p.description) : null, h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map((r) => chip(r)), !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {
+		fill(head, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])), h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null), p.description ? h("details", {}, h("summary", {}, t("description"), " · ", p.description.replace(/\s+/g, " ").slice(0, 140), p.description.length > 140 ? "…" : ""), h("p", { class: "pre" }, p.description)) : null, h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map((r) => chip(r)), !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {
 			class: "session-project-link",
 			href: `#/dispatch/${pid}`
 		}, t("dispatch_title")) : null, p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null), d.box, data.sub_projects.length ? h("p", {}, t("sub_projects"), ": ", ...data.sub_projects.flatMap((x, i) => [i ? " · " : "", h("a", { href: `#/project/${x.project_id}` }, x.name)])) : null);
@@ -14830,7 +15294,16 @@ async function viewWorkItem(main, wid) {
 		ref.placeholder = t("link_ref_" + kind.value);
 	};
 	kind.onchange();
-	main.append(manageNote() || "", notice, reading, panel);
+	const results = state.caps?.features?.work_item_results?.version === 1 ? resultSourcesPanel({
+		h,
+		t,
+		api,
+		guard: () => assertView(connection),
+		workItemId: wid,
+		linkTarget,
+		onEvents
+	}) : null;
+	main.append(manageNote() || "", notice, reading, results?.box || "", panel);
 	let displayedItem = null, renderQueue = Promise.resolve();
 	const showReading = (w, progress) => {
 		const readingSupported = state.caps?.features?.work_item_reads?.version === 1 && progress;
@@ -14976,7 +15449,7 @@ async function viewWorkItem(main, wid) {
 				if (ok || draft) render();
 			}
 		}, t("save"))));
-		const section = (label, text) => text ? [h("h2", {}, label), h("div", { class: "panel pre" }, text)] : [];
+		const section = (label, text) => text ? [h("details", { class: "panel" }, h("summary", {}, label, " · ", text.replace(/\s+/g, " ").slice(0, 140), text.length > 140 ? "…" : ""), h("div", { class: "pre" }, text))] : [];
 		const setSteps = async (steps, added) => {
 			if (await update({ steps }, `wi.steps.${wid}`) && added) newStep.value = "";
 			render();
@@ -15012,7 +15485,7 @@ async function viewWorkItem(main, wid) {
 				render();
 			}
 		};
-		const linkRows = data.links.map((l) => h("div", { class: "row" }, chip(t("link_" + l.kind)), h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null, h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)), l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice) : null, live && may("manage") ? h("button", {
+		const linkRows = data.links.map((l) => h("div", { class: "row" }, chip(t("link_" + l.kind)), h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null, h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)), l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice, data.children) : null, live && may("manage") ? h("button", {
 			class: "mini",
 			title: t("remove"),
 			"aria-label": t("remove"),
@@ -15041,9 +15514,13 @@ async function viewWorkItem(main, wid) {
 		}
 	};
 	await render();
-	return liveReload(render, (event) => observationAffected("work_item", wid, event), refreshSafety);
+	const off = liveReload(render, (event) => observationAffected("work_item", wid, event), refreshSafety);
+	return () => {
+		off?.();
+		results?.dispose();
+	};
 }
-function continueFrom(w, checkpointId, notice) {
+function continueFrom(w, checkpointId, notice, children = []) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
@@ -15098,7 +15575,8 @@ function continueFrom(w, checkpointId, notice) {
 	}, t("start_agent_work"));
 	const note = confinementNote(w.links?.find((l) => l.ref === checkpointId)?.target?.host, agent);
 	api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then((x) => note.setHost(x.checkpoint.host)).catch(() => {});
-	const d = drawer(note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
+	const unfinished = children.filter((child) => child.display_state !== "done");
+	const d = drawer(unfinished.length ? h("p", { class: "note warn" }, t("results_unfinished", { count: unfinished.length }), " ", ...unfinished.flatMap((child, index) => [index ? " · " : "", h("a", { href: `#/item/${encodeURIComponent(child.work_item_id)}` }, child.title)])) : null, note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
 	const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
 	return h("div", { class: "grow" }, h("button", {
 		class: "secondary",
@@ -15973,7 +16451,7 @@ async function route() {
 		if (off) off();
 		return;
 	}
-	let preferences;
+	let preferences, skills;
 	if (name === "settings" && state.caps?.features?.host_preferences?.version === 1) {
 		const connection = {
 			epoch: state.epoch,
@@ -15992,9 +16470,29 @@ async function route() {
 		});
 		main.append(preferences.box);
 	}
+	if (name === "project" && state.caps?.features?.project_skills?.version === 1) {
+		const connection = {
+			epoch: state.epoch,
+			namespace: state.namespace,
+			generation
+		};
+		skills = projectSkillsPanel({
+			h,
+			t,
+			api,
+			caps: () => state.caps,
+			guard: () => assertView(connection),
+			submit,
+			projectId: rest[0],
+			storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`,
+			onEvents
+		});
+		main.append(skills.box);
+	}
 	teardown = () => {
 		off?.();
 		preferences?.dispose();
+		skills?.dispose();
 	};
 	state.viewReady = true;
 }

@@ -485,3 +485,4 @@ body.workspace-resizing, body.workspace-resizing * { cursor: col-resize !importa
   .workspace-resizer { width: 44px; right: -22px; }
   .workspace-resizer::after { left: 21px; }
 }
+.project-skills, .model-preferences, .result-sources { min-width: 0; overflow-wrap: anywhere; }
