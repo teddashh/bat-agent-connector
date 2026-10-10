@@ -24,8 +24,9 @@ bootstrap were retained from the repository's previous project-page-kit site
 (https://github.com/teddashh/teddashh.github.io/tree/main/kit).
 
 Keep both languages aligned. Update the evidence baseline only when the referenced
-candidate actually passed. Treat managed installation as required behavior still
-in development until installed acceptance proves it. Do not invent tool counts,
+candidate actually passed. Describe managed installation as candidate source until the matching final package
+checks and integration complete. Keep user-owned real-environment acceptance and
+explicitly excluded distribution features separate from implementation status. Do not invent tool counts,
 use fixture screenshots as live evidence, or label validation artifacts as a signed
 release. Platform claims must distinguish desktop client, central service and Fleet.
 
@@ -43,7 +44,7 @@ these responsibilities against source whenever changing the READMEs or site:
 | Route recovery, Tailscale status, fixed central bootstrap | [routes](../docs/design/fleet-routes.md), [Tailscale](../docs/design/tailscale-recovery.md), [bootstrap](../docs/design/fleet-bootstrap.md) |
 | Rust/PowerShell ownership and explicit migration | [Fleet runtime](../desktop/fleet-core/README.md), [migration](../docs/design/fleet-migration.md) |
 | Python central authority; BAT host execution; manual/managed resources | [product decisions](../docs/product/realignment-v2.md), [resource policy](../docs/design/resource-policy.md) |
-| Shared Web/Tauri UI, platform differences, current installation gap | [shared frontend](../docs/design/shared-frontend.md), [managed installation](../docs/design/managed-installation.md) |
+| Shared Web/Tauri UI, platform differences, candidate installation and recovery | [shared frontend](../docs/design/shared-frontend.md), [managed installation](../docs/design/managed-installation.md) |
 | Discoverable Windows packages, usage and resource links | [Windows guide](../docs/windows.md), [繁中](../docs/windows.zh-TW.md) |
 
 Project Hub is an interaction reference, not the runtime, central backend or a
