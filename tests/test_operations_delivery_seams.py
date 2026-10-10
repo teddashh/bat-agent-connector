@@ -9,7 +9,7 @@ from bat_agent_connector.errors import TaskControlRefused
 from bat_agent_connector.operations import OpContext, OperationError
 from tests.test_delivery import (
     HEAD,
-    TED,
+    OPERATOR,
     default_merge_op,
     restart_delivery_service,
     settle,
@@ -60,7 +60,7 @@ async def test_a05_c07_failed_nested_effect_preserves_outer_delivery_commits(mak
     gh.add_pr(8, "c" * 40)
     outer_op = await update_op(d)
     card = await delivery.pr_preview(d.ops, "o/r", 8)
-    inner_op, _ = d.ops.create(TED, action="github.pr.update", target={"repository": "o/r", "pull_number": 8},
+    inner_op, _ = d.ops.create(OPERATOR, action="github.pr.update", target={"repository": "o/r", "pull_number": 8},
                                params={"title": "Inner change"}, idempotency_key="inner",
                                preconditions={"expected_metadata_digest": card["metadata_digest"]})
     document = await pr_delivery.scope(d.ops, "o/r", 7, "squash")
@@ -114,7 +114,7 @@ async def test_c05_stopped_merge_reconcile_preserves_request_for_later_readback(
                                 (op_id,)).fetchone()[0] == request
     assert gh.count("PUT", ".") == 1
     gh.merge(7)  # a late outcome becomes visible while the resend policy remains revoked
-    d.ops.resume(TED, op_id)
+    d.ops.resume(OPERATOR, op_id)
     done = await settle(d, op_id)
     step = next(s for s in done["steps"] if s["name"] == "merge.submit")
     assert done["status"] == "succeeded" and done["result"]["verified"]

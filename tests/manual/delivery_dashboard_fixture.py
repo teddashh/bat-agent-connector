@@ -24,7 +24,7 @@ from tests.fakeverifier import FakeVerifier
 from tests.mockbat import TOKEN as BAT_TOKEN
 from tests.mockbat import MockBat
 from tests.test_api_v1 import token
-from tests.test_delivery import HEAD, MERGED, TED, config
+from tests.test_delivery import HEAD, MERGED, OPERATOR, config
 from tests.test_deployment_rollback import allow
 from tests.test_deployments import deployed, source_on_main
 
@@ -79,7 +79,7 @@ async def main():
     for n in range(10):
         name = "unsupported" if n == 9 else "artifact" if n in (3, 4) else "prod"
         old = oldops.create(
-            TED,
+            OPERATOR,
             action="deployment.start",
             target={"recipe": name},
             params={"source_sha": MERGED},

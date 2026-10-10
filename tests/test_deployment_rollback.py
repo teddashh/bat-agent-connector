@@ -11,7 +11,7 @@ from bat_agent_connector import delivery, deployment
 from bat_agent_connector import deployment_store as store
 from bat_agent_connector.operations import OperationError, OperationService
 from tests import test_delivery as fixtures
-from tests.test_delivery import MERGED, TED, settle
+from tests.test_delivery import MERGED, OPERATOR, settle
 from tests.test_deployments import NEW, completed, deployed, source_on_main, start
 
 gh = fixtures.gh
@@ -181,7 +181,7 @@ async def test_d04_retry_keeps_saved_identity_and_never_merges_again(make_daemon
     saved = deployment.status(d.ops, old["result"]["deployment_id"])
     p = await deployment.preview(d.ops, "prod")
     e = deployment.retry_envelope(saved, p["preconditions"])
-    op = d.ops.create(TED, **e, idempotency_key="retry")[0]
+    op = d.ops.create(OPERATOR, **e, idempotency_key="retry")[0]
     w = await settle(d, op["operation_id"], rounds=1)
     completed(gh, w["external_refs"]["deploy_run_id"])
     assert (await settle(d, op["operation_id"]))["result"]["source_sha"] == MERGED
@@ -225,7 +225,7 @@ async def test_issue32_artifact_retry_also_requires_source_on_recipe_ref(make_da
     gh.branches["main"] = "b" * 40
     p = await deployment.preview(d.ops, "prod")
     e = deployment.retry_envelope(saved, p["preconditions"])
-    op = d.ops.create(TED, **e, idempotency_key="retry-off-ref")[0]
+    op = d.ops.create(OPERATOR, **e, idempotency_key="retry-off-ref")[0]
     done = await settle(d, op["operation_id"])
     assert done["error_code"] == "DEPLOY_SOURCE_NOT_ON_REF"
     assert gh.count("POST", "dispatches") == 1

@@ -50,7 +50,7 @@ async def test_b01_b03_delivered_merge_history_uses_only_explicit_refs(make_daem
         assert verified["body"]["response"]["verified"] is True
         assert verified["body"]["response"]["merged_sha"] == delivery_tests.MERGED
         assert verified["context"]["operation_id"] == op["operation_id"]
-        assert verified["context"]["actor"] == delivery_tests.TED.actor
+        assert verified["context"]["actor"] == delivery_tests.OPERATOR.actor
         assert delivery_tests.HEAD in {v["sha"] for v in verified["context"]["source_versions"]}
         assert delivery_tests.MERGED in {v["sha"] for v in verified["context"]["result_versions"]}
         succeeded = next(e for e in events if e["kind"] == "operation.succeeded")
@@ -88,7 +88,7 @@ async def test_b01_delivery_preview_late_binding_respects_history_as_of(make_dae
     preview = next(e for e in current if e["kind"] == "delivery.merge_previewed")
     linked = d.ops.db.execute("SELECT linked_at_seq FROM api_event_resources WHERE seq=? AND resource_type='session'", (preview["seq"],)).fetchone()[0]
     assert linked > baseline["as_of"]
-    d.ops.cancel(delivery_tests.TED, op["operation_id"])
+    d.ops.cancel(delivery_tests.OPERATOR, op["operation_id"])
 
 
 async def test_b03_merge_receipt_history_keeps_moved_base_shas_without_commit_messages(make_daemon, gh):

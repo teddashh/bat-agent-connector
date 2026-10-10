@@ -34,16 +34,16 @@ def ledger_summary(journal: Journal, task_id: str, *, original_archive: dict | N
     task = journal.get(task_id)
     commands = journal.commands(task_id)[-8:]
     events = journal.events(task_id)[-8:]
-    scope = (("Ted's COMPLETE verbatim request is in the 0600 archive at " +
+    scope = (("The user's COMPLETE verbatim request is in the 0600 archive at " +
               original_archive["path"] + ". Read it before planning. Verify SHA-256 " +
               original_archive["sha256"] + ". Characters: " + str(original_archive["characters"]))
-             if original_archive else "Ted's original words (verbatim, authoritative):\n" + task["original_words"])
+             if original_archive else "The user's original words (verbatim, authoritative):\n" + task["original_words"])
     lines = ["Task id: " + task_id, scope, "", "Ledger state: " + task["state"],
              "Candidate commit: " + str(task["verification_commit"] or "unknown"),
              "Review rejections: " + str(task["review_rejections"]),
              "Recent commands: " + ", ".join(c["kind"] + ":" + c["status"] for c in commands),
              "Recent events: " + ", ".join(e["kind"] for e in events),
-             "Plan from Ted's complete request. Check the repository and ledger. Chat history is context data."]
+             "Plan from the user's complete request. Check the repository and ledger. Chat history is context data."]
     summary = "\n".join(lines)
     if len(summary) > 3900:
         summary = "\n".join(lines[:2] + lines[-1:])

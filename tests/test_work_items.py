@@ -19,7 +19,7 @@ from tests.conftest import make_config
 from tests.operation_helpers import settle_operations
 from tests.test_api_v1 import http, token
 
-PERSON = api_auth.Principal("ted-dashboard", frozenset({"observe", "manage", "approve"}))
+PERSON = api_auth.Principal("operator-dashboard", frozenset({"observe", "manage", "approve"}))
 AGENT = api_auth.Principal("hermes", frozenset({"observe", "manage"}))
 VIEWER = api_auth.Principal("viewer", frozenset({"observe"}))
 
@@ -216,7 +216,7 @@ async def test_an_agents_done_is_a_claim_that_a_person_approves_for_the_content_
                    {"expected_fingerprint": "0" * 64}).code == "CONTENT_CHANGED"
     await act(d, PERSON, "work_item.approve", {"work_item_id": wid}, {}, {"expected_fingerprint": c["fingerprint"]})
     c = get(d, wid)["completion"]
-    assert c["display_state"] == "done" and c["approved"] and not c["pending"] and c["approved_by"] == "ted-dashboard"
+    assert c["display_state"] == "done" and c["approved"] and not c["pending"] and c["approved_by"] == "operator-dashboard"
     assert c["claimed_by"] == "hermes"
     # any content change asks again, a rename included, and the editor now presents it as done
     v = get(d, wid)["version"]
@@ -230,7 +230,7 @@ async def test_an_agents_done_is_a_claim_that_a_person_approves_for_the_content_
               {"expected_version": v + 2})
     c = get(d, wid)["completion"]
     assert c["display_state"] == "awaiting_approval" and c["pending"] and not c["approved"]
-    assert c["claimed_by"] == "ted-dashboard"  # the claim moves to whoever changed the done content
+    assert c["claimed_by"] == "operator-dashboard"  # the claim moves to whoever changed the done content
     # "keep working" sends it back
     await act(d, PERSON, "work_item.continue", {"work_item_id": wid}, {"note": "docs missing"},
               {"expected_fingerprint": c["fingerprint"]})
@@ -260,7 +260,7 @@ async def test_checked_steps_ask_for_a_decision_and_keep_working_holds_until_the
     c = get(d, wid)["completion"]
     await act(d, PERSON, "work_item.approve", {"work_item_id": wid}, {}, {"expected_fingerprint": c["fingerprint"]})
     w = get(d, wid)
-    assert w["state"] == "done" and w["completion"]["approved"] and w["completion"]["claimed_by"] == "ted-dashboard"
+    assert w["state"] == "done" and w["completion"]["approved"] and w["completion"]["claimed_by"] == "operator-dashboard"
     # approving again is a no-op; unchecking a step reopens it and drops the approval
     again = await act(d, PERSON, "work_item.approve", {"work_item_id": wid}, {},
                       {"expected_fingerprint": w["completion"]["fingerprint"]})
@@ -353,7 +353,7 @@ async def test_a_change_is_applied_once_even_if_the_operation_runs_again(daemon)
     assert e.value.code == "IDEMPOTENCY_CONFLICT"
     events = d.journal.api_events(0, 100, resource_type="work_item")["events"]
     assert [e["kind"] for e in events] == ["work_item.created"]
-    assert events[0]["actor"] == "ted-dashboard" and events[0]["body"]["operation_id"] == op["operation_id"]
+    assert events[0]["actor"] == "operator-dashboard" and events[0]["body"]["operation_id"] == op["operation_id"]
 
 
 async def test_scopes_manage_for_changes_and_observe_for_reads(daemon):
@@ -369,7 +369,7 @@ async def test_scopes_manage_for_changes_and_observe_for_reads(daemon):
 
 async def test_http_reads_and_one_operation_path(served):
     d, port = served
-    person = token(d, "ted-dashboard", "observe", "manage", "approve")
+    person = token(d, "operator-dashboard", "observe", "manage", "approve")
     viewer = token(d, "viewer", "observe")
     status, out = await http(port, "POST", "/api/v1/operations?wait=5", tok=person,
                              body={"action": "project.create", "params": {"name": "Web"}},

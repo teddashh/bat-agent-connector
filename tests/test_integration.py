@@ -29,7 +29,7 @@ from tests.fakegithub import TOKEN, FakeGitHub
 from tests.operation_helpers import settle_operations
 from tests.test_checkpoints import MANUAL, LocalRunner, RealGitLog, bat_git_status, bat_writes, git
 
-TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate", "start", "integrate", "merge"}))
+OPERATOR = api_auth.Principal("operator-dashboard", frozenset({"observe", "operate", "start", "integrate", "merge"}))
 _GIT = tuple(int(x) for x in re.findall(r"\d+", subprocess.run(["git", "version"], capture_output=True,
                                                                text=True).stdout)[:2])
 pytestmark = pytest.mark.skipif(_GIT < (2, 40), reason="integration tests need git 2.40 or later")
@@ -108,14 +108,14 @@ class World:
         self.sync_pull()
         self.human = tmp / "human" / "app"
         git(tmp, "clone", "-q", str(self.remote), str(self.human))
-        git(self.human, "checkout", "-q", "-b", "ted-work", "origin/feature-1")
-        self.H = commit(self.human, "h.txt", "ted\n", "Ted's unpushed work")
+        git(self.human, "checkout", "-q", "-b", "operator-work", "origin/feature-1")
+        self.H = commit(self.human, "h.txt", "operator\n", "Operator's unpushed work")
         (self.human / "b.txt").write_text("bee (being edited)\n")  # a modified tracked file
         (self.human / "scratch.txt").write_text("untracked\n")
         mock.metas[MANUAL] = {"cwd": str(self.human), "isStreaming": False}
         mock.git_logs = RealGitLog()
         mock.handlers["git:status"] = bat_git_status
-        mock.git_branch[str(self.human)] = "ted-work"
+        mock.git_branch[str(self.human)] = "operator-work"
         gh.add_pr(1, self.f1, head_ref="feature-1")
         gh.track_remote(1, str(self.remote))
         (tmp / "managed").mkdir()
@@ -156,7 +156,7 @@ class World:
         self.sync_pull()
         return sha
 
-    async def run(self, action, target, params=None, pre=None, key=None, principal=TED):
+    async def run(self, action, target, params=None, pre=None, key=None, principal=OPERATOR):
         self.keys += 1
         op, _ = self.d.ops.create(principal, action=action, target=target, params=params or {},
                                   preconditions=pre or {}, idempotency_key=key or f"{action}-{self.keys}")
@@ -293,12 +293,12 @@ async def test_c01_single_source_ahead_of_the_pr_fast_forwards_without_a_connect
     doc = await w.preview([{"kind": "checkpoint_run", "id": run_id}])
     src = doc["sources"][0]
     assert src["predicted"] == "fast_forward" and [c["origin"] for c in src["commits"]] == ["foreign", "own"]
-    assert [x["code"] for x in src["warnings"]] == ["BRINGS_FOREIGN_COMMITS"]  # Ted's H comes with it, and says so
+    assert [x["code"] for x in src["warnings"]] == ["BRINGS_FOREIGN_COMMITS"]  # the user's H comes with it, and says so
     op = await w.apply(doc)
     assert op["status"] == "succeeded", op
     assert w.remote_head() == agent_sha == op["result"]["new_head"]
     assert [(x["method"], x["status"]) for x in w.receipts(op["operation_id"])] == [("fast_forward", "delivered")]
-    # Exactly the previewed commits entered: Ted's H and the agent's A, no connector commit.
+    # Exactly the previewed commits entered: the user's H and the agent's A, no connector commit.
     assert git(w.remote, "rev-list", f"{w.f1}..{agent_sha}").split() == [agent_sha, w.H]
 
 
@@ -331,9 +331,9 @@ async def test_c01_pick_copies_only_selected_commits_with_the_source_relation(wo
 async def test_c01_area_is_bare_marked_and_inside_the_managed_root(world):
     w = world
     cp = await w.checkpoint()
-    other = w.tmp / "ted2"
+    other = w.tmp / "other-operator"
     git(w.tmp, "clone", "-q", "-b", "feature-1", str(w.remote), str(other))
-    (other / "a.txt").write_text("Ted edits feature-1 here\n")
+    (other / "a.txt").write_text("Operator edits feature-1 here\n")
     before = tree_digest(other)
     doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
     op = await w.apply(doc)
@@ -360,22 +360,22 @@ async def test_c01_one_operation_path_for_http_mcp_cli(world):
     assert integration.apply_request(doc) == params  # what `batc integrate apply` and the Dashboard send
     assert cli.integrate_sources(["checkpoint:" + cp["checkpoint_id"], "branch:x"], ["2=" + w.f1]) == [
         sources[0], {"kind": "branch", "id": "x", "mode": "pick", "commits": [w.f1]}]
-    first = await w.d.call_api("op_submit", {**params, "entry": "cli"}, TED)
-    again = await w.d.call_api("op_submit", {**params, "entry": "mcp"}, TED)
+    first = await w.d.call_api("op_submit", {**params, "entry": "cli"}, OPERATOR)
+    again = await w.d.call_api("op_submit", {**params, "entry": "mcp"}, OPERATOR)
     assert first["created"] and not again["created"]
     assert again["operation"]["operation_id"] == first["operation"]["operation_id"]
     op = await w.settle(first["operation"]["operation_id"])
     assert op["status"] == "succeeded", op
-    rpc = await w.d.call_api("integration_get", {"operation_id": op["operation_id"]}, TED)
+    rpc = await w.d.call_api("integration_get", {"operation_id": op["operation_id"]}, OPERATOR)
     assert rpc["receipts"] == integration.integration_get(w.d.ops, op["operation_id"])["receipts"]
     assert rpc["preview"]["preview_id"] == doc["preview_id"]
-    listed = await w.d.call_api("integrations_list", {"repository": "o/r", "pull_number": 1}, TED)
+    listed = await w.d.call_api("integrations_list", {"repository": "o/r", "pull_number": 1}, OPERATOR)
     assert [x["operation_id"] for x in listed["integrations"]] == [op["operation_id"]]
-    caps = await w.d.call_api("api_capabilities", {}, TED)
+    caps = await w.d.call_api("api_capabilities", {}, OPERATOR)
     assert caps["features"]["integration"] == [{"repository": "o/r", "hosts": ["h1"]}]
-    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
+    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, OPERATOR)
     assert card["pull_request"]["integration"]["allowed"] and card["pull_request"]["integration"]["last_delivered"]
-    cands = await w.d.call_api("integration_candidates", {"host": "h1"}, TED)
+    cands = await w.d.call_api("integration_candidates", {"host": "h1"}, OPERATOR)
     assert cands["checkpoints"][0]["delivered_to"][0]["operation_id"] == op["operation_id"]
 
 
@@ -429,12 +429,12 @@ async def test_c02_apply_cannot_change_sources_or_target(world):
     before = len(w.d.ops.list()["operations"])
     for n, (t, p, c, code) in enumerate(cases):
         with pytest.raises(OperationError) as e:
-            w.d.ops.create(TED, action="integration.apply", target=t, params=p, preconditions=c,
+            w.d.ops.create(OPERATOR, action="integration.apply", target=t, params=p, preconditions=c,
                            idempotency_key=f"bad-{n}")
         assert e.value.code == code, (n, e.value)
     w.d.journal.db.execute("UPDATE integration_previews SET expires_at=0")
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="integration.apply", target=target, params={"preview_id": doc["preview_id"]},
+        w.d.ops.create(OPERATOR, action="integration.apply", target=target, params={"preview_id": doc["preview_id"]},
                        preconditions=pre, idempotency_key="bad-expired")
     assert e.value.code == "PREVIEW_EXPIRED"
     # A source already in the PR: the preview is blocked, and apply refuses it.
@@ -442,7 +442,7 @@ async def test_c02_apply_cannot_change_sources_or_target(world):
     blocked = await w.preview([{"kind": "checkpoint", "id": same["checkpoint_id"]}])
     assert [b["code"] for b in blocked["blocking"]] == ["NOTHING_TO_INTEGRATE"] and not blocked["ready"]
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="integration.apply", target=target, params={"preview_id": blocked["preview_id"]},
+        w.d.ops.create(OPERATOR, action="integration.apply", target=target, params={"preview_id": blocked["preview_id"]},
                        preconditions={"expected_head_sha": blocked["target"]["head_sha"],
                                       "preview_digest": blocked["digest"]}, idempotency_key="bad-blocked")
     assert e.value.code == "PREVIEW_BLOCKED"
@@ -465,11 +465,11 @@ async def test_c02_remote_moves_just_before_push_is_needs_attention_and_never_ov
     theirs = w.remote_head()
     assert theirs != w.f1 and git(w.remote, "log", "-1", "--format=%s", theirs) == "race"
     w.runner.inject.clear()
-    w.d.ops.resume(TED, op["operation_id"])  # the remote is not back at base: still moved, still not pushed
+    w.d.ops.resume(OPERATOR, op["operation_id"])  # the remote is not back at base: still moved, still not pushed
     again = await w.settle(op["operation_id"])
     assert again["error_code"] == "REMOTE_MOVED" and w.remote_head() == theirs
     assert git(w.remote, "log", "-1", "--format=%s", w.remote_head()) == "race"
-    w.d.ops.cancel(TED, op["operation_id"])
+    w.d.ops.cancel(OPERATOR, op["operation_id"])
     assert [r["effective_status"] for r in w.receipts(op["operation_id"])] == ["not_delivered"]
     for script in w.runner.of("push"):
         pushes = [line for line in script.splitlines() if re.search(r"\bpush\b.*--porcelain", line)]
@@ -489,7 +489,7 @@ async def test_c02_rewind_just_before_push_is_flagged_and_not_reverted(world):
     assert op["external_refs"]["push_old_sha"] == w.main
     assert [r["status"] for r in w.receipts(op["operation_id"])] == ["delivered"]
     w.runner.inject.clear()
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     done = await w.settle(op["operation_id"])
     assert done["status"] == "succeeded" and "PUSHED_ON_OTHER_BASE" in done["result"]["warnings"]
     assert w.runner.ran["push"] == 1
@@ -528,10 +528,10 @@ async def test_c02_one_update_per_pr_and_merge_exclusion(world):
     target = {"host": "h1", "repository": "o/r", "pull_number": 1}
     assert [b["code"] for b in clean["blocking"]] == ["INTEGRATION_IN_PROGRESS"]
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="github.pr.merge", target={"repository": "o/r", "pull_number": 1},
+        w.d.ops.create(OPERATOR, action="github.pr.merge", target={"repository": "o/r", "pull_number": 1},
                        params={"method": "squash"}, preconditions={"expected_head_sha": w.f1}, idempotency_key="m")
     assert e.value.code == "INTEGRATION_IN_PROGRESS" and op["operation_id"] in e.value.message
-    w.d.ops.cancel(TED, op["operation_id"])
+    w.d.ops.cancel(OPERATOR, op["operation_id"])
     clean = await w.preview([{"kind": "checkpoint_run", "id": r1}])
     assert clean["ready"], clean["blocking"]
     w.gh.merge_mode = "enqueue"
@@ -540,7 +540,7 @@ async def test_c02_one_update_per_pr_and_merge_exclusion(world):
     merge = await w.run(envelope["action"], envelope["target"], envelope["params"], envelope["preconditions"])
     assert merge["status"] not in {"succeeded", "failed", "cancelled"}, merge
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="integration.apply", target=target, params={"preview_id": clean["preview_id"]},
+        w.d.ops.create(OPERATOR, action="integration.apply", target=target, params={"preview_id": clean["preview_id"]},
                        preconditions={"expected_head_sha": clean["target"]["head_sha"],
                                       "preview_digest": clean["digest"]}, idempotency_key="after-merge")
     assert e.value.code == "MERGE_IN_PROGRESS"
@@ -564,7 +564,7 @@ async def test_c03_second_source_conflict_keeps_the_first_receipt_and_pushes_not
     assert (rec[1]["status"], rec[1]["conflict_files"]) == ("conflict", ["a.txt"])
     assert op["external_refs"]["conflict"] == {"seq": 2, "base": a1, "files": ["a.txt"]}
     assert w.remote_head() == w.f1 and w.runner.ran["push"] == 0 and tree_digest(w.human) == human
-    w.d.ops.resume(TED, op["operation_id"])  # a replayed conflict stays a conflict; source 1 is not composed again
+    w.d.ops.resume(OPERATOR, op["operation_id"])  # a replayed conflict stays a conflict; source 1 is not composed again
     again = await w.settle(op["operation_id"])
     assert again["error_code"] == "INTEGRATION_CONFLICT" and w.runner.ran["compose"] == 2
 
@@ -626,7 +626,7 @@ async def test_c03_unreadable_remote_keeps_the_push_uncertain(world):
     assert op["status"] == "needs_attention" and op["error_code"] == "UNCERTAIN_UNRESOLVED", op
     assert w.runner.ran["push"] == 1  # never sent again while unproven
     away.rename(w.remote)
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     done = await w.settle(op["operation_id"])
     assert done["status"] == "succeeded" and w.runner.ran["push"] == 1
 
@@ -639,7 +639,7 @@ async def test_c03_restart_mid_compose_recomposes_identically(world):
     doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}, {"kind": "checkpoint_run", "id": r1}],
                           expected=other)
     w.runner.lose_nth["compose"] = 2  # source 2 is composed, then the reply is lost
-    op, _ = w.d.ops.create(TED, action="integration.apply", target={"host": "h1", "repository": "o/r",
+    op, _ = w.d.ops.create(OPERATOR, action="integration.apply", target={"host": "h1", "repository": "o/r",
                                                                      "pull_number": 1},
                            params={"preview_id": doc["preview_id"]},
                            preconditions={"expected_head_sha": other, "preview_digest": doc["digest"]},
@@ -813,7 +813,7 @@ async def test_forbidden_targets_and_admission(world, mock):
                                                                             "INVALID_TARGET"),
                              ({**target, "repository": "o/other"}, "REPO_NOT_CONFIGURED")]:
         with pytest.raises(OperationError) as e:
-            w.d.ops.create(TED, action="integration.preview", target=bad_target, params={"sources": src},
+            w.d.ops.create(OPERATOR, action="integration.preview", target=bad_target, params={"sources": src},
                            idempotency_key=f"t-{code}")
         assert e.value.code == code
     for sources, code in [([], "INVALID_PARAMS"), ([src[0], src[0]], "INVALID_PARAMS"),
@@ -822,7 +822,7 @@ async def test_forbidden_targets_and_admission(world, mock):
                           ([{**src[0], "commits": [w.H]}], "INVALID_PARAMS"),
                           ([{**src[0], "mode": "pick", "commits": ["x"]}], "INVALID_PARAMS")]:
         with pytest.raises(OperationError) as e:
-            w.d.ops.create(TED, action="integration.preview", target=target, params={"sources": sources},
+            w.d.ops.create(OPERATOR, action="integration.preview", target=target, params={"sources": sources},
                            idempotency_key=f"s-{json.dumps(sources)}")
         assert e.value.code == code, (sources, e.value)
     cfg = w.config()
@@ -839,7 +839,7 @@ async def test_forbidden_targets_and_admission(world, mock):
     off.ops.context["git_runner"] = w.runner
     w.daemons.append(off)
     with pytest.raises(OperationError) as e:
-        off.ops.create(TED, action="integration.preview", target=target, params={"sources": src}, idempotency_key="o")
+        off.ops.create(OPERATOR, action="integration.preview", target=target, params={"sources": src}, idempotency_key="o")
     assert e.value.code == "TIER_DISABLED" and cfg.github.repos["o/r"].integrate
 
 
@@ -948,7 +948,7 @@ async def test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_t
                                                  entries=entries)["api_access"] == "managed"
     assert git(r["worktree_path"], "rev-parse", "HEAD") == a1  # the PR side, with the source merged in
     resolution = resolve_in(r["worktree_path"])
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     done = await w.settle(op["operation_id"])
     assert done["status"] == "succeeded", done
     assert w.runner.ran["compose"] == 2 and w.runner.ran["push"] == 1  # nothing composed again
@@ -984,7 +984,7 @@ async def test_handoff_start_readback_refuses_identity_and_terminal_mismatch(wor
         return result
 
     monkeypatch.setattr(client, "invoke", lost_ack)
-    op, _ = w.d.ops.create(TED, action="integration.handoff", target={"operation_id": conflict["operation_id"]},
+    op, _ = w.d.ops.create(OPERATOR, action="integration.handoff", target={"operation_id": conflict["operation_id"]},
                           params={}, idempotency_key="repair-readback")
     await w.d.ops.drain(timeout=60)
     op = w.d.ops.get(op["operation_id"])
@@ -1011,7 +1011,7 @@ async def test_handoff_start_readback_refuses_identity_and_terminal_mismatch(wor
         w.mock.metas[sid]["cwd"] = row["cwd"]
         w.mock.metas[sid].update(record["options"])
         reads = w.mock.channels().count("claude:get-session-meta")
-        w.d.ops.resume(TED, op["operation_id"])
+        w.d.ops.resume(OPERATOR, op["operation_id"])
         still_refused = await w.settle(op["operation_id"])
         assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
         assert w.mock.channels().count("claude:get-session-meta") == reads
@@ -1065,7 +1065,7 @@ async def test_c03_resume_waits_while_the_resolver_streams(world):
     h = await w.run("integration.handoff", {"operation_id": op["operation_id"]})
     sid, wt = h["result"]["session_id"], h["result"]["worktree_path"]
     w.mock.metas[sid]["isStreaming"] = True
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     waiting = await w.settle(op["operation_id"], rounds=2)
     assert waiting["status"] == "waiting_external", waiting
     assert not [s for s in waiting["steps"] if s["name"].startswith("resolve.")]
@@ -1082,7 +1082,7 @@ async def test_c03_invalid_or_missing_resolution_is_refused(world):
     wt = h["result"]["worktree_path"]
 
     async def resume() -> dict:
-        w.d.ops.resume(TED, op["operation_id"])
+        w.d.ops.resume(OPERATOR, op["operation_id"])
         return await w.settle(op["operation_id"])
 
     assert (await resume())["error_code"] == "RESOLUTION_INCOMPLETE"  # nothing committed yet
@@ -1115,19 +1115,19 @@ async def test_handoff_admission(world):
     assert e.value.code == "FORBIDDEN"
     cp_op = w.d.ops.list(action="checkpoint.create")["operations"][0]["operation_id"]
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="integration.handoff", target={"operation_id": cp_op}, idempotency_key="h1")
+        w.d.ops.create(OPERATOR, action="integration.handoff", target={"operation_id": cp_op}, idempotency_key="h1")
     assert e.value.code == "NOT_AN_INTEGRATION"
     first = await w.run("integration.handoff", {"operation_id": op["operation_id"]}, key="h2")
     assert first["status"] == "succeeded"
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="integration.handoff", target={"operation_id": op["operation_id"]},
+        w.d.ops.create(OPERATOR, action="integration.handoff", target={"operation_id": op["operation_id"]},
                        idempotency_key="h3")
     assert e.value.code == "HANDOFF_EXISTS"
     resolve_in(first["result"]["worktree_path"])
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     assert (await w.settle(op["operation_id"]))["status"] == "succeeded"
     with pytest.raises(OperationError) as e:
-        w.d.ops.create(TED, action="integration.handoff", target={"operation_id": op["operation_id"]},
+        w.d.ops.create(OPERATOR, action="integration.handoff", target={"operation_id": op["operation_id"]},
                        idempotency_key="h4")
     assert e.value.code == "NOT_IN_CONFLICT"
 
@@ -1139,7 +1139,7 @@ async def test_c03_a_pinned_resolution_is_never_read_again(world):
     wt = h["result"]["worktree_path"]
     resolution = resolve_in(wt)
     w.runner.lose_before.add("push")  # stops right after the resolution was pinned
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     await settle_operations(w.d.ops)
     assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
     commit(wt, "late.txt", "the agent kept going\n", "after the pin")  # never picked up
@@ -1155,7 +1155,7 @@ async def test_c03_a_resolution_that_is_not_a_merge_of_both_sides_is_refused(wor
     wt = h["result"]["worktree_path"]
     git(wt, "merge", "--abort")
     commit(wt, "a.txt", "one\ntwo\nmine\nyours\n", "just my side, rewritten")  # parents: (a1) only
-    w.d.ops.resume(TED, op["operation_id"])
+    w.d.ops.resume(OPERATOR, op["operation_id"])
     out = await w.settle(op["operation_id"])
     assert out["error_code"] == "RESOLUTION_INVALID" and w.remote_head() == w.f1
 
@@ -1166,14 +1166,14 @@ async def test_a_cancel_while_the_push_is_unproven_never_sends_it(world):
     cp = await w.checkpoint()
     doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
     w.runner.lose_before.add("push")  # the reply is lost before git push ran
-    op, _ = w.d.ops.create(TED, action="integration.apply", target={"host": "h1", "repository": "o/r",
+    op, _ = w.d.ops.create(OPERATOR, action="integration.apply", target={"host": "h1", "repository": "o/r",
                                                                      "pull_number": 1},
                            params={"preview_id": doc["preview_id"]},
                            preconditions={"expected_head_sha": doc["target"]["head_sha"],
                                           "preview_digest": doc["digest"]}, idempotency_key="cancel-me")
     await settle_operations(w.d.ops)
     assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
-    w.d.ops.cancel(TED, op["operation_id"])
+    w.d.ops.cancel(OPERATOR, op["operation_id"])
     done = await w.settle(op["operation_id"])
     assert done["status"] == "cancelled", done
     assert w.runner.ran["push"] == 0 and w.remote_head() == w.f1
@@ -1196,7 +1196,7 @@ async def test_a_push_still_running_on_the_host_is_waited_for(world):
     cp = await w.checkpoint()
     doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
     w.runner.lose_before.add("push")
-    op, _ = w.d.ops.create(TED, action="integration.apply", target={"host": "h1", "repository": "o/r",
+    op, _ = w.d.ops.create(OPERATOR, action="integration.apply", target={"host": "h1", "repository": "o/r",
                                                                      "pull_number": 1},
                            params={"preview_id": doc["preview_id"]},
                            preconditions={"expected_head_sha": doc["target"]["head_sha"],
@@ -1236,7 +1236,7 @@ async def test_a_cancelled_apply_with_an_unproven_push_reports_unknown(world):
     w.runner.lose_after.add("push")
     op = await w.apply(doc)
     assert op["error_code"] == "UNCERTAIN_UNRESOLVED", op
-    w.d.ops.cancel(TED, op["operation_id"])
+    w.d.ops.cancel(OPERATOR, op["operation_id"])
     away.rename(w.remote)
     assert [r["effective_status"] for r in w.receipts(op["operation_id"])] == ["unknown"]
 
@@ -1282,11 +1282,11 @@ async def test_only_hosts_that_can_integrate_are_offered(world):
         def available(self, host: str) -> bool:
             return False
 
-    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
+    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, OPERATOR)
     assert card["pull_request"]["integration"]["hosts"] == ["h1"]
     w.d.ops.context["git_runner"] = NoAlias()
-    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
-    caps = await w.d.call_api("api_capabilities", {}, TED)
+    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, OPERATOR)
+    caps = await w.d.call_api("api_capabilities", {}, OPERATOR)
     assert card["pull_request"]["integration"]["hosts"] == [] and caps["features"]["integration"][0]["hosts"] == []
 
 
@@ -1331,7 +1331,7 @@ async def test_repair_preframe_cancellation_restarts_unsent_reserved_session_onc
         monkeypatch.setattr(fleet.client('h1'), 'invoke', after_frame)
     starts_before = w.mock.channels().count('claude:start-session')
     sends_before = w.mock.channels().count('claude:send-message')
-    op, _ = w.d.ops.create(TED, action='integration.handoff', target={'operation_id': conflict['operation_id']},
+    op, _ = w.d.ops.create(OPERATOR, action='integration.handoff', target={'operation_id': conflict['operation_id']},
                            params={}, idempotency_key='preframe-repair-cancel')
     await w.d.ops.run_due()
     pending = w.d.ops._active[op['operation_id']]

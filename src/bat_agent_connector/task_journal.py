@@ -52,7 +52,7 @@ _CONTEXT_REF_KEYS = {"attachments", "previous_message_id", "plan", "commit"}
 
 
 def _context_refs(refs: dict | None) -> dict | None:
-    """References that came with Ted's words: stored as data, never interpreted."""
+    """References that came with the user's words: stored as data, never interpreted."""
     if refs is None:
         return None
     if not isinstance(refs, dict) or set(refs) - _CONTEXT_REF_KEYS:
@@ -1087,7 +1087,7 @@ class Journal:
             self.db.execute("UPDATE tasks SET paused=0,control_version=control_version+1,updated_at=? WHERE task_id=?",
                             (now, task_id))
             if old["state"] == "verifying":
-                # Ted's resume restarts the verification clocks; paused time is not stall time.
+                # The user's resume restarts the verification clocks; paused time is not stall time.
                 self.db.execute("UPDATE tasks SET verifying_started_at=?,progress_at=? WHERE task_id=?",
                                 (now, now, task_id))
             self._event(task_id, "resumed")
@@ -1095,7 +1095,7 @@ class Journal:
 
     def ted_action(self, task_id: str, *, action: str, source_message_id: str):
         if not action or not source_message_id:
-            raise ValueError("Ted action requires provenance")
+            raise ValueError("User action requires provenance")
         with self.tx():
             cur = self.db.execute("""INSERT OR IGNORE INTO ted_actions(task_id,source_message_id,action,created_at)
                 VALUES(?,?,?,?)""", (task_id, source_message_id, action, time.time()))
@@ -1116,7 +1116,7 @@ class Journal:
             (task_id, kind, candidate_commit)).fetchone() is not None
 
     def record_continuation(self, task_id: str, key: str, words: str) -> bool:
-        """Attach Ted's steering to an existing task. Same session, no new task, no re-plan."""
+        """Attach the user's steering to an existing task. Same session, no new task, no re-plan."""
         self.get(task_id)
         if not isinstance(key, str) or not key.strip() or len(key) > 256:
             raise ValueError("invalid continuation key")
@@ -1398,7 +1398,7 @@ class Journal:
     def _milestone_reason(self, task: dict, event_id: int, body: dict, to: str) -> str | None:
         if isinstance(body.get("reason"), str) and body["reason"].strip():
             return body["reason"]
-        # The last event before this transition may be an explicit Ted request.
+        # The last event before this transition may be an explicit user request.
         row = self.db.execute("""SELECT kind,body FROM events WHERE task_id=? AND event_id<?
             AND (kind='ted_requested' OR (json_valid(body) AND json_extract(body,'$.to') IS NOT NULL))
             ORDER BY event_id DESC LIMIT 1""", (task["task_id"], event_id)).fetchone()
@@ -1474,7 +1474,7 @@ class Journal:
             elif kind == "done":
                 summary = "Done" + (f": verified commit {commit[:10]}" if commit else "")
             else:
-                summary = ("Needs Ted" if kind == "needs_ted" else "Failed") + (f": {detail}" if detail else "")
+                summary = ("Needs user input" if kind == "needs_ted" else "Failed") + (f": {detail}" if detail else "")
             title = next((line.strip() for line in task["original_words"].splitlines() if line.strip()), "")
             result["events"].append({
                 "cursor": row["event_id"], "task_id": task["task_id"], "project": task["project"],

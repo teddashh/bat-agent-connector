@@ -11,7 +11,29 @@ from types import SimpleNamespace
 import pytest
 
 from bat_agent_connector import task_handoff
+from bat_agent_connector.task_core import initial_prompt, reviewer_prompt
 from bat_agent_connector.task_journal import Journal
+
+
+def test_generic_prompts_preserve_names_and_whitespace_in_original_words(tmp_path):
+    words = "  Ted asked Alex: keep both names and `code`.\n原話：不要改寫。\t\n"
+    journal = Journal(tmp_path / "tasks.db")
+    try:
+        task = journal.submit(project="p", host="h1", workspace="w", original_words=words,
+                              idempotency_key="verbatim-user-request")
+        prompts = [initial_prompt(task), reviewer_prompt(task, "a" * 40, "b" * 40),
+                   task_handoff.ledger_summary(journal, task["task_id"])]
+        for prompt in prompts:
+            assert prompt.count(words) == 1
+            instructions = prompt.replace(words, "")
+            assert "user's" in instructions
+            assert "Ted" not in instructions and "Alex" not in instructions
+        journal.change(task["task_id"], "needs_ted", fields={"result": "Ask Ted and Alex to choose."})
+        event = journal.milestones(0, 50)["events"][-1]
+        assert event["kind"] == "needs_ted"  # Existing storage/API state remains compatible.
+        assert event["summary"] == "Needs user input: Ask Ted and Alex to choose."
+    finally:
+        journal.close()
 
 
 def test_original_words_archive_permissions_content_hash_and_collision(tmp_path, monkeypatch):

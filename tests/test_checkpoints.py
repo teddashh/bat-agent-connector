@@ -31,7 +31,7 @@ from tests.conftest import make_config
 from tests.operation_helpers import settle_operations
 
 MANUAL = "sess-claude-0001"
-TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate", "start"}))
+OPERATOR = api_auth.Principal("operator-dashboard", frozenset({"observe", "operate", "start"}))
 ORIGIN = "https://github.example/o/r.git"
 
 
@@ -114,7 +114,7 @@ def bat_writes(mock, sid=None):
 
 
 async def run(d, action, target, params=None, key=None):
-    op, _ = d.ops.create(TED, action=action, target=target, params=params or {},
+    op, _ = d.ops.create(OPERATOR, action=action, target=target, params=params or {},
                          idempotency_key=key or f"{action}-{json.dumps(target, sort_keys=True)}-{params}")
     await settle_operations(d.ops)
     return d.ops.get(op["operation_id"])
@@ -146,7 +146,7 @@ async def test_checkpoint_continue_host_account_refusal_needs_attention_and_resu
                                         (op["operation_id"], "session.start")).fetchone()[0]
     sid = json.loads(request)["session_id"]
     daemon.fleet.confinement_runner = AccountRunner()
-    daemon.ops.resume(TED, op["operation_id"])
+    daemon.ops.resume(OPERATOR, op["operation_id"])
     await daemon.ops.drain(timeout=30)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
@@ -202,7 +202,7 @@ async def test_checkpoint_refuses_a_commit_the_source_does_not_have(daemon, mock
     op = await run(daemon, "checkpoint.create", {"host": "h1", "session_id": MANUAL}, {"commit": "e" * 40})
     assert op["status"] == "failed" and op["error_code"] == "COMMIT_NOT_FOUND"
     with pytest.raises(OperationError) as e:
-        daemon.ops.create(TED, action="checkpoint.create", target={"host": "h1", "session_id": "nope"},
+        daemon.ops.create(OPERATOR, action="checkpoint.create", target={"host": "h1", "session_id": "nope"},
                           idempotency_key="k-missing")
     assert e.value.code == "NOT_FOUND"
 
@@ -277,11 +277,11 @@ async def test_continue_refusals_happen_before_anything_is_recorded(daemon, mock
     for params, code in [({"instructions": " "}, "INVALID_PARAMS"),
                          ({"instructions": "x", "agent": "gpt"}, "INVALID_PARAMS")]:
         with pytest.raises(OperationError) as e:
-            daemon.ops.create(TED, action="checkpoint.continue", target=target, params=params,
+            daemon.ops.create(OPERATOR, action="checkpoint.continue", target=target, params=params,
                               idempotency_key=f"bad-{params}")
         assert e.value.code == code
     with pytest.raises(OperationError) as e:
-        daemon.ops.create(TED, action="checkpoint.continue", target={"checkpoint_id": "cp_" + "0" * 32},
+        daemon.ops.create(OPERATOR, action="checkpoint.continue", target={"checkpoint_id": "cp_" + "0" * 32},
                           params={"instructions": "x"}, idempotency_key="k-none")
     assert e.value.status == 404
     # Starting an agent is its own grant: an operate token (send, answer, interrupt) does not include it.
@@ -292,7 +292,7 @@ async def test_continue_refusals_happen_before_anything_is_recorded(daemon, mock
     assert e.value.status == 403
     daemon.ops.context["git_runner"] = None
     with pytest.raises(OperationError) as e:
-        daemon.ops.create(TED, action="checkpoint.continue", target=target, params={"instructions": "x"},
+        daemon.ops.create(OPERATOR, action="checkpoint.continue", target=target, params={"instructions": "x"},
                           idempotency_key="k-runner")
     assert e.value.code == "GIT_RUNNER_UNAVAILABLE"
     viewer = api_auth.Principal("viewer", frozenset({"observe"}))
@@ -453,7 +453,7 @@ async def test_checkpoint_start_readback_refuses_identity_and_terminal_mismatch(
         mock.metas[sid]["cwd"] = row["cwd"]
         mock.metas[sid].update(record["options"])
         reads = mock.channels().count("claude:get-session-meta")
-        daemon.ops.resume(TED, op["operation_id"])
+        daemon.ops.resume(OPERATOR, op["operation_id"])
         await daemon.ops.drain(timeout=60)
         still_refused = daemon.ops.get(op["operation_id"])
         assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
@@ -583,7 +583,7 @@ async def test_a_replay_after_the_agent_committed_does_not_recheck_the_moved_hea
 
 
 async def test_the_clone_never_keeps_a_local_or_credentialed_origin(daemon, mock, human):
-    git(human, "remote", "set-url", "origin", "https://ted:ghp_secret@github.example/o/r.git")
+    git(human, "remote", "set-url", "origin", "https://operator:ghp_secret@github.example/o/r.git")
     cp = await make_checkpoint(daemon)
     op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
     clone = op["external_refs"]["clone_path"]
@@ -637,7 +637,7 @@ def test_checkpoint_paths_are_fixed_names_inside_a_managed_root(tmp_path):
                                               "/srv/managed/app-1/.bat-worktrees/batc-cp-0123456789ab",
                                               "batc/cp-0123456789ab")
     for clone, path, branch in [
-            ("/home/ted/app", "/home/ted/app/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/home/operator/app", "/home/operator/app/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
             ("/srv/managed", "/srv/managed/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
             ("/srv/managed/a/b", "/srv/managed/a/b/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
             ("/srv/managed/app-1", "/srv/managed/app-1/x/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
@@ -646,7 +646,7 @@ def test_checkpoint_paths_are_fixed_names_inside_a_managed_root(tmp_path):
             resource_policy.check_checkpoint_worktree(hc, clone, path, branch)
     assert "checkpoint.continue" in resource_policy.BY_ACTION["checkpoint.managed_worktree"].entry_points
     assert checkpoints.target_clone(("/srv/managed",), "h1", "/srv/managed/app-1/.bat-worktrees/batc-cp-1")[1]
-    assert not checkpoints.target_clone(("/srv/managed",), "h1", "/home/ted/app")[1]
+    assert not checkpoints.target_clone(("/srv/managed",), "h1", "/home/operator/app")[1]
 
 
 async def test_bat_worktree_actions_never_touch_a_worktree_the_connector_made(daemon, mock, human):
@@ -715,7 +715,7 @@ async def test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session
 
     if stage == 'after':
         monkeypatch.setattr(client, 'invoke', after_frame)
-    op, _ = daemon.ops.create(TED, action='checkpoint.continue', target={'checkpoint_id': cp['checkpoint_id']},
+    op, _ = daemon.ops.create(OPERATOR, action='checkpoint.continue', target={'checkpoint_id': cp['checkpoint_id']},
                               params={'instructions': 'go'}, idempotency_key='preframe-checkpoint-cancel')
     await daemon.ops.run_due()
     pending = daemon.ops._active[op['operation_id']]

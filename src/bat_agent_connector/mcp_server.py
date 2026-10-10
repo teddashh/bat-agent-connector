@@ -614,7 +614,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             parent_task_id: str | None = None, continuation: bool = False,
             context_refs: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            """Queue Ted's exact words and return task_id immediately. Hermes must not rewrite or decompose them.
+            """Queue the user's exact words and return task_id immediately. Hermes must not rewrite or decompose them.
             interpretation is a non-authoritative archival note and never enters the coding prompt.
             discord_thread_id is an opaque origin/reply-to reference echoed as origin_thread_id in work_events.
             A follow-up may reuse the previous task's verified branch only when parent_task_id names it (or a

@@ -11,7 +11,7 @@ from bat_agent_connector import delivery, deployment, pr_delivery
 from bat_agent_connector import deployment_store as store
 from bat_agent_connector.operations import OperationError, OperationService
 from tests import test_delivery as fixtures
-from tests.test_delivery import HEAD, MERGED, TED, settle
+from tests.test_delivery import HEAD, MERGED, OPERATOR, settle
 
 gh = fixtures.gh
 make_daemon = fixtures.make_daemon
@@ -30,7 +30,7 @@ async def start(
 ):
     p = await deployment.preview(d.ops, name)
     return d.ops.create(
-        TED,
+        OPERATOR,
         action=action,
         target={"recipe": name},
         params=params or {"source_sha": sha},
@@ -262,7 +262,7 @@ async def test_issue32_combined_admission_requires_preview_base_on_recipe_ref(ma
     envelope = pr_delivery.merge_envelope(doc, recipe="prod")
     envelope["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
     with pytest.raises(OperationError) as e:
-        d.ops.create(TED, **envelope, idempotency_key="wrong-base")
+        d.ops.create(OPERATOR, **envelope, idempotency_key="wrong-base")
     assert e.value.code == "DEPLOY_SOURCE_NOT_ON_REF" and e.value.status == 422
     assert gh.count("PUT", "merge-async") == gh.count("POST", "dispatches") == 0
 
@@ -276,14 +276,14 @@ async def test_issue32_cancel_keeps_provider_slot_and_recipe_lock_until_terminal
         doc = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
         env = pr_delivery.merge_envelope(doc, recipe="prod")
         env["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
-        op = d.ops.create(TED, **env, idempotency_key="combined")[0]
+        op = d.ops.create(OPERATOR, **env, idempotency_key="combined")[0]
     else:
         source_on_main(gh)
         op = await start(d)
     w = await settle(d, op["operation_id"], rounds=1)
     assert w["status"] == "waiting_external"
     dep_id = w["external_refs"]["deployment_id"]
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] == dep_id
     with pytest.raises(OperationError) as e:
         await start(d, key="blocked")
@@ -411,7 +411,7 @@ async def test_d05_restart_and_cancel_keep_provider_slot_and_desired(make_daemon
     source_on_main(gh)
     op = await start(d)
     w = await settle(d, op["operation_id"], rounds=1)
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     fresh = OperationService(d.journal, actions=delivery.ACTIONS)
     fresh.context.update(d.ops.context)
     d.ops = fresh
@@ -433,7 +433,7 @@ async def test_d05_combined_selects_generation_then_binds_real_merge_sha(make_da
     doc = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
     e = pr_delivery.merge_envelope(doc, recipe="prod")
     e["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
-    op = d.ops.create(TED, **e, idempotency_key="combined")[0]
+    op = d.ops.create(OPERATOR, **e, idempotency_key="combined")[0]
     w = await settle(d, op["operation_id"], rounds=1)
     dep_id = w["external_refs"]["deployment_id"]
     assert deployment.status(d.ops, dep_id)["identity"] == {"source_pending_merge": True}
@@ -450,7 +450,7 @@ async def test_deploy_preview_required_and_missing_verifier_disable_writes_but_n
     d = make_daemon()
     with pytest.raises(OperationError) as e:
         d.ops.create(
-            TED,
+            OPERATOR,
             action="deployment.start",
             target={"recipe": "prod"},
             params={"source_sha": MERGED},
@@ -516,7 +516,7 @@ async def test_d05_current_survives_old_verification_that_arrives_after_new_reco
     d.ops.context["deployment_verifier"].response = {"waiting": "temporarily unavailable"}
     # Provider is terminal, but the old operation has no runtime proof yet.
     await settle(d, old["operation_id"], rounds=1)
-    d.ops.cancel(TED, old["operation_id"])
+    d.ops.cancel(OPERATOR, old["operation_id"])
     await reconcile_due(d.ops)
     gh.commits[NEW] = {"sha": NEW, "parents": [{"sha": MERGED}]}
     gh.branches["main"] = NEW
@@ -579,7 +579,7 @@ async def test_deploy_refused_read_after_dispatch_keeps_lock_and_resumes(make_da
         await start(d, key="blocked")
     assert e.value.code == "DEPLOY_IN_PROGRESS"
     completed(gh, rid)
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     assert (await settle(d, op["operation_id"]))["status"] == "succeeded"
     assert gh.count("POST", "dispatches") == 1
 
@@ -626,7 +626,7 @@ async def test_legacy_dispatched_operation_reads_original_run_and_never_dispatch
 
     ops = OperationService(d.journal, actions=[ActionDef("deployment.start", "deploy", "old", obsolete)])
     old = ops.create(
-        TED,
+        OPERATOR,
         action="deployment.start",
         target={"recipe": "prod"},
         params={"source_sha": MERGED},
@@ -662,7 +662,7 @@ async def test_legacy_undispatched_operation_stops_for_deployment_preview(make_d
 
     ops = OperationService(d.journal, actions=[ActionDef("deployment.start", "deploy", "old", obsolete)])
     old = ops.create(
-        TED,
+        OPERATOR,
         action="deployment.start",
         target={"recipe": "prod"},
         params={"source_sha": MERGED},
@@ -681,7 +681,7 @@ async def test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_fi
     source_on_main(gh)
     op = await start(d)
     w = await settle(d, op["operation_id"], rounds=1)
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     await reconcile_due(d.ops)
     assert (
         deployment.environment_status(d.ops, "prod")["slot_deployment_id"]

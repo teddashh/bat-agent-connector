@@ -242,7 +242,7 @@ async def test_a10_task_failover_records_missing_options_without_changing_engine
 
 
 async def test_failover_of_a_bat_session_is_refused_before_any_write(fleet_factory, mock):
-    sid = _add_wt_claude(mock, managed=False)  # Ted's own BAT worktree session
+    sid = _add_wt_claude(mock, managed=False)  # the user's own BAT worktree session
     f = fleet_factory(writes=True, orchestrate=True)
     for kwargs in ({"dry_run": True}, {"confirm": True}, {"confirm": True, "force": True}):
         with pytest.raises(ResourceReadOnly, match="MANUAL_READ_ONLY"):
@@ -360,7 +360,7 @@ async def test_confined_sessions_stay_confined_on_an_allow_all_host(fleet_factor
 
     mock.states[b["session_id"]] = {"isStreaming": False, "messages": [msg(0, "user", "task")],
                                     "pendingPermission": {"toolUseId": "tu9", "toolName": "Bash",
-                                                          "input": {"command": "rm -rf /home/ted/app"}}}
+                                                          "input": {"command": "rm -rf /home/operator/app"}}}
     with pytest.raises(WriteRefused, match="LEGACY_PERMISSION_RAISE_DISABLED"):
         await lifecycle.approve_pending(f, "h1", confirm=True)
     assert "claude:resolve-permission" not in mock.channels()
@@ -618,7 +618,7 @@ async def test_cleanup_never_merges_into_a_human_checkout(fleet_factory, mock, m
 
 
 async def test_cleanup_keeps_bat_sessions_and_legacy_boundaries(fleet_factory, mock):
-    # a legacy registry: a failover successor of Ted's BAT session, plus a connector session in his checkout
+    # a legacy registry: a failover successor of the user's BAT session, plus a connector session in his checkout
     sid = _add_wt_claude(mock, managed=False)
     adopt("succ-0001", cwd="/srv/demo/.bat-worktrees/abc", worktree_path="/srv/demo/.bat-worktrees/abc",
           origin_cwd="/srv/demo", failover_of=sid, shares_worktree_with=sid, handoff_status="sent")

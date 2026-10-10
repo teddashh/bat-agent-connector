@@ -10,7 +10,7 @@ from bat_agent_connector import delivery, deployment
 from bat_agent_connector import deployment_store as store
 from bat_agent_connector.operations import ActionDef, OperationError, OperationService
 from tests import test_delivery as fixtures
-from tests.test_delivery import HEAD, MERGED, TED, settle
+from tests.test_delivery import HEAD, MERGED, OPERATOR, settle
 from tests.test_deployments import completed, deployed, reconcile_due, source_on_main, start
 
 gh = fixtures.gh
@@ -22,7 +22,7 @@ def legacy_operation(d, *, status="cancelled", error=None, dispatch=False, merge
         return {}
     action = "delivery.merge_and_deploy" if merge else "deployment.start"
     old = OperationService(d.journal, actions=[ActionDef(action, "deploy", "legacy", obsolete)]).create(
-        TED, action=action, target={"recipe": "prod", "repository": "o/r", "pull_number": 7},
+        OPERATOR, action=action, target={"recipe": "prod", "repository": "o/r", "pull_number": 7},
         params={"source_sha": MERGED}, preconditions={"expected_head_sha": HEAD}, idempotency_key="legacy")[0]
     d.journal.db.execute("UPDATE operations SET status=?,error_code=?,result=?,external_refs=? WHERE operation_id=?",
         (status, error, json.dumps(result or {}), json.dumps({"deploy_run_id": run} if run else {}), old["operation_id"]))
@@ -70,7 +70,7 @@ async def test_legacy_run_blocks_alias_of_real_environment_until_provider_termin
     preview = await deployment.preview(d.ops, "alias")
     action = next(a for a in delivery.ACTIONS if a.name == "deployment.start")
     unguarded = OperationService(d.journal, actions=[replace(action, admit=None)])
-    pending = unguarded.create(TED, action="deployment.start", target={"recipe": "alias"},
+    pending = unguarded.create(OPERATOR, action="deployment.start", target={"recipe": "alias"},
         params={"source_sha": MERGED}, preconditions=preview["preconditions"], idempotency_key="previously-admitted")[0]
     waiting = await settle(d, pending["operation_id"], rounds=1)
     assert waiting["status"] == "waiting_external" and "waiting_order" in waiting["status_reason"]
@@ -101,10 +101,10 @@ async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make
         doc = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
         envelope = pr_delivery.merge_envelope(doc, recipe="prod")
         envelope["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
-        op = d.ops.create(TED, **envelope, idempotency_key="combined")[0]
+        op = d.ops.create(OPERATOR, **envelope, idempotency_key="combined")[0]
         waiting = await settle(d, op["operation_id"], rounds=1)
         dep_id = waiting["external_refs"]["deployment_id"]
-        d.ops.cancel(TED, op["operation_id"])
+        d.ops.cancel(OPERATOR, op["operation_id"])
     writes = gh.count("PUT", "merge-async")
     await reconcile_due(d.ops)
     assert not deployment.get(d.ops, dep_id)["provider_terminal"]
@@ -170,7 +170,7 @@ async def test_reconcile_budget_skips_twenty_settled_rows_and_polls_current_once
         return {}
     old_ops = OperationService(d.journal, actions=[ActionDef("deployment.start", "deploy", "fixture", obsolete)])
     for n in range(20):
-        old = old_ops.create(TED, action="deployment.start", target={"recipe": "prod"}, idempotency_key=f"history-{n}")[0]
+        old = old_ops.create(OPERATOR, action="deployment.start", target={"recipe": "prod"}, idempotency_key=f"history-{n}")[0]
         d.ops.db.execute("UPDATE operations SET status='succeeded' WHERE operation_id=?", (old["operation_id"],))
         row = {**template, "deployment_id": "dep_" + old["operation_id"][3:], "operation_id": old["operation_id"],
                "generation": -n, "run_id": 9000 + n}
@@ -205,7 +205,7 @@ async def test_lost_dispatch_locate_is_throttled_across_restart_and_filters_save
     op = await start(d)
     waiting = await settle(d, op["operation_id"])
     assert waiting["status"] == "needs_attention"
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     dep = store.deployment(d.ops.db, operation_id=op["operation_id"])
     assert dep["dispatch_sent_at"] and not dep["run_id"]
     for _ in range(250):
@@ -276,7 +276,7 @@ async def test_stopped_provider_cadence_bounds_hour_and_resets_on_state_change(m
     dep_id, rid = waiting["external_refs"]["deployment_id"], waiting["external_refs"]["deploy_run_id"]
     completed(gh, rid)
     gh.pending_deployments[rid] = [{"environment": {"name": "production"}}]
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     clock = [1000.0]
     monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
     gh.requests.clear()
@@ -310,7 +310,7 @@ async def test_reconcile_success_clears_error_once_without_unchanged_version_wri
     source_on_main(gh)
     op = await start(d)
     waiting = await settle(d, op["operation_id"], rounds=1)
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     dep_id, rid = waiting["external_refs"]["deployment_id"], waiting["external_refs"]["deploy_run_id"]
     clock = [1000.0]
     monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
@@ -334,7 +334,7 @@ async def test_reconcile_bad_row_logs_and_continues_without_repeated_version_wri
     a, b = await start(d), await start(d, name="staging", key="staging")
     wa, wb = await settle(d, a["operation_id"], rounds=1), await settle(d, b["operation_id"], rounds=1)
     for op in (a, b):
-        d.ops.cancel(TED, op["operation_id"])
+        d.ops.cancel(OPERATOR, op["operation_id"])
     bad = wa["external_refs"]["deployment_id"]
     original = deployment.observe
     async def observe(ops, dep, *args, **kwargs):

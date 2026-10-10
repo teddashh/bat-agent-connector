@@ -597,7 +597,7 @@ class TaskDaemon:
             if params.get("actor", "service") not in {"service", "ted"}:
                 raise ValueError("invalid actor")
             if params.get("actor") == "ted" and not params.get("source_message_id"):
-                raise ValueError("Ted action requires source_message_id")
+                raise ValueError("User action requires source_message_id")
             def pause_effect():
                 task_control.check_binding(_ctx)
                 task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.effective_preconditions)
@@ -625,7 +625,7 @@ class TaskDaemon:
             if params.get("actor", "service") not in {"service", "ted"}:
                 raise ValueError("invalid actor")
             if params.get("actor") == "ted" and not params.get("source_message_id"):
-                raise ValueError("Ted action requires source_message_id")
+                raise ValueError("User action requires source_message_id")
             def resume_effect():
                 task_control.check_binding(_ctx)
                 task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.effective_preconditions)
