@@ -757,11 +757,11 @@ def check_artifact_storage(path) -> None:
     from pathlib import Path
 
     p = Path(path)
-    if not p.is_absolute() or ".." in p.parts or p == Path("/"):
+    if not p.is_absolute() or ".." in p.parts or p == Path(p.anchor):
         raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store must be a real absolute directory")
     for component in (p, *p.parents):
-        if component.is_symlink():
-            raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store may not contain symlinks")
+        if component.is_symlink() or (hasattr(component, "is_junction") and component.is_junction()):
+            raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store may not contain symlinks or junctions")
 
 
 def check_artifact_destination(hc: HostConfig, clone: str, worktree: str, branch: str,
