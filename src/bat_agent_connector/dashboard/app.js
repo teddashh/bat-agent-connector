@@ -186,7 +186,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 					else expanded.add(id);
 					persist();
 					render();
-					if (expanded.has(id) && !projects.has(id)) refresh().catch(() => {});
+					if (expanded.has(id)) refresh().catch(() => {});
 				}
 			}, open ? "▾" : "▸"), link(`#/project/${encodeURIComponent(id)}`, project.name), project.counts?.pending ? h("span", { class: "workspace-tree-state" }, t("workspace_needs_you")) : null), h("ul", { hidden: !open }, ...children, ...items, ...work.map((item) => h("li", {}, workLink(id, item))), !data ? h("li", { class: "muted workspace-tree-empty" }, t("workspace_expand_load")) : !children.length && !items.length && !work.length ? h("li", { class: "muted workspace-tree-empty" }, t("workspace_no_work")) : null))];
 		});
@@ -225,7 +225,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 					}
 				};
 				walk(roots);
-				for (const id of projects.keys()) if (!ids.has(id)) projects.delete(id);
+				for (const id of projects.keys()) if (!ids.has(id) || !expanded.has(id)) projects.delete(id);
 				for (const id of expanded) if (ids.has(id)) {
 					const detail = await api("GET", `/projects/${encodeURIComponent(id)}`);
 					alive();

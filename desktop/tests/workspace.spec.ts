@@ -42,6 +42,17 @@ for (const native of [false,true]) {
     await expect(page.locator('#main')).toContainText('This work is no longer');await expect(page.locator('.conversation')).toHaveCount(0);
     expect(f.data.posts).toEqual([]);
   });
+  test(`${native?'IPC':'HTTP'} tree collapse persists and reopening reads current work`,async({page})=>{
+    const f=workspaceFixture();await mountWorkspace(page,native,f);await page.goto('/dashboard/#/home');
+    await page.getByRole('button',{name:'Collapse Documentation search',exact:true}).click();
+    await page.reload();const expand=page.getByRole('button',{name:'Expand Documentation search',exact:true});
+    await expect(expand).toHaveAttribute('aria-expanded','false');
+    f.data.work.title='Renamed work';await expand.click();
+    const link=page.locator('.workspace-nav').getByRole('link',{name:/Renamed work/});await expect(link).toBeVisible();
+    await link.focus();f.data.events.push({seq:1,resource_type:'session',resource_id:'demo/search-results',kind:'session.updated'});
+    await expect.poll(()=>f.data.after,{timeout:10000}).toBe(1);await expect(link).toBeFocused();
+    expect(f.data.posts).toEqual([]);
+  });
   test(`${native?'IPC':'HTTP'} unknown and manual work remain read only`,async({page})=>{
     const f=workspaceFixture(); f.data.session.api_access='read_only'; f.data.session.provenance='manual';
     await mountWorkspace(page,native,f); await page.goto('/dashboard/'+workspaceRoute);
@@ -55,5 +66,7 @@ for(const locale of ['en-US','zh-TW']) for(const width of [390,768,1440]) test(`
   await page.goto('/dashboard/'+workspaceRoute);await expect(page.locator('.conversation .msg')).toHaveCount(2);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await page.screenshot({path:`test-results/workspace-${locale}-${width}.png`,fullPage:true});
-  if(width<801){await page.locator('#workspace-menu').click();await expect(page.locator('.workspace-nav')).toBeVisible();await page.locator('.workspace-tree a[href^="#/work/"]').first().click();await expect(page.locator('.workspace-nav')).toBeHidden();}
+  if(width<801){
+    for (const button of await page.locator('.workspace-composer button').all()) expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await page.locator('#workspace-menu').click();await expect(page.locator('.workspace-nav')).toBeVisible();await page.locator('.workspace-tree a[href^="#/work/"]').first().click();await expect(page.locator('.workspace-nav')).toBeHidden();}
 });
