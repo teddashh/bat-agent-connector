@@ -4,7 +4,7 @@
 
 [English](README.md) · **繁體中文** · [專案網站](https://teddashh.github.io/bat-agent-connector/?lang=zh-TW) · [開始使用](docs/getting-started.zh-TW.md)
 
-Better Agent Dashboard 把專案、Agent 工作階段、worktree、附件成果與 GitHub 交付集中在同一個地方。透過 **Web 介面或 Tauri 桌面程式**查看待處理事項、把工作派到指定 BAT 工作區、檢視成果，再一路追到同一個 PR。
+Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的 Agent 工作，以及成果交付**。Windows 原生 Fleet 管理選定連線、SSH tunnel、BAT profiles 與登入啟動；Python Connector／Task Service 接受派工並追蹤操作；**Web 與 Tauri 共用 Dashboard**，讓你查看主機、sessions、worktrees、專案和成果，再追到 PR／部署。
 
 你繼續在 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) coding；Hermes、Grokbot 等 Agent 透過各自的身分協作。Repository 與 Python 套件仍叫 **`bat-agent-connector`**，Connector 是 Dashboard、CLI 與 MCP 共用的後端。
 
@@ -16,12 +16,13 @@ Better Agent Dashboard 把專案、Agent 工作階段、worktree、附件成果�
 
 ## 內容導覽
 
-[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [現況](#目前證據與尚待完成的工作) · [文件](#文件索引) · [開發](#參與開發)
+[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [Windows Fleet](#windows-fleet-與資源) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [現況](#目前證據與尚待完成的工作) · [文件](#文件索引) · [開發](#參與開發)
 
 ## 你可以用它做什麼
 
 | 你想知道的事 | 到哪裡看 | 提供的能力 |
 | --- | --- | --- |
+| 登入後要連哪些主機、開哪些視窗？ | **Windows 連線設定／Fleet** | 分別選擇背景連線、BAT profiles 與 Dashboard；查看 tunnel／BAT／中央就緒狀態、Tailscale 登入、目前 backend 與啟動／遷移結果。 |
 | 現在有什麼需要我處理？ | **待處理** | 分開列出待回答／權限、完成待審、操作問題與主機連線；閒置不直接當成整份工作完成。 |
 | 這個專案有哪些工作？ | **專案** | 工作項目、原始需求、驗收條件、repository 綁定及派工關聯；支援階層、釘選與封存。 |
 | 下一份工作要派去哪裡？ | **專案派工／工作階段** | 選擇已配置的 repository、主機與工作區，檢視固定 commit，加入指示、模型及附件，建立 managed session。 |
@@ -49,14 +50,30 @@ Better Agent Dashboard 把專案、Agent 工作階段、worktree、附件成果�
 
 ```mermaid
 flowchart TB
-    Web[Web Dashboard] --> Central[Python Connector / Task Service]
-    Desktop[Tauri 桌面 Dashboard] --> Central
-    Agents[MCP Agent 與 batc CLI] --> Central
-    Desktop --> Native[本機憑證、檔案、視窗與支援的 Fleet 控制]
-    Central --> BAT[指定的 BAT 主機與 managed 工作區]
-    Central --> GitHub[已配置的 repository 與部署 recipe]
-    Central --> Journal[操作、關聯與歷史]
+    subgraph Windows[Windows 本機連線與啟動]
+        Desktop[Tauri Dashboard] --> Fleet[原生 Fleet：Rust 或既有 PowerShell]
+        Fleet --> Routes[SSH tunnels／Tailscale 路由與就緒檢查]
+        Fleet --> Profiles[選定的 BAT profiles／登入啟動]
+    end
+    Web[Web／Mac Tauri Dashboard] --> Central[Python Connector／Task Service]
+    Desktop --> Central
+    Agents[Hermes／Grokbot／MCP／CLI] --> Central
+    Fleet -. 已配置的中央就緒檢查與 bootstrap .-> Central
+    Routes -. 連線通道 .-> BAT[BAT 主機／workspaces]
+    Profiles --> Human[BAT desktop：人的 coding 入口]
+    Mobile[BAT mobile] --> BAT
+    Human --> BAT
+    Central -->|bat-remote/v2 與受控操作| BAT
+    Central --> Journal[身分／權限／operations／task journal]
+    BAT --> Manual[人工 sessions／worktrees：Connector 唯讀]
+    BAT --> Managed[Agent 自有 sessions／worktrees：派工與接續]
+    Managed --> Delivery[固定成果 → 同 PR → merge／deploy → 整理]
+    Central --> Delivery
 ```
+
+**這些是不同責任，必須一起保留。** Windows Fleet 管理本機連線、就緒與啟動；Connector 是派工、權限與帳本的中央；BAT 在選定主機執行 coding sessions。人的 BAT desktop／mobile 與 Agent 各自的 managed 資源都在架構裡。GitHub 是已發布程式碼與交付的整合路徑。
+
+Project Hub 只作為 session 整理與互動的參考；本產品沒有改用它的 runtime、資料後端或 importer。Mac／Web 共用管理介面，不表示 Windows 原生 Fleet 已移植到 Mac／瀏覽器。
 
 **一份前端，一套中央服務。** Web 與 Tauri 都由 `desktop/src` 建置。Python 提供 `/dashboard/` 及 `/api/v1`；Tauri 包裝相同介面，以受限的 Rust transport 連線，不另建業務後端、排程器或帳本。
 
@@ -69,6 +86,23 @@ flowchart TB
 
 [共用前端](docs/design/shared-frontend.md) · [原生 client](docs/design/desktop.md) · [API](docs/design/api-v1.md)
 
+## Windows Fleet 與資源
+
+Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共用 Web／Mac 介面而消失：
+
+| 能力 | 現有實作與入口 |
+| --- | --- |
+| 背景連線與路由 | 依既有 inventory／SSH／profile 綁定維護選定 tunnel，檢查 Tailscale 與已配置路由；使用有次數上限的復原，不接管未知程序。 |
+| BAT 與中央就緒 | 分別檢查 tunnel、TLS pin、BAT 身分／workspace、中央 observe 權限；有開 port 不等於就緒。 |
+| 視窗與登入 | 連線、BAT profiles、Dashboard 獨立選擇；登入選擇器、已保存啟動選項、關窗留背景、單一視窗恢復。 |
+| Backend 與 ownership | 已接入 Rust runtime；舊設定未指定 backend 時沿用 PowerShell。明確遷移、正常停止舊 owner，再啟新 owner。 |
+| Tailscale 與中央啟動 | Tailscale 狀態／開啟既有登入程式；另可透過已配置的固定 SSH recipe 查詢／啟動指定中央服務。不是任意遠端安裝。 |
+| 本機資源 | Windows Credential Manager、原生選檔／附件上傳與另存、系統匣及受控更新入口。 |
+
+**Windows Fleet 與中央的平台要求分開看。** 現有 Windows client 可連接 Linux 中央；自動準備完整 runtime 的安裝器仍是另外要完成的交付。Mac 的 DMG／Keychain 證據也不能取代 Windows Fleet 的實機驗收。
+
+[Windows 使用與資源指南](docs/windows.zh-TW.md) · [NSIS 驗證包](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet 設定範例](desktop/fleet.example.json) · [Rust Fleet 原始碼](desktop/fleet-core/README.md)
+
 ## 平台與安裝包
 
 目前**桌面 client** 與**中央服務**的平台要求不同。
@@ -76,7 +110,7 @@ flowchart TB
 | 元件 | 已有證據 | 目前限制 |
 | --- | --- | --- |
 | Web Dashboard | 中英雙語響應式介面，由中央提供 | 使用可信 loopback／tunnel；公開或 LAN hosting 需要另外設計已認證入口。 |
-| Windows 桌面 | x64 NSIS 安裝包；CI 實測安裝後 WebView 與生命週期 | Credential Manager 與已配置的 Windows Fleet；尚未打包／自動建立 Python 中央。 |
+| Windows 桌面 | x64 NSIS、Credential Manager、原生 Fleet／BAT profile／登入控制；CI 驗證安裝與 WebView 生命週期 | 完整實機 Fleet 驗收仍須完成；尚未打包／自動建立 Python 中央。 |
 | macOS 桌面 | Apple Silicon／Intel DMG；WebView、生命週期及隔離 Keychain 測試 | 目前 ad-hoc 驗證簽署；Developer ID／公證與 Mac 更新通道仍待完成，不能推論 Windows Fleet 已跨平台。 |
 | Linux 桌面 | Debian 驗證包與原生 WebView fixture | 原生憑證只支援記憶體來源，尚無受保護的持久登錄。 |
 | Python 中央／CLI／MCP | Linux 上測試 Python 3.10–3.13；依賴 POSIX | 本文以 Linux 為中央設定路徑。Windows 原生中央尚未實作；Mac client 測試不代表 Mac 中央實機驗收。 |
@@ -92,6 +126,7 @@ flowchart TB
 如果你要**現在進行有人監督的試用**：
 
 - **環境已配置：**開啟現有 Web Dashboard，或用維護者提供的位址與身分接上桌面 client。先看待處理、專案與工作階段。
+- **Windows 已有 BAT／Fleet 環境：**依 [Windows 指南](docs/windows.zh-TW.md) 核對既有 inventory、連線選擇、backend 與 BAT profiles；不把 Linux 中央設定當成 Windows 功能的替代品。
 - **由你建立第一套環境：**依 [Linux 中央設定指南](docs/getting-started.zh-TW.md) 安裝、匯入 BAT、啟動服務、發出身分，再連線桌面程式。
 - **接入 Agent：**在 MCP client 註冊 `bat-agent-connector-mcp`；中央觀察使用 `--principal-only --read-only`，授權操作則透過私人設定給專屬的 `BATC_API_TOKEN`。
 
@@ -138,6 +173,7 @@ MCP／CLI 寫入保留明確確認、主機權限及稽核；UI 已檢視的操�
 | 首次使用 | [繁中指南](docs/getting-started.zh-TW.md) · [English](docs/getting-started.md) · [設定範例](examples/hosts.example.toml) |
 | 產品與安裝 | [共用決策](docs/product/realignment-v2.md) · [Managed 安裝要求](docs/design/managed-installation.md) · [工作項目](docs/design/work-items.md) |
 | 桌面／Web | [共用前端](docs/design/shared-frontend.md) · [Tauri](docs/design/desktop.md) · [Fleet](docs/design/desktop-fleet-native.md) · [更新](docs/design/desktop-updates.md) |
+| Windows／Fleet | [使用與資源](docs/windows.zh-TW.md) · [登入／視窗](docs/design/desktop-fleet-native.md) · [路由](docs/design/fleet-routes.md) · [Tailscale](docs/design/tailscale-recovery.md) · [中央啟動](docs/design/fleet-bootstrap.md) |
 | 派工 | [Managed start](docs/design/session-start.md) · [已發布 repository](docs/design/repository-sync.md) · [Checkpoints](docs/design/checkpoints.md) · [Task Service](docs/design/task-service.md) |
 | 成果 | [附件](docs/design/artifacts.md) · [整合](docs/design/integration.md) · [Merge／部署](docs/design/delivery.md) · [整理](docs/design/cleanup.md) |
 | 自動化 | [API](docs/design/api-v1.md) · [Operations](docs/design/operations-unification.md) · [Agent skills](docs/agent-skills.md) · [協定](docs/PROTOCOL.md) |

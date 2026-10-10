@@ -4,7 +4,7 @@
 
 **English** · [繁體中文](README.zh-TW.md) · [Website](https://teddashh.github.io/bat-agent-connector/) · [Getting started](docs/getting-started.md)
 
-Better Agent Dashboard brings projects, agent sessions, worktrees, artifacts and GitHub delivery into one place. Use the **Web interface or Tauri desktop app** to see what needs your attention, dispatch work to a selected BAT workspace, review its result and follow it into a pull request.
+Better Agent Dashboard brings together **Windows Fleet connectivity and startup, agent work on BAT hosts, and delivery**. Native Windows Fleet manages selected connections, SSH tunnels, BAT profiles and sign-in startup. Python Connector / Task Service dispatches work and tracks operations. The **shared Web and Tauri Dashboard** shows hosts, sessions, worktrees, projects and results through PR and deployment.
 
 You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
@@ -16,12 +16,13 @@ You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223
 
 ## Explore
 
-[Capabilities](#what-you-can-do) · [Workflow](#from-request-to-delivery) · [Architecture](#web-desktop-and-agents) · [Platforms](#platforms-and-packages) · [Start](#start-using-it) · [Trust and recovery](#permissions-ownership-and-recovery) · [Readiness](#current-evidence-and-remaining-work) · [Documentation](#documentation) · [Development](#development)
+[Capabilities](#what-you-can-do) · [Workflow](#from-request-to-delivery) · [Architecture](#web-desktop-and-agents) · [Windows Fleet](#windows-fleet-and-resources) · [Platforms](#platforms-and-packages) · [Start](#start-using-it) · [Trust and recovery](#permissions-ownership-and-recovery) · [Readiness](#current-evidence-and-remaining-work) · [Documentation](#documentation) · [Development](#development)
 
 ## What you can do
 
 | Your question | Where to go | What you get |
 | --- | --- | --- |
+| What connects and opens at Windows sign-in? | **Connection settings / Fleet** | Independent background connections, BAT profiles and Dashboard choices; tunnel / BAT / central readiness, Tailscale sign-in, active backend and launch / migration receipts. |
 | What needs me right now? | **Pending** | Separate replies / permissions, completion review, operation problems and host connections. Idle does not mean the task is complete. |
 | What belongs to this project? | **Projects** | Work items, original instructions, acceptance criteria, repository bindings and dispatched work. Hierarchy, pins and archive keep ongoing projects organized. |
 | Can I start the next piece of work? | **Project dispatch / Sessions** | Select a configured repository, host and workspace; preview a fixed commit; add instructions, model and attachments; create a managed session. |
@@ -49,14 +50,30 @@ Same-host continuation can use a fixed local checkpoint. Another host gets code 
 
 ```mermaid
 flowchart TB
-    Web[Web Dashboard] --> Central[Python Connector / Task Service]
-    Desktop[Tauri Dashboard] --> Central
-    Agents[MCP agents and batc CLI] --> Central
-    Desktop --> Native[Local credentials, files, windows and supported Fleet controls]
-    Central --> BAT[Selected BAT hosts and managed workspaces]
-    Central --> GitHub[Configured repositories and delivery recipes]
-    Central --> Journal[Operations, relationships and history]
+    subgraph Windows[Windows client]
+        Desktop[Tauri Dashboard] --> Fleet[Native Fleet: Rust or existing PowerShell]
+        Fleet --> Routes[SSH tunnels / Tailscale routes and readiness]
+        Fleet --> Profiles[Selected BAT profiles / sign-in startup]
+    end
+    Web[Web / Mac Tauri Dashboard] --> Central[Python Connector / Task Service]
+    Desktop --> Central
+    Agents[Hermes / Grokbot / MCP / CLI] --> Central
+    Fleet -. Configured central readiness and bootstrap .-> Central
+    Routes -. Connection transport .-> BAT[BAT hosts / workspaces]
+    Profiles --> Human[BAT desktop: human coding access]
+    Mobile[BAT mobile] --> BAT
+    Human --> BAT
+    Central -->|bat-remote/v2 and governed operations| BAT
+    Central --> Journal[Identity / permissions / operations / task journal]
+    BAT --> Manual[Human sessions / worktrees: Connector read-only]
+    BAT --> Managed[Agent-owned sessions / worktrees: dispatch and continuation]
+    Managed --> Delivery[Fixed results → shared PR → merge / deploy → cleanup]
+    Central --> Delivery
 ```
+
+**These responsibilities are distinct and all remain part of the product.** Windows Fleet owns local connectivity, readiness and startup; Connector owns dispatch, permissions and the journal; BAT runs coding sessions on the selected hosts. Human BAT desktop / mobile access and agent-owned managed resources both remain explicit. GitHub carries published code and reviewed delivery.
+
+Project Hub is a reference for session organization and interaction. Its runtime, data backend and importer are not part of this architecture. Sharing the Dashboard with Mac / Web does not port Windows-native Fleet controls to those platforms.
 
 **One frontend, one central authority.** Web and Tauri are built from `desktop/src`. Python serves `/dashboard/` and `/api/v1`. Tauri bundles the same UI and uses a restricted Rust transport. It does not create a second business backend, scheduler or journal.
 
@@ -69,6 +86,23 @@ The intended installer owns the lifecycle of its managed local service: initial 
 
 [Shared frontend](docs/design/shared-frontend.md) · [Native client](docs/design/desktop.md) · [API](docs/design/api-v1.md)
 
+## Windows Fleet and resources
+
+Windows remains a core part of the product. Sharing the Dashboard with Web / Mac retains these integrated native Fleet capabilities:
+
+| Capability | Existing implementation and entry point |
+| --- | --- |
+| Background connections and routes | Maintain selected tunnels from the existing inventory / SSH / profile bindings; check Tailscale and configured routes; use bounded recovery without taking over unknown processes. |
+| BAT and central readiness | Distinguish tunnel, pinned TLS, BAT identity / workspace and central observe access. An open port alone is not readiness. |
+| Windows and sign-in | Independent connection, BAT profile and Dashboard choices; login picker, saved launch choices, close-to-background and single-window restoration. |
+| Backend and ownership | Rust runtime is integrated. Existing configuration without a backend retains PowerShell; explicit migration proves the old owner stopped before starting the replacement. |
+| Tailscale and central startup | Read Tailscale state and open its installed sign-in app; a separately configured fixed SSH recipe can query / start the selected central service. This is not arbitrary remote installation. |
+| Local resources | Windows Credential Manager, native attachment selection / upload / Save As, tray and controlled update entry. |
+
+**Windows Fleet and central have separate platform requirements.** Today's Windows client can connect to Linux central. Automatic installation of the complete runtime remains separate delivery work. Mac DMG / Keychain evidence does not replace Windows Fleet live acceptance.
+
+[Windows usage and resources](docs/windows.md) · [NSIS validation packages](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet configuration example](desktop/fleet.example.json) · [Rust Fleet source](desktop/fleet-core/README.md)
+
 ## Platforms and packages
 
 The **desktop client** and **central service** have different platform requirements today.
@@ -76,7 +110,7 @@ The **desktop client** and **central service** have different platform requireme
 | Component | Available evidence | Current limit |
 | --- | --- | --- |
 | Web Dashboard | Responsive English / Traditional Chinese interface, served by central | Uses trusted loopback / tunnel access. Public or LAN hosting needs a separate authenticated ingress design. |
-| Windows desktop | x64 NSIS installer; installed WebView and lifecycle tests in CI | Credential Manager and configured Windows Fleet. No bundled / automatically provisioned Python central yet. |
+| Windows desktop | x64 NSIS, Credential Manager, native Fleet / BAT profile / sign-in controls; installed WebView and lifecycle tests in CI | Full live Fleet acceptance remains; no bundled / automatically provisioned Python central yet. |
 | macOS desktop | Apple Silicon and Intel DMGs; native WebView, lifecycle and isolated Keychain tests | Ad-hoc validation signing. Developer ID / notarization and an operational Mac updater remain release work; Windows Fleet parity is not implied. |
 | Linux desktop | Debian validation package and native WebView fixture | Native credentials currently use a memory-only source; persistent protected enrollment is not implemented. |
 | Python central / CLI / MCP | Python 3.10–3.13 tested on Linux; POSIX implementation | Linux is the documented central setup path. Windows-native central is not implemented. Mac client tests do not establish Mac central live acceptance. |
@@ -92,6 +126,7 @@ The [2026-10-10 candidate run](https://github.com/teddashh/bat-agent-connector/a
 For a **supervised trial today**, use one of these documented paths:
 
 - **An environment is already configured:** open its Web Dashboard or connect a desktop client with the address and identity supplied by its operator. Start with Pending, Projects and Sessions.
+- **Windows with an existing BAT / Fleet setup:** use the [Windows guide](docs/windows.md) to check inventory, connection choices, backend and BAT profiles. Linux central setup is not a replacement for these Windows capabilities.
 - **You operate the first environment:** follow the [Linux central setup guide](docs/getting-started.md). It covers installation, BAT profile import, service startup, identity issuance and desktop connection.
 - **You are connecting an agent:** register `bat-agent-connector-mcp` in its MCP client. Use `--principal-only --read-only` for scoped central observation; give authorized automation its own scoped `BATC_API_TOKEN` through private configuration.
 
@@ -138,6 +173,7 @@ The remaining delivery work includes **automatic managed installation**, formal 
 | Getting started | [English](docs/getting-started.md) · [繁體中文](docs/getting-started.zh-TW.md) · [Configuration example](examples/hosts.example.toml) |
 | Product and installation | [Shared decisions](docs/product/realignment-v2.md) · [Managed installation requirement](docs/design/managed-installation.md) · [Work items](docs/design/work-items.md) |
 | Desktop / Web | [Shared frontend](docs/design/shared-frontend.md) · [Tauri](docs/design/desktop.md) · [Fleet](docs/design/desktop-fleet-native.md) · [Updates](docs/design/desktop-updates.md) |
+| Windows / Fleet | [Usage and resources](docs/windows.md) · [Sign-in / windows](docs/design/desktop-fleet-native.md) · [Routes](docs/design/fleet-routes.md) · [Tailscale](docs/design/tailscale-recovery.md) · [Central bootstrap](docs/design/fleet-bootstrap.md) |
 | Dispatch | [Managed start](docs/design/session-start.md) · [Published repositories](docs/design/repository-sync.md) · [Checkpoints](docs/design/checkpoints.md) · [Task Service](docs/design/task-service.md) |
 | Results | [Artifacts](docs/design/artifacts.md) · [Integration](docs/design/integration.md) · [Merge / deployment](docs/design/delivery.md) · [Cleanup](docs/design/cleanup.md) |
 | Automation | [API](docs/design/api-v1.md) · [Operations](docs/design/operations-unification.md) · [Agent skills](docs/agent-skills.md) · [Protocol](docs/PROTOCOL.md) |
