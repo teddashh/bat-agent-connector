@@ -29,6 +29,8 @@ def test_home_paths_and_conversations_report_categories_only():
         (2, "non-example home path"),
         (3, "shared conversation link"),
     ]
+    assert GUARD.check_text(f"c:\\users\\{private_user}\\project") == [(1, "non-example home path")]
+    assert GUARD.check_text(f"c:/users/{private_user}/project") == [(1, "non-example home path")]
 
 
 def test_cli_checks_tracked_config_without_disclosing_values(tmp_path):

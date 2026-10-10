@@ -16,9 +16,12 @@ from pathlib import Path
 PRIVATE_CONFIG_NAMES = {"hosts.toml", "discord-channels.toml", ".env"}
 SYNTHETIC_USERS = {
     "alice", "bob", "developer", "example", "fixture", "operator", "person", "runner",
-    "runneradmin", "RUNNER", "test", "user",
+    "runneradmin", "test", "user",
 }
-HOME_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:/home/|/Users/|[A-Za-z]:\\Users\\)([A-Za-z][A-Za-z0-9_.-]*)")
+HOME_PATH = re.compile(
+    r"(?<![A-Za-z0-9_])(?:/home/|/Users/|[A-Za-z]:/Users/)([A-Za-z][A-Za-z0-9_.-]*)",
+    re.IGNORECASE,
+)
 SHARED_CHAT = re.compile(r"https?://(?:chatgpt\.com|chat\.openai\.com)/share/[A-Za-z0-9-]+")
 
 
@@ -27,8 +30,8 @@ def check_text(text: str) -> list[tuple[int, str]]:
     for line_number, line in enumerate(text.splitlines(), 1):
         if SHARED_CHAT.search(line):
             findings.append((line_number, "shared conversation link"))
-        normalized = line.replace("\\\\", "\\")
-        if any(match[1] not in SYNTHETIC_USERS for match in HOME_PATH.finditer(normalized)):
+        normalized = line.replace("\\\\", "\\").replace("\\", "/")
+        if any(match[1].casefold() not in SYNTHETIC_USERS for match in HOME_PATH.finditer(normalized)):
             findings.append((line_number, "non-example home path"))
     return findings
 
