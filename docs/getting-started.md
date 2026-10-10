@@ -90,6 +90,10 @@ Then open the same loopback Dashboard address on the client machine. Keep that t
 
 ## 5. Connect the desktop client
 
+Windows also includes native Fleet connectivity, BAT profile launch and login
+controls. Keep the [Windows usage and resource guide](windows.md) alongside this
+central setup guide; these are complementary parts of the product.
+
 Download the correct validation artifact from a successful [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml):
 
 | Platform | Artifact | Package |

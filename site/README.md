@@ -29,6 +29,27 @@ in development until installed acceptance proves it. Do not invent tool counts,
 use fixture screenshots as live evidence, or label validation artifacts as a signed
 release. Platform claims must distinguish desktop client, central service and Fleet.
 
+## Product coverage review
+
+The October 10 rewrite omitted Windows Fleet from the architecture figure and made
+the product look like a generic project manager. Browser and Python tests passed;
+they did not validate the accuracy or completeness of that description. Review
+these responsibilities against source whenever changing the READMEs or site:
+
+| Public description to preserve in both languages | Source / contract to check |
+| --- | --- |
+| Windows Fleet is a distinct local connection/startup layer | `desktop/src-tauri/src/fleet.rs`, `fleet_native.rs`; [native Fleet](../docs/design/desktop-fleet-native.md) |
+| Independent connection, BAT profile and Dashboard choices; login behavior | `desktop/src/fleet-desktop.js`; [profile launch](../docs/design/fleet-profiles.md) |
+| Route recovery, Tailscale status, fixed central bootstrap | [routes](../docs/design/fleet-routes.md), [Tailscale](../docs/design/tailscale-recovery.md), [bootstrap](../docs/design/fleet-bootstrap.md) |
+| Rust/PowerShell ownership and explicit migration | [Fleet runtime](../desktop/fleet-core/README.md), [migration](../docs/design/fleet-migration.md) |
+| Python central authority; BAT host execution; manual/managed resources | [product decisions](../docs/product/realignment-v2.md), [resource policy](../docs/design/resource-policy.md) |
+| Shared Web/Tauri UI, platform differences, current installation gap | [shared frontend](../docs/design/shared-frontend.md), [managed installation](../docs/design/managed-installation.md) |
+| Discoverable Windows packages, usage and resource links | [Windows guide](../docs/windows.md), [繁中](../docs/windows.zh-TW.md) |
+
+Project Hub is an interaction reference, not the runtime, central backend or a
+replacement product. Preserve attribution without rewriting the architecture around
+that reference. Do not copy private Kit inventory or topology into public content.
+
 ## Preview and verification
 
 From the repository root:

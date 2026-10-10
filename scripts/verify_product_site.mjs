@@ -52,6 +52,14 @@ try {
     assert.equal(await page.locator('#view-attention').isVisible(), true);
     await page.locator('#view-attention img:visible').evaluate(img => img.decode());
     await page.screenshot({ path: resolve(output, `page-${lang}-${width}.png`), fullPage: true });
+    for (const section of ['architecture', 'windows']) {
+      await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+      await page.screenshot({
+        path: resolve(output, `${section}-${lang}-${width}.png`),
+        fullPage: true,
+        clip: await page.locator('#' + section).boundingBox(),
+      });
+    }
     await page.locator('#faq summary').first().click();
     assert.equal(await page.locator('#faq details').first().getAttribute('open'), '');
     await page.evaluate(() => { location.hash = 'workflow'; });
