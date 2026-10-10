@@ -20,9 +20,31 @@ Apply 只接受 `params.preview_id`，並要求 `preconditions.expected_head_sha
 |---|---|---|---|
 | `checkpoint`（人的成果） | `cp_…` | checkpoint 的 commit（不會變） | 人的 repository，只當 `git fetch` 的來源 |
 | `checkpoint_run`（agent 成果） | `checkpoint.continue` 的 `op_…` | 預覽當下該分支的 tip | connector clone（必須在 managed root 內） |
+| `execution`（中央派工） | 已受理的 `op_…` | 預覽當下原 managed worktree 的分支 tip | 原 operation 的 start/send receipt、registry incarnation 與建立證據相符的同主機 worktree；只讀取 |
+| `task_command`（Task Service 成果） | 已受理 send 的 command ID | 預覽當下原 lead worktree 的分支 tip | 原 task、command、accepted event、lead session 與 registry 相符的同主機 worktree；只讀取 |
 | `branch`（GitHub 上同 repo 的分支） | 分支名稱 | 預覽當下遠端的 tip | `integrate.remote_url` |
 
-每個來源可選 `mode: "merge"`（預設）或 `"pick"`（`commits` 列出要複製的 commit，各自帶 `(cherry picked from commit X)`）。來源與 PR 必須在同一台主機（`SOURCE_ON_OTHER_HOST`）。Task Service 的執行結果之後再加。
+每個來源可選 `mode: "merge"`（預設）或 `"pick"`（`commits` 列出要複製的 commit，各自帶 `(cherry picked from commit X)`）。來源與 PR 必須在同一台主機（`SOURCE_ON_OTHER_HOST`）。Task Service 的執行結果使用原 accepted command，不建立另一個 task。
+
+`execution`／`task_command` 沿用 managed artifact capture 的 accepted-execution 證據，但只把
+Git commit 作為來源，不要求 artifact adapter，也不把個別 artifact review 當成整個任務核准。
+預覽保存 lineage、registry incarnation 與 observation worktree ID；digest 包含這些身分。
+新的 prepare／push effect 前重查身分，Git 只讀確認實體 worktree 路徑、目前 HEAD branch 與 tip。
+已送出的 push 仍只依原 remote/API readback 結案；來源後來停止、重建或失聯不會阻止讀回已送出的結果。
+整理以預覽保存的 worktree ID、host、path、branch 和 receipt 的 source ID／pin 判定交付覆蓋，
+不靠同名路徑認領另一個 worktree；有效預覽仍保留內容。
+
+候選清單的 `session` 保留 streaming 三值、pending、lifecycle、stale 與活動觀測時間。
+`result.status=unverified` 與 `delivered_to` 分開；停止輸出、缺少 inventory、成功受理派工、
+甚至已送入 PR 都不等於成果已通過驗收。`delivered_to` 保存 repository、PR、來源 pin 和實際交付 SHA，
+不推論 merge／deploy。選定來源後的 preview 才提供本次固定 commit。
+
+`features.execution_delivery.version=1` 公告新來源。`GET /integrations/candidates` 可加
+`source_kind`／`source_id` 精確讀取超出近期清單的來源，回傳 `selected`；不產生 Git/BAT I/O。
+專案回傳 `work`：明確 `project_id`、Work Item 的 operation/session/task 關聯，以及 project 的
+`task_project` 對照。相同 repository 或 workspace 名稱不自動認領工作。Web 與 Tauri 從專案帶入
+同一來源，明確選 PR、加入預覽後才走原整合 action。Worktree 摘要顯示既有 identity 與 session
+關聯，整理資格仍需最新 cleanup preview。
 
 ## 整合區
 
@@ -133,7 +155,7 @@ Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投�
 
 ## 尚未涵蓋
 
-- 整合後在 managed worktree 跑測試（`integrate.verify`）、Task Service 的執行結果作為來源、pick 模式的衝突交給 agent。
+- 整合後在 managed worktree 跑測試（`integrate.verify`）、pick 模式的衝突交給 agent。
 - 遠端前進時自動重新整合；第一版一律停在 `REMOTE_MOVED`，請重新預覽。
 - 衝突時只推送前面完成的部分、建立新 PR、fork PR、stacked PR、Git LFS、跨主機來源、未提交內容。
 - 整合area全體退休／refs刪除／GC不在cleanup A或B；area保留作retained載體。Reviewed task資源與restore在Part B。

@@ -429,7 +429,7 @@ def _all(ops):
             area = refs.get("area_path") or (json.loads(step[0]).get("area") if step else None)
             if area and (host, area) not in containers:
                 repo = fleet.config.github.repos.get(op["target"].get("repository", "").lower())
-                source = {"host": host, "repository": repo.repository, "remote-url": repo.integrate.remote_url} if repo else None
+                source = {"host": host, "repository": repo.repository, "remote-url": repo.integrate.remote_url} if repo and repo.integrate else None
                 item = add(_resource(host, "integration_area", op["operation_id"], area, path=area,
                                      repository=area, proven=bool(source), source=source))
                 containers[host, area] = item
@@ -605,7 +605,8 @@ def _selection(ops, target, items, pvs, links, op_rows):
         if pv["operation_id"] in refs or pv["preview_id"] in refs:
             refs.update((pv["operation_id"], pv["preview_id"]))
             refs.update(s["id"] for s in json.loads(pv["sources"]))
-    selected = {rid for rid, i in items.items() if refs.intersection(i["original_ids"]) or
+            refs.update(s["worktree_id"] for s in json.loads(pv["sources"]) if s.get("worktree_id"))
+    selected = {rid for rid, i in items.items() if rid in refs or i.get("worktree_id") in refs or refs.intersection(i["original_ids"]) or
                 set(wi_ids).intersection(i["relations"])}
     # The source of a checkpoint is always listed read-only, even when not in inventory.
     cp_ids = {r for r in refs if r.startswith("cp_")}
@@ -784,6 +785,13 @@ async def _runtime(ops, item, deadline, *, terminal=None):
         return {"error": "OBSERVATION_UNAVAILABLE"}
 
 
+def _execution_source_matches(source, item):
+    return (source.get("kind") in {"execution", "task_command"} and source.get("worktree_id")
+            and source["worktree_id"] == (item.get("worktree_id") or item["resource_id"])
+            and source.get("host") == item["host"] and source.get("ref") == item.get("branch")
+            and source.get("location") == (item.get("content_path") or item.get("path")))
+
+
 def _coverage(ops, item, observed):
     coverage, prs, covered = [], [], set()
     full_head = False
@@ -793,11 +801,14 @@ def _coverage(ops, item, observed):
     for op_id in {r[0] for r in ops.db.execute("SELECT DISTINCT operation_id FROM integration_receipts")}:
         for r in integration.receipts(ops.db, op_id):
             # A repair result is covered by a delivered resolution receipt as well as source revisions.
-            repair_host = ops.db.execute("SELECT host FROM integration_previews WHERE preview_id=?", (r["preview_id"],)).fetchone()
+            preview = ops.db.execute("SELECT host,sources FROM integration_previews WHERE preview_id=?", (r["preview_id"],)).fetchone()
+            exact_source = preview and any(_execution_source_matches(s, item) and s["kind"] == r["source_kind"]
+                and s["id"] == r["source_id"] and s.get("pin") == r["pinned_sha"] and s["host"] == r["source_host"]
+                and s["location_class"] == r["location_class"] for s in json.loads(preview["sources"]))
             match = (r["source_kind"] in {"checkpoint_run", "session"} and
                      r["source_host"] == item["host"] and r["location_class"] == "managed_clone" and
                      r["source_id"] in ids) or (r.get("repair_worktree") == item.get("path") and
-                                               repair_host and repair_host[0] == item["host"])
+                                               preview and preview["host"] == item["host"]) or exact_source
             if not match:
                 continue
             coverage.append({k: r.get(k) for k in ("operation_id", "seq", "source_kind", "source_id",
@@ -851,7 +862,7 @@ def _consumers(ops, item, op_rows, pvs, own_op=None):
     for pv in pvs.values():
         if pv["expires_at"] <= time.time():
             continue
-        if any(s.get("id") in ids for s in json.loads(pv["sources"])):
+        if any(s.get("id") in ids or _execution_source_matches(s, item) for s in json.loads(pv["sources"])):
             fact = {"kind": "integration_preview", "id": pv["preview_id"]}
             item["consumers"].append(fact)
             _reason(item, "CONTENT_REQUIRED", **fact)
