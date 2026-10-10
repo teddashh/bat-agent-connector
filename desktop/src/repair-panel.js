@@ -1,0 +1,85 @@
+import {repairIntent} from './repair-intent.js';
+
+// Read fixed central evidence, then create/reuse an ordinary work item. Launch is separate.
+export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox, opStatus}) {
+  let controller, document, busy = false, disposed = false, serial = 0, initialized = false;
+  const alive = () => {try {guard(); return !disposed;} catch {return false;}};
+  const key = `batc.repair.${namespace}.${JSON.stringify(source)}`;
+  const status = h('div', {role:'status'}), evidence = h('div'), outcome = h('div');
+  const project = h('select', {'aria-label':t('repair_project')}, h('option',{value:''},t('repair_choose_project')));
+  const allowed = () => caps()?.actions?.some(action => action.action === 'repair.create' && action.allowed === true);
+  const reload = h('button',{class:'secondary',type:'button',onclick:()=>read()},t('repair_read'));
+  const create = h('button',{class:'secondary',type:'button',disabled:true,onclick:async()=>{
+    if (!alive() || busy || !allowed()) return;
+    busy = true; update();
+    try {show(await (controller.snapshot().intent ? controller.check() : controller.create(document)));}
+    catch(error) {if(alive()) status.replaceChildren(errorBox(error));}
+    finally {busy=false;if(alive()) update();}
+  }},t('repair_create'));
+  const next = h('button',{class:'secondary',type:'button',hidden:true,onclick:()=>{
+    if (!alive() || busy || !['succeeded','failed','cancelled'].includes(controller.snapshot().operation?.status)) return;
+    try {localStorage.removeItem(key); initializeController(); outcome.replaceChildren(); read();}
+    catch(error) {if(alive()) status.replaceChildren(errorBox(error));}
+  }},t('repair_review_new'));
+  const box = h('details',{class:'panel', 'data-repair-panel':''}, h('summary',{},t('repair_title')),
+    h('p',{class:'muted'},t('repair_help')),h('label',{},t('repair_project'),project),
+    h('div',{class:'actions'},reload,create,next),status,evidence,outcome);
+  function initializeController() {
+    controller=repairIntent({api,guard:()=>{guard();if(disposed)throw Error('Retired view');},
+      actor:()=>caps()?.actor,allowed,storage:localStorage,storageKey:key});
+  }
+  function update() {
+    const snapshot=controller?.snapshot(), fixed=!!snapshot?.intent;
+    project.disabled=busy||fixed;reload.disabled=busy||!project.value;
+    create.disabled=busy||!allowed()||(!document&&!fixed);
+    create.textContent=t(fixed?'repair_recover':'repair_create');
+    next.hidden=!['succeeded','failed','cancelled'].includes(snapshot?.operation?.status);
+  }
+  function links(record) {
+    if (!record?.work_item_id || !/^wi_[0-9a-f]{20}$/.test(record.work_item_id)) return;
+    outcome.append(h('p',{},h('a',{href:`#/item/${record.work_item_id}`},t('repair_open_work')),' · ',
+      record.dispatch_operation_id ? h('a',{href:`#/op/${record.dispatch_operation_id}`},t('repair_open_dispatch')) :
+        h('a',{href:`#/dispatch/${record.project_id || project.value}/${record.work_item_id}`},t('repair_review_dispatch'))));
+  }
+  function show(operation) {
+    if (!alive()) return;
+    outcome.replaceChildren(opStatus(operation),' ',h('a',{href:`#/op/${operation.operation_id}`},operation.operation_id));
+    if(operation.status==='succeeded') links(operation.result);
+  }
+  async function read() {
+    if(!alive()||busy||!project.value) return;
+    const mine=++serial, pid=project.value;
+    document=null;status.replaceChildren();update();
+    try {
+      const params=new URLSearchParams(source);
+      const doc=await api('GET',`/projects/${pid}/repair-evidence?${params}`);
+      if(!alive()||mine!==serial||project.value!==pid)return;
+      document=doc;
+      evidence.replaceChildren(h('p',{},t('repair_fixed_evidence'),' ',h('code',{},doc.evidence_digest)),
+        h('details',{},h('summary',{},t('repair_evidence_details')),h('pre',{class:'pre'},JSON.stringify(doc.evidence,null,2))));
+      if(!controller.snapshot().intent) {outcome.replaceChildren();links(doc.existing);}
+    } catch(error) {if(alive()&&mine===serial)status.replaceChildren(errorBox(error));}
+    finally{if(alive()&&mine===serial)update();}
+  }
+  async function init() {
+    if(initialized||!alive())return;initialized=true;
+    try {
+      initializeController();
+      const selected=controller.snapshot().intent?.request.target.project_id;
+      const doc=await api('GET','/projects');if(!alive())return;
+      const rows=new Map();
+      const visit=row=>{if(row?.project_id&&!row.archived)rows.set(row.project_id,row);for(const child of row.children||[])visit(child);};
+      for(const row of doc.projects||[])visit(row);
+      project.replaceChildren(h('option',{value:''},t('repair_choose_project')),
+        ...[...rows.values()].map(row=>h('option',{value:row.project_id},row.name)));
+      if(selected&&!rows.has(selected))project.append(h('option',{value:selected},selected));
+      if(selected)project.value=selected;
+      update();
+      if(controller.snapshot().intent?.operation_id)show(await controller.check());
+    }catch(error){if(alive())status.replaceChildren(errorBox(error));}
+    finally{if(alive())update();}
+  }
+  project.addEventListener('change',()=>read());
+  box.addEventListener('toggle',()=>{if(box.open)init();});
+  return {box,dispose(){disposed=true;serial++;}};
+}

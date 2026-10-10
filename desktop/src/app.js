@@ -14,6 +14,9 @@ import {treeInteractions} from "./tree-interactions.js";
 import {modelPreferencesPanel} from "./model-preferences.js";
 import {projectSkillsPanel} from "./project-skills.js";
 import {resultSourcesPanel} from "./result-sources.js";
+import {repairPanel} from "./repair-panel.js";
+import {repairDispatchSeed} from "./repair-intent.js";
+import {instructionReceiptPanel} from "./instruction-receipts.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -1021,12 +1024,18 @@ async function viewHostDiscovery(main, host) {
   const head = h("div", {class: "panel"});
   main.append(h("h1", {}, host, " · ", t("obs_discovery")), h("p", {class: "note"}, t("obs_discovery_note")), head);
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const profile = state.caps?.hosts?.find(item => item.host === host)?.profile_id;
+  const repair = profile && state.caps?.features?.managed_repairs?.version === 1 ? repairPanel({h, t, api,
+    caps: () => state.caps, guard: () => assertView(connection), namespace: connection.namespace,
+    source: {kind: "discovery", host, profile_id: profile}, errorBox, opStatus}) : null;
+  if (repair) main.append(repair.box);
   const load = async () => {
     try {const data = await api("GET", `/hosts/${encodeURIComponent(host)}/discovery`); assertView(connection); head.replaceChildren(discoveryEvidence(data.scopes));}
     catch (error) {head.append(errorBox(error));}
   };
   await load(); const reload = debounceRefresh(load, 500);
-  return onEvents(event => {if (event.resource_type === "host" && event.resource_id === host) return reload();});
+  const off = onEvents(event => {if (event.resource_type === "host" && event.resource_id === host) return reload();});
+  return () => {off(); repair?.dispose();};
 }
 
 async function viewSession(main, host, sid, context = null) {
@@ -1096,10 +1105,13 @@ async function viewSession(main, host, sid, context = null) {
     target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
+  const instructions = state.caps?.features?.session_instructions?.version === 1 ? instructionReceiptPanel({h, t, when, api,
+    guard: () => assertView(connection), host, sessionId: sid, errorBox}) : null;
+  instructions?.box.addEventListener("toggle", () => {if (instructions.box.open) instructions.refresh();});
   const inspector = h("details", {class: "workspace-inspector", open: true},
     h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot,
     h("details", {class: "workspace-evidence"}, h("summary", {}, t("sessions_details")), metadata),
-    labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
+    instructions?.box, labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
   const lane = h("section", {class: "workspace-conversation", "aria-label": t("messages")}, conversation.box, controls);
   const mobileLayout = setupMobileSessionLayout({ head, composer: controls, textarea: box, t, guard: () => assertView(connection) });
   if (context?.picker) main.append(context.picker);
@@ -1277,9 +1289,10 @@ async function viewSession(main, host, sid, context = null) {
       || context?.project && ["project", "operation", "task", "execution"].includes(ev.resource_type)) ? reload() : Promise.resolve(),
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
-    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
+    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve(),
+    instructions?.box.open && (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? instructions.refresh() : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose(); mobileLayout?.dispose(); shortcut.dispose();};
+  return () => {clearInterval(retry); off(); instructions?.dispose(); batHandoff?.dispose(); conversation.dispose(); mobileLayout?.dispose(); shortcut.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
@@ -2009,12 +2022,21 @@ async function viewOperations(main, filter = "all") {
 
 async function viewOperation(main, id) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  let repair;
   const panel = h("div", { class: "panel" });
   main.append(panel);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
     try {
       const { operation: op, work_items: linked, cleanup_receipts: cleanupReceipts } = await api("GET", `/operations/${id}`);
+      assertView(connection);
+      if (!repair && state.caps?.features?.managed_repairs?.version === 1 &&
+          ["cleanup.apply", "task.verify", "session.record_verification"].includes(op.action) && ["failed", "needs_attention"].includes(op.status)) {
+        repair = repairPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), namespace: connection.namespace,
+          source: {kind: "operation", operation_id: id}, errorBox, opStatus});
+        main.append(repair.box);
+      }
       const refs = op.external_refs || {};
       const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed"
         ? h("button", { class: "primary", onclick: async () => {
@@ -2098,7 +2120,8 @@ async function viewOperation(main, id) {
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
-  return liveReload(render, ["operation", "integration", "cleanup"]);
+  const off = liveReload(render, ["operation", "integration", "cleanup"]);
+  return () => {off(); repair?.dispose();};
 }
 
 function mergeRecovery(op) {
@@ -3275,15 +3298,27 @@ async function viewPublished(main) {
   return () => {offOnline(); offEvents();};
 }
 
-async function viewProjectDispatch(main, pid) {
+async function viewProjectDispatch(main, pid, repairWid = null) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  let repairSeed = null;
+  if (repairWid) {
+    if (!/^wi_[0-9a-f]{20}$/.test(repairWid)) throw new Error(t("repair_unavailable"));
+    const record = await api("GET", `/work-items/${repairWid}/repair`); assertView(connection);
+    if (record.project_id !== pid || record.work_item_id !== repairWid) throw new Error(t("repair_unavailable"));
+    if (record.dispatch_operation_id) {
+      main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")),
+        h("a", {href: `#/op/${record.dispatch_operation_id}`}, t("repair_open_dispatch")));
+      return;
+    }
+    repairSeed = repairDispatchSeed(record);
+  }
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
-    submitPreference: submit,
+    submitPreference: submit, repairSeed,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus, project: pid,
-    storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
-    attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)});
+    storageKey: `batc.dispatch.${connection.namespace}.${pid}${repairWid ? "." + repairWid : ""}`,
+    attachmentFactory: repairSeed ? null : (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)});
   main.append(h("a", {href: `#/project/${pid}`}, t("dispatch_back")), h("h1", {}, t("dispatch_title")),
-    h("p", {class: "muted"}, t("dispatch_intro")), panel.box);
+    h("p", {class: "muted"}, t(repairSeed ? "repair_dispatch_help" : "dispatch_intro")), panel.box);
   try {await panel.init();} catch { /* original intent and project read failure remain visible */ }
   try {assertView(connection);} catch {return;}
   const offOnline = onOnline(() => {try {assertView(connection); panel.update();} catch { /* retired view */ }});
