@@ -1072,7 +1072,7 @@ async function viewSession(main, host, sid, context = null) {
       assertView(connection); status.replaceChildren(opStatus(op));
     } catch (e) { status.replaceChildren(errorBox(e)); }
   } }, t("interrupt"));
-  const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
+  const composer = h("div", {hidden: true, id: "workspace-message-input"}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("session_access_unknown"));
   let capture, permissions, batHandoff;

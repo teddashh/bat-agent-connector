@@ -465,8 +465,328 @@ var init_transport = __esmMin((() => {
 	updateRequest = (input) => invoke("desktop_update", { input });
 }));
 //#endregion
-//#region src/attention.js
+//#region src/workspace-layout.js
 init_transport();
+var KEY_SIDEBAR_WIDTH = "batc.sidebar.width";
+var KEY_MOBILE_INFO_COLLAPSED = "batc.mobile.info_collapsed";
+var KEY_MOBILE_COMPOSER_COLLAPSED = "batc.mobile.composer_collapsed";
+function isMobileLayout() {
+	if (typeof window === "undefined") return false;
+	return (window.innerWidth || document.documentElement?.clientWidth || 0) <= 800;
+}
+function calcSidebarBounds(windowWidth = window.innerWidth) {
+	return {
+		minAllowed: 200,
+		maxAllowed: Math.min(500, Math.max(200, (windowWidth || 1024) - 360))
+	};
+}
+function setupSidebarResizer({ aside, workspace, t }) {
+	if (!aside || !workspace) return { dispose() {} };
+	let savedWidth = 260;
+	try {
+		const raw = localStorage.getItem(KEY_SIDEBAR_WIDTH);
+		if (raw !== null) {
+			const parsed = parseInt(raw, 10);
+			if (!Number.isNaN(parsed) && parsed >= 200) savedWidth = parsed;
+		}
+	} catch {}
+	const resizer = document.createElement("div");
+	resizer.className = "workspace-resizer";
+	resizer.setAttribute("role", "separator");
+	resizer.setAttribute("aria-orientation", "vertical");
+	resizer.setAttribute("tabindex", "0");
+	resizer.setAttribute("aria-label", t("workspace_resizer"));
+	resizer.title = t("workspace_resizer_help");
+	const applyWidth = (requestedWidth, persist = true) => {
+		if (isMobileLayout()) {
+			resizer.removeAttribute("aria-valuenow");
+			return requestedWidth;
+		}
+		const { minAllowed, maxAllowed } = calcSidebarBounds();
+		const clamped = Math.max(minAllowed, Math.min(maxAllowed, requestedWidth));
+		workspace.style.setProperty("--workspace-sidebar-width", `${clamped}px`);
+		resizer.setAttribute("aria-valuenow", String(clamped));
+		resizer.setAttribute("aria-valuemin", String(minAllowed));
+		resizer.setAttribute("aria-valuemax", String(maxAllowed));
+		if (persist) try {
+			localStorage.setItem(KEY_SIDEBAR_WIDTH, String(clamped));
+		} catch {}
+		return clamped;
+	};
+	let currentWidth = applyWidth(savedWidth, false);
+	let isDragging = false;
+	let startX = 0;
+	let startWidth = currentWidth;
+	let activePointerId = null;
+	const onGlobalKeyDown = (event) => {
+		if (event.key === "Escape" && isDragging) {
+			cancelDrag();
+			event.preventDefault();
+		}
+	};
+	const cancelDrag = () => {
+		if (!isDragging) return;
+		window.removeEventListener("keydown", onGlobalKeyDown);
+		isDragging = false;
+		currentWidth = applyWidth(startWidth, false);
+		resizer.classList.remove("is-resizing");
+		document.body.classList.remove("workspace-resizing");
+		document.body.style.removeProperty("user-select");
+		if (activePointerId !== null) {
+			try {
+				resizer.releasePointerCapture(activePointerId);
+			} catch {}
+			activePointerId = null;
+		}
+	};
+	const onPointerDown = (event) => {
+		if (event.button !== 0 || isMobileLayout()) return;
+		isDragging = true;
+		activePointerId = event.pointerId;
+		startX = event.clientX;
+		startWidth = currentWidth;
+		resizer.classList.add("is-resizing");
+		document.body.classList.add("workspace-resizing");
+		document.body.style.userSelect = "none";
+		window.addEventListener("keydown", onGlobalKeyDown);
+		try {
+			resizer.setPointerCapture(event.pointerId);
+		} catch {}
+		event.preventDefault();
+	};
+	const onPointerMove = (event) => {
+		if (!isDragging || event.pointerId !== activePointerId) return;
+		const delta = event.clientX - startX;
+		currentWidth = applyWidth(startWidth + delta, false);
+	};
+	const onPointerUp = (event) => {
+		if (!isDragging || event.pointerId !== activePointerId) return;
+		window.removeEventListener("keydown", onGlobalKeyDown);
+		const delta = event.clientX - startX;
+		currentWidth = applyWidth(startWidth + delta, true);
+		isDragging = false;
+		resizer.classList.remove("is-resizing");
+		document.body.classList.remove("workspace-resizing");
+		document.body.style.removeProperty("user-select");
+		if (activePointerId !== null) {
+			try {
+				resizer.releasePointerCapture(activePointerId);
+			} catch {}
+			activePointerId = null;
+		}
+	};
+	const onPointerCancel = () => {
+		cancelDrag();
+	};
+	const onKeyDown = (event) => {
+		if (event.key === "Escape") {
+			if (isDragging) {
+				cancelDrag();
+				event.preventDefault();
+			}
+			return;
+		}
+		if (isMobileLayout()) return;
+		const { minAllowed, maxAllowed } = calcSidebarBounds();
+		let handled = false;
+		if (event.key === "ArrowLeft") {
+			currentWidth = applyWidth(currentWidth - (event.shiftKey ? 48 : 16), true);
+			handled = true;
+		} else if (event.key === "ArrowRight") {
+			currentWidth = applyWidth(currentWidth + (event.shiftKey ? 48 : 16), true);
+			handled = true;
+		} else if (event.key === "PageDown") {
+			currentWidth = applyWidth(currentWidth - 48, true);
+			handled = true;
+		} else if (event.key === "PageUp") {
+			currentWidth = applyWidth(currentWidth + 48, true);
+			handled = true;
+		} else if (event.key === "Home") {
+			currentWidth = applyWidth(minAllowed, true);
+			handled = true;
+		} else if (event.key === "End") {
+			currentWidth = applyWidth(maxAllowed, true);
+			handled = true;
+		}
+		if (handled) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+	};
+	const onDblClick = () => {
+		if (!isMobileLayout()) currentWidth = applyWidth(260, true);
+	};
+	const onWindowResize = () => {
+		if (isMobileLayout()) cancelDrag();
+		if (!isMobileLayout()) currentWidth = applyWidth(currentWidth, false);
+	};
+	resizer.addEventListener("pointerdown", onPointerDown);
+	resizer.addEventListener("pointermove", onPointerMove);
+	resizer.addEventListener("pointerup", onPointerUp);
+	resizer.addEventListener("pointercancel", onPointerCancel);
+	resizer.addEventListener("lostpointercapture", onPointerCancel);
+	resizer.addEventListener("keydown", onKeyDown);
+	resizer.addEventListener("dblclick", onDblClick);
+	window.addEventListener("resize", onWindowResize);
+	aside.appendChild(resizer);
+	return {
+		resizer,
+		getWidth: () => currentWidth,
+		setWidth: (w) => {
+			currentWidth = applyWidth(w, true);
+			return currentWidth;
+		},
+		dispose() {
+			cancelDrag();
+			resizer.removeEventListener("pointerdown", onPointerDown);
+			resizer.removeEventListener("pointermove", onPointerMove);
+			resizer.removeEventListener("pointerup", onPointerUp);
+			resizer.removeEventListener("pointercancel", onPointerCancel);
+			resizer.removeEventListener("lostpointercapture", onPointerCancel);
+			resizer.removeEventListener("keydown", onKeyDown);
+			resizer.removeEventListener("dblclick", onDblClick);
+			window.removeEventListener("resize", onWindowResize);
+			resizer.remove();
+		}
+	};
+}
+function setupMobileSessionLayout({ head, composer, textarea, t, guard }) {
+	if (!head || !composer) return {
+		updateInfo() {},
+		updateDraft() {},
+		dispose() {}
+	};
+	let isDisposed = false;
+	const alive = () => {
+		if (isDisposed) return false;
+		try {
+			guard?.();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	let isInfoCollapsed = false;
+	try {
+		isInfoCollapsed = localStorage.getItem(KEY_MOBILE_INFO_COLLAPSED) === "true";
+	} catch {}
+	const infoToggle = document.createElement("button");
+	infoToggle.type = "button";
+	infoToggle.className = "mini workspace-info-toggle";
+	const renderInfoToggle = () => {
+		if (!alive()) return;
+		head.classList.toggle("workspace-info-collapsed", isInfoCollapsed);
+		infoToggle.setAttribute("aria-expanded", String(!isInfoCollapsed));
+		const label = t(isInfoCollapsed ? "mobile_info_expand" : "mobile_info_collapse");
+		infoToggle.setAttribute("aria-label", label);
+		infoToggle.textContent = (isInfoCollapsed ? "▸ " : "▾ ") + label;
+	};
+	infoToggle.addEventListener("click", () => {
+		if (!alive()) return;
+		isInfoCollapsed = !isInfoCollapsed;
+		try {
+			localStorage.setItem(KEY_MOBILE_INFO_COLLAPSED, String(isInfoCollapsed));
+		} catch {}
+		renderInfoToggle();
+	});
+	const updateInfo = () => {
+		if (!alive()) return;
+		const titleRow = head.querySelector(":scope > div:first-child");
+		if (titleRow && !titleRow.contains(infoToggle)) titleRow.appendChild(infoToggle);
+		else if (!head.contains(infoToggle)) head.appendChild(infoToggle);
+		renderInfoToggle();
+	};
+	let isComposerCollapsed = false;
+	try {
+		isComposerCollapsed = localStorage.getItem(KEY_MOBILE_COMPOSER_COLLAPSED) === "true";
+	} catch {}
+	const composerToggle = document.createElement("button");
+	composerToggle.type = "button";
+	composerToggle.className = "mini workspace-composer-toggle";
+	composerToggle.setAttribute("aria-controls", "workspace-message-input");
+	const renderComposerToggle = () => {
+		if (!alive()) return;
+		const hasDraft = (textarea?.value || "").trim().length > 0;
+		composer.classList.toggle("workspace-composer-collapsed", isComposerCollapsed);
+		composerToggle.setAttribute("aria-expanded", String(!isComposerCollapsed));
+		const baseText = isComposerCollapsed ? t("mobile_compose_open") : `▾ ${t("mobile_compose_close")}`;
+		const draftSuffix = hasDraft ? ` · ${t("mobile_draft_indicator")}` : "";
+		composerToggle.textContent = baseText + draftSuffix;
+		composerToggle.setAttribute("aria-label", baseText + draftSuffix);
+		composerToggle.classList.toggle("has-draft", hasDraft);
+	};
+	composerToggle.addEventListener("click", () => {
+		if (!alive()) return;
+		isComposerCollapsed = !isComposerCollapsed;
+		try {
+			localStorage.setItem(KEY_MOBILE_COMPOSER_COLLAPSED, String(isComposerCollapsed));
+		} catch {}
+		renderComposerToggle();
+		if (!isComposerCollapsed) textarea?.focus({ preventScroll: true });
+		else composerToggle.focus({ preventScroll: true });
+	});
+	const onTextareaInput = () => {
+		renderComposerToggle();
+	};
+	textarea?.addEventListener("input", onTextareaInput);
+	textarea?.addEventListener("change", onTextareaInput);
+	if (!composer.contains(composerToggle)) composer.prepend(composerToggle);
+	const updateViewport = () => {
+		if (!alive()) return;
+		const isMob = isMobileLayout();
+		const vv = window.visualViewport;
+		if (!isMob || !vv) {
+			document.body.classList.remove("mobile-keyboard");
+			document.documentElement.style.removeProperty("--workspace-visible-height");
+			return;
+		}
+		if (Math.abs(vv.scale - 1) > .05) {
+			document.body.classList.remove("mobile-keyboard");
+			document.documentElement.style.removeProperty("--workspace-visible-height");
+			return;
+		}
+		const isKeyboard = vv.height < window.innerHeight - 80;
+		document.body.classList.toggle("mobile-keyboard", isKeyboard);
+		if (isKeyboard) {
+			document.documentElement.style.setProperty("--workspace-visible-height", `${vv.height}px`);
+			if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+		} else document.documentElement.style.removeProperty("--workspace-visible-height");
+	};
+	const onFocusIn = () => requestAnimationFrame(updateViewport);
+	const onFocusOut = () => requestAnimationFrame(updateViewport);
+	window.visualViewport?.addEventListener("resize", updateViewport);
+	window.visualViewport?.addEventListener("scroll", updateViewport);
+	window.addEventListener("resize", updateViewport);
+	textarea?.addEventListener("focusin", onFocusIn);
+	textarea?.addEventListener("focusout", onFocusOut);
+	updateInfo();
+	renderComposerToggle();
+	updateViewport();
+	return {
+		infoToggle,
+		composerToggle,
+		updateInfo,
+		updateDraft: renderComposerToggle,
+		dispose() {
+			isDisposed = true;
+			window.visualViewport?.removeEventListener("resize", updateViewport);
+			window.visualViewport?.removeEventListener("scroll", updateViewport);
+			window.removeEventListener("resize", updateViewport);
+			textarea?.removeEventListener("input", onTextareaInput);
+			textarea?.removeEventListener("change", onTextareaInput);
+			textarea?.removeEventListener("focusin", onFocusIn);
+			textarea?.removeEventListener("focusout", onFocusOut);
+			infoToggle.remove();
+			composerToggle.remove();
+			head.classList.remove("workspace-info-collapsed");
+			composer.classList.remove("workspace-composer-collapsed");
+			document.body.classList.remove("mobile-keyboard");
+			document.documentElement.style.removeProperty("--workspace-visible-height");
+		}
+	};
+}
+//#endregion
+//#region src/attention.js
 async function attentionView({ main, h, t, api, guard, caps, storageKey, route, onEvents, debounceRefresh, errorBox, sessionRow, workItemRow, opRow }) {
 	const unread = caps?.features?.work_item_reads?.version === 1;
 	const saved = sessionStorage.getItem(storageKey) || sessionStorage.getItem("batc.tab");
@@ -1309,6 +1629,13 @@ var STRINGS = {
 		workspace_result_empty: "尚無明確關聯的成果。可從下方保留 checkpoint。",
 		workspace_work_missing: "目前專案資料中找不到這筆工作，請重新整理工作樹。",
 		workspace_refresh: "重新讀取工作樹",
+		workspace_resizer: "調整側欄寬度",
+		workspace_resizer_help: "使用左右方向鍵或拖曳調整側欄寬度",
+		mobile_info_expand: "展開資訊",
+		mobile_info_collapse: "收合資訊",
+		mobile_compose_open: "撰寫訊息",
+		mobile_compose_close: "收合輸入區",
+		mobile_draft_indicator: "有草稿",
 		connection_details: "連線詳細資訊與設定檔",
 		delivery_repository_input: "儲存庫或 GitHub PR 網址",
 		needs_manage_access: "目前帳號可以查看，但沒有編輯專案的權限。請向管理員取得具有專案管理權限的帳號，再到「連線」更換憑證。",
@@ -2546,6 +2873,13 @@ var STRINGS = {
 		workspace_result_empty: "No linked result yet. You can record a checkpoint below.",
 		workspace_work_missing: "This work is no longer in the current project response. Refresh the work tree.",
 		workspace_refresh: "Refresh work tree",
+		workspace_resizer: "Resize sidebar",
+		workspace_resizer_help: "Use left and right arrow keys or drag to resize sidebar",
+		mobile_info_expand: "Expand info",
+		mobile_info_collapse: "Collapse info",
+		mobile_compose_open: "Write message",
+		mobile_compose_close: "Collapse composer",
+		mobile_draft_indicator: "Draft",
 		connection_details: "Connection details and configuration file",
 		delivery_repository_input: "Repository or GitHub PR URL",
 		needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",
@@ -10649,6 +10983,7 @@ async function viewSession(main, host, sid, context = null) {
 					try {
 						localStorage.removeItem(draftKey);
 					} catch {}
+					mobileLayout?.updateDraft();
 				}
 			} catch (e) {
 				status.replaceChildren(errorBox(e));
@@ -10675,7 +11010,10 @@ async function viewSession(main, host, sid, context = null) {
 			}
 		}
 	}, t("interrupt"));
-	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+	const composer = h("div", {
+		hidden: true,
+		id: "workspace-message-input"
+	}, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
 	const readonly = h("p", { class: "note" }, t("session_access_unknown"));
 	let capture, permissions, batHandoff;
 	const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
@@ -10704,6 +11042,13 @@ async function viewSession(main, host, sid, context = null) {
 		class: "workspace-conversation",
 		"aria-label": t("messages")
 	}, conversation.box, controls);
+	const mobileLayout = setupMobileSessionLayout({
+		head,
+		composer: controls,
+		textarea: box,
+		t,
+		guard: () => assertView(connection)
+	});
 	if (context?.picker) main.append(context.picker);
 	main.append(head, h("div", { class: "workspace-session" }, lane, inspector));
 	const renderPending = () => {
@@ -10818,6 +11163,7 @@ async function viewSession(main, host, sid, context = null) {
 			class: "muted",
 			href: `#/host/${encodeURIComponent(host)}`
 		}, row.host), chip(t(row.api_access === "managed" ? "managed" : "read_only"), row.api_access === "managed" ? "managed" : "readonly")));
+		mobileLayout?.updateInfo();
 		metadata.replaceChildren(h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, t("session_origin")), h("dd", {}, t("provenance_" + ([
 			"manual",
 			"connector_managed",
@@ -10986,6 +11332,7 @@ async function viewSession(main, host, sid, context = null) {
 		off();
 		batHandoff?.dispose();
 		conversation.dispose();
+		mobileLayout?.dispose();
 	};
 }
 function checkpointPanel(host, sid) {
@@ -13976,9 +14323,12 @@ var NAV = [
 ];
 var workspaceNav = null;
 var workspaceIdentity = "";
+var workspaceSidebar = null;
 function mountWorkspace(name) {
 	const identity = state.token ? `${state.epoch}:${state.namespace}` : "";
 	if (workspaceIdentity !== identity) {
+		workspaceSidebar?.dispose();
+		workspaceSidebar = null;
 		workspaceNav?.dispose();
 		workspaceNav = null;
 		workspaceIdentity = identity;
@@ -13997,6 +14347,11 @@ function mountWorkspace(name) {
 				errorBox
 			});
 			document.getElementById("workspace").prepend(workspaceNav.box);
+			workspaceSidebar = setupSidebarResizer({
+				aside: workspaceNav.box,
+				workspace: document.getElementById("workspace"),
+				t
+			});
 		}
 	}
 	document.body.classList.toggle("has-workspace", Boolean(state.token));

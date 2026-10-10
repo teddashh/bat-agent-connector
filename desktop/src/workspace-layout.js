@@ -118,13 +118,13 @@ export function setupSidebarResizer({ aside, workspace, t }) {
   };
 
   const onPointerMove = event => {
-    if (!isDragging) return;
+    if (!isDragging || event.pointerId !== activePointerId) return;
     const delta = event.clientX - startX;
     currentWidth = applyWidth(startWidth + delta, false);
   };
 
   const onPointerUp = event => {
-    if (!isDragging) return;
+    if (!isDragging || event.pointerId !== activePointerId) return;
     window.removeEventListener("keydown", onGlobalKeyDown);
     const delta = event.clientX - startX;
     currentWidth = applyWidth(startWidth + delta, true);
@@ -158,15 +158,15 @@ export function setupSidebarResizer({ aside, workspace, t }) {
     const { minAllowed, maxAllowed } = calcSidebarBounds();
     let handled = false;
     if (event.key === "ArrowLeft") {
-      currentWidth = applyWidth(currentWidth - 16, true);
+      currentWidth = applyWidth(currentWidth - (event.shiftKey ? 48 : 16), true);
       handled = true;
     } else if (event.key === "ArrowRight") {
-      currentWidth = applyWidth(currentWidth + 16, true);
+      currentWidth = applyWidth(currentWidth + (event.shiftKey ? 48 : 16), true);
       handled = true;
-    } else if (event.key === "PageDown" || (event.key === "ArrowLeft" && event.shiftKey)) {
+    } else if (event.key === "PageDown") {
       currentWidth = applyWidth(currentWidth - 48, true);
       handled = true;
-    } else if (event.key === "PageUp" || (event.key === "ArrowRight" && event.shiftKey)) {
+    } else if (event.key === "PageUp") {
       currentWidth = applyWidth(currentWidth + 48, true);
       handled = true;
     } else if (event.key === "Home") {
@@ -189,6 +189,7 @@ export function setupSidebarResizer({ aside, workspace, t }) {
   };
 
   const onWindowResize = () => {
+    if (isMobileLayout()) cancelDrag();
     if (!isMobileLayout()) {
       currentWidth = applyWidth(currentWidth, false);
     }
@@ -198,6 +199,7 @@ export function setupSidebarResizer({ aside, workspace, t }) {
   resizer.addEventListener("pointermove", onPointerMove);
   resizer.addEventListener("pointerup", onPointerUp);
   resizer.addEventListener("pointercancel", onPointerCancel);
+  resizer.addEventListener("lostpointercapture", onPointerCancel);
   resizer.addEventListener("keydown", onKeyDown);
   resizer.addEventListener("dblclick", onDblClick);
   window.addEventListener("resize", onWindowResize);
@@ -217,6 +219,7 @@ export function setupSidebarResizer({ aside, workspace, t }) {
       resizer.removeEventListener("pointermove", onPointerMove);
       resizer.removeEventListener("pointerup", onPointerUp);
       resizer.removeEventListener("pointercancel", onPointerCancel);
+      resizer.removeEventListener("lostpointercapture", onPointerCancel);
       resizer.removeEventListener("keydown", onKeyDown);
       resizer.removeEventListener("dblclick", onDblClick);
       window.removeEventListener("resize", onWindowResize);
@@ -293,7 +296,7 @@ export function setupMobileSessionLayout({ head, composer, textarea, t, guard })
   const composerToggle = document.createElement("button");
   composerToggle.type = "button";
   composerToggle.className = "mini workspace-composer-toggle";
-  composerToggle.setAttribute("aria-controls", "workspace-composer");
+  composerToggle.setAttribute("aria-controls", "workspace-message-input");
 
   const renderComposerToggle = () => {
     if (!alive()) return;
@@ -303,7 +306,7 @@ export function setupMobileSessionLayout({ head, composer, textarea, t, guard })
     composerToggle.setAttribute("aria-expanded", String(!isComposerCollapsed));
 
     const baseText = isComposerCollapsed
-      ? `✎ ${t("mobile_compose_open")}`
+      ? t("mobile_compose_open")
       : `▾ ${t("mobile_compose_close")}`;
     const draftSuffix = hasDraft ? ` · ${t("mobile_draft_indicator")}` : "";
     composerToggle.textContent = baseText + draftSuffix;
@@ -323,9 +326,7 @@ export function setupMobileSessionLayout({ head, composer, textarea, t, guard })
     if (!isComposerCollapsed) {
       textarea?.focus({ preventScroll: true });
     } else {
-      if (composer.contains(document.activeElement)) {
-        document.activeElement.blur();
-      }
+      composerToggle.focus({preventScroll: true});
     }
   });
 
@@ -355,6 +356,8 @@ export function setupMobileSessionLayout({ head, composer, textarea, t, guard })
     // We must NOT treat pinch zoom as a virtual keyboard.
     const isPinchZoom = Math.abs(vv.scale - 1) > 0.05;
     if (isPinchZoom) {
+      document.body.classList.remove("mobile-keyboard");
+      document.documentElement.style.removeProperty("--workspace-visible-height");
       return;
     }
 

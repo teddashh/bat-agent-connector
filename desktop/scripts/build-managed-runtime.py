@@ -34,7 +34,7 @@ def main() -> None:
             "--noupx", "--name", "batc-managed-runtime", "--distpath", str(BUILD / "dist"),
             "--workpath", str(BUILD / "work"), "--specpath", str(BUILD),
             "--paths", str(ROOT / "src"),
-            "--collect-all", "bat_agent_connector", "--collect-all", "mcp",
+            "--collect-all", "bat_agent_connector",
             # Host helpers are transmitted as source, not imported on the central host.
             "--add-data", f"{ROOT / 'src' / 'bat_agent_connector'}:bat_agent_connector",
             str(ROOT / "desktop" / "scripts" / "managed-runtime-entry.py"),
