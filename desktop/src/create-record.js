@@ -4,6 +4,11 @@ const equal = (a, b) => a === b || (a && b && typeof a === 'object' && typeof b 
   && Object.keys(a).every(key => Object.hasOwn(b, key) && equal(a[key], b[key])));
 const opId = value => typeof value === 'string' && /^op_[0-9a-f]{32}$/.test(value);
 const terminal = value => ['succeeded', 'failed', 'cancelled'].includes(value?.status);
+// These create-action admission checks run before inserting an operation. Generic
+// HTTP/auth errors and errors from a replay never prove an earlier request absent.
+const admissionRefusals = {INVALID_PARAMS: 422, INVALID_TARGET: 422, NAME_TAKEN: 409,
+  PROJECT_NOT_FOUND: 404, WORK_ITEM_NOT_FOUND: 404, PROJECT_ARCHIVED: 409,
+  WORK_ITEM_ARCHIVED: 409, WRONG_PROJECT: 409};
 export function createRecordForm({h, t, api, caps, guard, namespace, kind, projectId = null, onCreated, errorBox, opStatus}) {
   const project = kind === 'project', action = project ? 'project.create' : 'work_item.create';
   const target = project ? {} : {project_id: projectId}, key = `batc.create.${namespace}.${kind}.${projectId || 'root'}`;
@@ -86,24 +91,28 @@ export function createRecordForm({h, t, api, caps, guard, namespace, kind, proje
     if (busy || damaged || !allowed || !permitted()) return;
     if (!saved.intent && !form.reportValidity()) return;
     busy = true; update(); status.replaceChildren();
+    let firstAttempt = false;
     try {
       guard();
       if (!saved.intent) {
         const next = {version: 1, values: capture(), intent: {key: crypto.randomUUID(), request: {action, target, params: params(), preconditions: {}}}};
-        localStorage.setItem(key, JSON.stringify(next)); saved = next;
+        localStorage.setItem(key, JSON.stringify(next)); saved = next; firstAttempt = true;
       }
       const intent = saved.intent;
       const result = intent.operation_id ? await api('GET', `/operations/${intent.operation_id}`)
         : await api('POST', '/operations?wait=3', intent.request, intent.key);
       await accept(result.operation);
     } catch (error) {
-      try {guard(); if (saved.intent && !saved.intent.operation_id && [400, 401, 403, 404, 422].includes(error.status)) {saved.intent.refused = true; persist();}
+      try {guard(); if (firstAttempt && saved.intent && !saved.intent.operation_id
+          && Object.hasOwn(admissionRefusals, error.code) && admissionRefusals[error.code] === error.status) {
+          saved.intent.initialAdmissionRefused = true; persist();
+        }
         status.replaceChildren(errorBox(error));} catch { /* retired or storage unavailable */ }
     } finally {busy = false; try {guard(); update();} catch { /* retired */ }}
   };
   const create = h('button', {class: 'primary', type: 'submit'}, t(project ? 'add_project' : 'add_item'));
   const review = h('button', {class: 'secondary', type: 'button', hidden: true, onclick: () => {
-    guard(); if (busy || !(terminal(operation) || saved.intent?.refused)) return;
+    guard(); if (busy || !(terminal(operation) || saved.intent?.initialAdmissionRefused)) return;
     try {
       const next = {version: 1, values: saved.values}; localStorage.setItem(key, JSON.stringify(next)); saved = next; operation = null;
       receipt.replaceChildren(); status.replaceChildren(); update();
@@ -113,9 +122,9 @@ export function createRecordForm({h, t, api, caps, guard, namespace, kind, proje
     scope, compact, advanced, h('div', {class: 'actions'}, create, review, unsaved), status, receipt);
   function update() {
     for (const input of fields.values()) input.disabled = !allowed || !permitted() || busy || !!saved.intent || damaged;
-    create.disabled = !allowed || !permitted() || busy || damaged || !!saved.intent?.refused || !!saved.intent && terminal(operation);
+    create.disabled = !allowed || !permitted() || busy || damaged || !!saved.intent?.initialAdmissionRefused || !!saved.intent && terminal(operation);
     create.textContent = t(saved.intent ? 'create_check_original' : project ? 'add_project' : 'add_item');
-    review.hidden = !(saved.intent?.refused || saved.intent && terminal(operation) && operation.status !== 'succeeded');
+    review.hidden = !(saved.intent?.initialAdmissionRefused || saved.intent && terminal(operation) && operation.status !== 'succeeded');
     review.disabled = busy || !allowed || !permitted();
   }
   if (damaged) status.replaceChildren(h('p', {class: 'error'}, t('create_invalid_draft')));

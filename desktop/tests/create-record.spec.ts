@@ -10,7 +10,7 @@ function fixture() {
   const second = {...root, project_id: other, name: 'Related project'};
   const item = {work_item_id: wid, project_id: pid, title: 'Existing source', children: [], steps: [], version: 1,
     completion: {display_state: 'todo', pending: false}, archived: false};
-  const state = {writes: [] as any[], lost: false, manage: true, managed: false, wrongReceipt: false, archived: false, ops: new Map<string, any>()};
+  const state = {writes: [] as any[], lost: false, manage: true, managed: false, wrongReceipt: false, archived: false, reject: null as null | {status:number,code:string}, ops: new Map<string, any>()};
   const caps = () => ({actor: 'reader', scopes: state.manage ? ['observe', 'manage'] : ['observe'], api_version: 1,
     contract_version: '2026-10-08', hosts: [], actions: [{action:'project.create',allowed:state.manage},{action:'work_item.create',allowed:state.manage}],
     ...(state.managed ? {managed_installation:{runtime_version:'0.2.4',background:true}} : {}),
@@ -25,6 +25,7 @@ function fixture() {
     if (path.startsWith('/operations/') && input.method === 'GET') return {status:200,data:{operation:[...state.ops.values()].find(op=>path.endsWith(op.operation_id))}};
     if (path === '/operations' && input.method === 'POST') {
       state.writes.push(input);
+      if (state.reject) return {status:state.reject.status,data:{error:{code:state.reject.code,message:'Creation request rejected'}}};
       const operation = state.ops.get(input.idempotency_key) || {...input.body,actor:'reader',idempotency_key:input.idempotency_key,
         operation_id:'op_'+String(state.ops.size+1).padStart(32,'0'),status:'succeeded',result:{project_id:pid,work_item_id:'wi_'+'b'.repeat(20)}};
       state.ops.set(input.idempotency_key,operation);
@@ -143,6 +144,57 @@ for (const native of [false,true]) test.describe(native ? 'Native create' : 'Bro
     expect(f.state.writes[1].body).toEqual(f.state.writes[0].body);
     expect(f.state.writes[1].idempotency_key).toBe(f.state.writes[0].idempotency_key);
     await expect(page).toHaveURL(new RegExp('#/project/'+pid+'$'));
+  });
+
+  for (const uncertain of ['lost reply','foreign receipt']) for (const status of [401,403,422])
+    test(`${uncertain} followed by ${status} retains the original creation across reload`,async({page})=>{
+      const f=fixture(); f.state.lost=uncertain==='lost reply'; f.state.wrongReceipt=uncertain==='foreign receipt';
+      await mountConversation(page,native,f.dispatch); await page.goto('/dashboard/#/projects');
+      const form=page.locator('[data-create-record="project"]');
+      await form.getByLabel('New project name',{exact:true}).fill('Only one creation');
+      await form.getByRole('button',{name:'Add',exact:true}).click();
+      await expect(form).toContainText(uncertain==='lost reply'?'Original reply unavailable':'The receipt does not match');
+      expect(f.state.ops.size).toBe(1);
+      if (status===401 && uncertain==='lost reply') await page.evaluate(()=>{
+        // The previous client could persist this flag after an ambiguous replay.
+        const key=Object.keys(localStorage).find(key=>key.startsWith('batc.create.'))!;
+        const value=JSON.parse(localStorage.getItem(key)!); value.intent.refused=true;
+        localStorage.setItem(key,JSON.stringify(value));
+      });
+      await page.reload();
+      f.state.reject={status,code:status===401?'UNAUTHORIZED':status===403?'FORBIDDEN':'INVALID_PARAMS'};
+      await form.getByRole('button',{name:'Check original creation request',exact:true}).click();
+      await expect.poll(()=>f.state.writes.length).toBe(2);
+      await expect(form.getByRole('button',{name:'Edit a new creation request',exact:true})).toBeHidden();
+      await expect(form.getByRole('button',{name:'Check original creation request',exact:true})).toBeEnabled();
+      await page.reload();
+      await expect(form.getByLabel('New project name',{exact:true})).toBeDisabled();
+      await expect(form.getByRole('button',{name:'Edit a new creation request',exact:true})).toBeHidden();
+      f.state.reject=null; f.state.wrongReceipt=false;
+      await form.getByRole('button',{name:'Check original creation request',exact:true}).click();
+      await expect(page).toHaveURL(new RegExp('#/project/'+pid+'$'));
+      expect(f.state.writes).toHaveLength(3); expect(f.state.ops.size).toBe(1);
+      for (const request of f.state.writes.slice(1)) {
+        expect(request.idempotency_key).toBe(f.state.writes[0].idempotency_key);
+        expect(request.body).toEqual(f.state.writes[0].body);
+      }
+    });
+
+  test('proven first-attempt validation refusal allows reviewing a new creation request',async({page})=>{
+    const f=fixture(); f.state.reject={status:422,code:'INVALID_PARAMS'};
+    await mountConversation(page,native,f.dispatch); await page.goto('/dashboard/#/projects');
+    const form=page.locator('[data-create-record="project"]');
+    await form.getByLabel('New project name',{exact:true}).fill('Invalid original');
+    await form.getByRole('button',{name:'Add',exact:true}).click();
+    await expect(form.getByRole('button',{name:'Edit a new creation request',exact:true})).toBeVisible();
+    expect(f.state.ops.size).toBe(0);
+    await page.reload();
+    await form.getByRole('button',{name:'Edit a new creation request',exact:true}).click();
+    await form.getByLabel('New project name',{exact:true}).fill('Corrected work');
+    f.state.reject=null; await form.getByRole('button',{name:'Add',exact:true}).click();
+    await expect(page).toHaveURL(new RegExp('#/project/'+pid+'$'));
+    expect(f.state.ops.size).toBe(1);
+    expect(f.state.writes[1].idempotency_key).not.toBe(f.state.writes[0].idempotency_key);
   });
 
   test('managed location explanation separates central data and selected BAT workspaces',async({page})=>{
