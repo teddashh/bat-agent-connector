@@ -117,7 +117,8 @@ class ApiV1:
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
-        from . import product_preferences, project_skills
+        from . import managed_repairs, product_preferences, project_skills
+        managed_repairs.install(daemon.ops)
         product_preferences.install(daemon.ops)
         project_skills.install(daemon.ops)
         from .session_observation import SessionObservation
@@ -151,6 +152,7 @@ class ApiV1:
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/wait", self.session_wait, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/history", self.session_history, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/relations", self.session_relations, "observe"),
+            ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/instructions", self.session_instructions, "observe"),
             ("GET", r"/api/v1/hosts/(?P<host>[^/]+)/discovery", self.discovery, "observe"),
             ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})", self.worktree, "observe"),
             ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})/history", self.worktree_history, "observe"),
@@ -186,6 +188,8 @@ class ApiV1:
             ("GET", r"/api/v1/projects", self.projects, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})", self.project, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})/skills", self.project_skills, "observe"),
+            ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})/repair-evidence", self.repair_evidence, "observe"),
+            ("GET", r"/api/v1/work-items/(?P<wid>wi_[0-9a-f]{20})/repair", self.work_item_repair, "observe"),
             ("GET", r"/api/v1/work-items/(?P<wid>wi_[0-9a-f]{20})/result-sources", self.work_item_results, "observe"),
             ("GET", r"/api/v1/work-items", self.work_items, "observe"),
             ("GET", r"/api/v1/work-items/(?P<wi>wi_[0-9a-f]{20})", self.work_item, "observe"),
@@ -320,6 +324,9 @@ class ApiV1:
                 query = parse_qs(parts.query, keep_blank_values=True)
                 kwargs.update(reader=reader, writer=writer,
                               check_authorization=authorizer(self.daemon, token, principal))
+            if fn in {self.repair_evidence, self.work_item_repair, self.session_instructions}:
+                # Empty or repeated selectors cannot silently become defaults.
+                query = parse_qs(parts.query, keep_blank_values=True)
             status, payload = await fn(principal=principal, query=query, body=body, headers=headers, **kwargs)
         except dashboard_sync.ResetRequired as e:
             status, payload = 409, e.document()
@@ -423,6 +430,15 @@ class ApiV1:
         values = query.get(name)
         return values[-1] if values else default
 
+    @staticmethod
+    def _exact_query(query, allowed):
+        if set(query) - set(allowed) or any(
+            len(values) != 1 or not values[0] or len(values[0]) > 2048
+            or any(ord(char) < 32 or ord(char) == 127 for char in values[0])
+            for values in query.values()
+        ):
+            raise ApiError(422, "INVALID_REQUEST", "use one nonempty value for each supported query field")
+
     def _int(self, query: dict, name: str, default: int) -> int:
         try:
             return int(self._q(query, name, default))
@@ -463,6 +479,7 @@ class ApiV1:
                                and (a.name not in {"artifact.capture", "artifact.capture.managed", "session.approve_pending"} or principal.allows("observe"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
+                  "profile_id": fleet.config.host(h).profile_id,
                   "orchestrate": fleet.orchestrate_enabled(h),
                   "managed_roots": list(fleet.config.host(h).managed_roots),
                   "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
@@ -498,6 +515,8 @@ class ApiV1:
                                   "host_preferences": {"version": 1, "model_catalog": True, "usage": True, "personal_models": True},
                                   "project_skills": {"version": 1, "pinned_selection": True, "application": False},
                                   "work_item_results": {"version": 1},
+                                  "managed_repairs": {"version": 1, "fixed_evidence": True, "auto_launch": False},
+                                  "session_instructions": {"version": 1, "live_queue": False, "per_message_cancel": False},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
@@ -588,6 +607,26 @@ class ApiV1:
             raise ApiError(422, "INVALID_REQUEST", "unknown skill query")
         return 200, await project_skills.read(self.daemon.ops, principal, prj,
             self._q(query, "host"), self._q(query, "workspace_id"), refresh=bool(self._bool(query, "refresh")))
+
+    async def repair_evidence(self, principal, prj, query, **_):
+        from . import managed_repairs
+        self._exact_query(query, {"kind", "host", "profile_id", "operation_id"})
+        return 200, managed_repairs.read(self.daemon.ops, principal, prj,
+                                         {key: values[0] for key, values in query.items()})
+
+    async def work_item_repair(self, principal, wid, query, **_):
+        from . import managed_repairs
+        self._exact_query(query, set())
+        return 200, managed_repairs.read_work_item(self.daemon.ops, principal, wid)
+
+    async def session_instructions(self, principal, host, sid, query, **_):
+        from . import session_instructions
+        self._exact_query(query, {"limit", "cursor"})
+        limit = self._q(query, "limit", "30")
+        if not re.fullmatch(r"[0-9]{1,3}", limit):
+            raise ApiError(422, "INVALID_REQUEST", "limit must be 1-100")
+        return 200, session_instructions.read(self.daemon.ops, principal, host, sid,
+                                             limit=int(limit), cursor=self._q(query, "cursor"))
 
     async def sessions(self, query, principal, **_):
         from .session_reading import decorate
@@ -698,7 +737,7 @@ class ApiV1:
                 principal, action=body.get("action"), target=body.get("target"), params=body.get("params"),
                 preconditions=body.get("preconditions"), idempotency_key=key, entry="http")
         except OperationError as error:
-            if body.get("action") not in {"setup.host", "setup.repository"}:
+            if body.get("action") not in {"setup.host", "setup.repository", "setup.verification"}:
                 raise
             # This boundary is before a new durable setup operation exists. The UI
             # may review invalid input again; lost transport replies still keep the key.

@@ -1112,10 +1112,10 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     let pattern = if input.method == "GET" {
         GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|workspaces|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|managed/setup|",
             r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|artifacts(?:/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8})?|",
-            r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
+            r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations|instructions))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
             r"hosts/[A-Za-z0-9_.-]+/(?:discovery|preferences)|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
-            r"projects/prj_[0-9a-f]{20}(?:/skills)?|work-items/wi_[0-9a-f]{20}(?:/result-sources)?|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls(?:/[0-9]{1,9})?|",
+            r"projects/prj_[0-9a-f]{20}(?:/(?:skills|repair-evidence))?|work-items/wi_[0-9a-f]{20}(?:/(?:result-sources|repair))?|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls(?:/[0-9]{1,9})?|",
             r"deployments(?:/(?:preview|dep_[0-9a-f]{32}))?|deployment-environments(?:/history)?|",
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
@@ -1208,6 +1208,14 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         validate_managed_capture_preview(input.body.as_ref())?;
     }
     let cleanup = path.starts_with("/cleanup-");
+    let repair_evidence = path.ends_with("/repair-evidence");
+    let instructions = path.ends_with("/instructions");
+    if path.ends_with("/repair") && !query.is_empty() {
+        return Err("Fixed repair work accepts no query selectors".into());
+    }
+    if instructions && path.split('/').skip(2).take(2).any(|part| part.len() > 256) {
+        return Err("Instruction receipt host and session IDs are bounded".into());
+    }
     if path == "/workspaces" && input.idempotency_key.is_some() {
         return Err("Workspace discovery accepts no operation key".into());
     }
@@ -1215,6 +1223,53 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key.chars().chain(value.chars()).any(char::is_control) {
             return Err("Control characters in central query are refused".into());
+        }
+        if repair_evidence {
+            let valid = match key.as_ref() {
+                "kind" => matches!(value.as_ref(), "discovery" | "operation"),
+                "host" => {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                }
+                "profile_id" => !value.is_empty() && value.len() <= 2048,
+                "operation_id" => {
+                    value.len() == 35
+                        && value.starts_with("op_")
+                        && value[3..]
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                }
+                _ => false,
+            };
+            if !valid || !query_keys.insert(key.to_string()) {
+                return Err("Invalid fixed repair evidence selector".into());
+            }
+            continue;
+        }
+        if instructions {
+            let valid = match key.as_ref() {
+                "limit" => {
+                    !value.is_empty()
+                        && value.len() <= 3
+                        && value.bytes().all(|b| b.is_ascii_digit())
+                        && value.parse::<u16>().is_ok_and(|n| (1..=100).contains(&n))
+                }
+                "cursor" => {
+                    !value.is_empty()
+                        && value.len() <= 2048
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_=".contains(&b))
+                }
+                _ => false,
+            };
+            if !valid || !query_keys.insert(key.to_string()) {
+                return Err("Invalid instruction receipt page query".into());
+            }
+            continue;
         }
         let preferences = path.starts_with("/hosts/") && path.ends_with("/preferences");
         let skills = path.starts_with("/projects/") && path.ends_with("/skills");
@@ -1410,6 +1465,23 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     if query_keys.contains("source_kind") != query_keys.contains("source_id") {
         return Err("Delivery source selector requires kind and ID".into());
     }
+    if repair_evidence {
+        let kind = url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "kind")
+            .map(|(_, value)| value.into_owned());
+        let exact = match kind.as_deref() {
+            Some("discovery") => {
+                query_keys.len() == 3
+                    && query_keys.contains("host")
+                    && query_keys.contains("profile_id")
+            }
+            Some("operation") => query_keys.len() == 2 && query_keys.contains("operation_id"),
+            _ => false,
+        };
+        if !exact {
+            return Err("Repair evidence requires one exact discovery or operation source".into());
+        }
+    }
     if path.ends_with("/skills")
         && !(query_keys.contains("host") && query_keys.contains("workspace_id"))
     {
@@ -1498,6 +1570,60 @@ mod tests {
         ] {
             assert!(validate_request(&get(path)).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn repair_and_instruction_reads_require_exact_bounded_sources() {
+        for path in [
+            "/projects/prj_00000000000000000000/repair-evidence?kind=discovery&host=fixture&profile_id=default",
+            "/projects/prj_00000000000000000000/repair-evidence?kind=operation&operation_id=op_00000000000000000000000000000000",
+            "/work-items/wi_00000000000000000000/repair",
+            "/sessions/fixture/exact/instructions",
+            "/sessions/fixture/exact/instructions?limit=100&cursor=YQ_-",
+        ] {
+            assert!(validate_request(&get(path)).is_ok(), "{path}");
+            assert!(validate_request(&request("POST", path)).is_err(), "{path}");
+        }
+        for query in ["", "kind=discovery&host=fixture", "kind=discovery&host=fixture&profile_id=",
+            "kind=discovery&host=fixture&profile_id=default&host=other",
+            "kind=discovery&host=fixture&profile_id=default&operation_id=op_00000000000000000000000000000000",
+            "kind=operation&operation_id=bad", "kind=operation&operation_id=op_00000000000000000000000000000000&prompt=override"] {
+            assert!(validate_request(&get(&format!("/projects/prj_00000000000000000000/repair-evidence?{query}"))).is_err(), "{query}");
+        }
+        for query in [
+            "limit=0",
+            "limit=101",
+            "limit=1&limit=2",
+            "limit=",
+            "cursor=",
+            "cursor=a%0Ab",
+            "cursor=a&cursor=b",
+            "limit=1.0",
+            "host=other",
+            "cancel=true",
+        ] {
+            assert!(
+                validate_request(&get(&format!(
+                    "/sessions/fixture/exact/instructions?{query}"
+                )))
+                .is_err(),
+                "{query}"
+            );
+        }
+        assert!(validate_request(&get(
+            "/work-items/wi_00000000000000000000/repair?host=other"
+        ))
+        .is_err());
+        assert!(validate_request(&get(&format!(
+            "/sessions/fixture/{}/instructions",
+            "s".repeat(257)
+        )))
+        .is_err());
+        assert!(validate_request(&get(&format!(
+            "/sessions/fixture/exact/instructions?cursor={}",
+            "a".repeat(2049)
+        )))
+        .is_err());
     }
 
     #[test]
