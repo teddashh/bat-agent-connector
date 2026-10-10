@@ -53,6 +53,26 @@ for (const native of [false,true]) {
     await expect.poll(()=>f.data.after,{timeout:10000}).toBe(1);await expect(link).toBeFocused();
     expect(f.data.posts).toEqual([]);
   });
+  test(`${native?'IPC':'HTTP'} collapsed parent stays closed across updates and reloads`,async({page})=>{
+    const f=workspaceFixture();
+    const parent={...f.data.roots[1],name:'Parent project',children:[f.data.roots[0]]};
+    f.data.roots.splice(0,2,parent);
+    await mountWorkspace(page,native,f);await page.goto('/dashboard/'+workspaceRoute);
+    const collapse=page.getByRole('button',{name:'Collapse Parent project',exact:true});
+    await expect(collapse).toBeVisible();
+    await expect(page.locator('.workspace-nav').getByRole('link',{name:/Improve empty search results/})).toBeVisible();
+    await collapse.click();
+    const expand=page.getByRole('button',{name:'Expand Parent project',exact:true});
+    f.data.events.push({seq:1,resource_type:'project',resource_id:parent.project_id,kind:'project.updated'});
+    await expect.poll(()=>f.data.after,{timeout:10000}).toBe(1);
+    await expect(expand).toHaveAttribute('aria-expanded','false');
+    await page.goto('/dashboard/#/home');await page.reload();
+    await expect(expand).toHaveAttribute('aria-expanded','false');
+    await page.goto('/dashboard/'+workspaceRoute);
+    await expect(collapse).toBeVisible();
+    await expect(page.locator('.workspace-nav').getByRole('link',{name:/Improve empty search results/})).toBeVisible();
+    expect(f.data.posts).toEqual([]);
+  });
   test(`${native?'IPC':'HTTP'} unknown and manual work remain read only`,async({page})=>{
     const f=workspaceFixture(); f.data.session.api_access='read_only'; f.data.session.provenance='manual';
     await mountWorkspace(page,native,f); await page.goto('/dashboard/'+workspaceRoute);

@@ -104,7 +104,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 		hasPreference = raw !== null;
 	} catch {}
 	const expanded = new Set(Array.isArray(saved) ? saved : []), projects = new Map();
-	let roots = [], disposed = false, serial = Promise.resolve(), selected = location.hash;
+	let roots = [], disposed = false, serial = Promise.resolve(), selected = location.hash, revealProject = null;
 	const status = h("div", {
 		class: "workspace-tree-status",
 		role: "status"
@@ -220,11 +220,15 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 				const walk = (list, ancestors = []) => {
 					for (const p of list) {
 						ids.add(p.project_id);
-						if (expanded.has(p.project_id)) ancestors.forEach((id) => expanded.add(id));
+						if (p.project_id === revealProject) [...ancestors, p.project_id].forEach((id) => expanded.add(id));
 						walk(p.children || [], [...ancestors, p.project_id]);
 					}
 				};
 				walk(roots);
+				if (revealProject !== null) {
+					revealProject = null;
+					persist();
+				}
 				for (const id of projects.keys()) if (!ids.has(id) || !expanded.has(id)) projects.delete(id);
 				for (const id of expanded) if (ids.has(id)) {
 					const detail = await api("GET", `/projects/${encodeURIComponent(id)}`);
@@ -310,9 +314,8 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 				"project",
 				"dispatch",
 				"work"
-			].includes(type) && pid && !expanded.has(decodeURIComponent(pid))) {
-				expanded.add(decodeURIComponent(pid));
-				persist();
+			].includes(type) && pid) {
+				revealProject = decodeURIComponent(pid);
 				refresh().catch(() => {});
 			}
 			for (const node of box.querySelectorAll("a")) if (node.getAttribute("href") === hash) node.setAttribute("aria-current", "page");
