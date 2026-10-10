@@ -824,6 +824,10 @@ def build_parser() -> argparse.ArgumentParser:
             c.add_argument("--prompt", required=True)
             c.add_argument("--agent", choices=["claude", "codex"], default="claude")
             c.add_argument("--title")
+            c.add_argument("--model")
+            c.add_argument("--artifact", action="append", help="Exact ready ArtifactRef JSON; repeat for each input")
+            c.add_argument("--project-id")
+            c.add_argument("--project-version", type=int)
             c.add_argument("--key", help="original idempotency key; omitted creates an independent request")
             c.add_argument("--confirm", action="store_true")
     p = sp.add_parser("checkpoint", help="record a session's commit, then continue from it in a managed session")
@@ -1057,8 +1061,12 @@ def cmd_repository(args) -> int:
         key = args.key or "cli-" + str(uuid.uuid4())
         out = request("op_submit", action="repository.continue", target=target,
             params={"source_ref": args.ref, "source_sha": args.sha, "prompt": args.prompt, "agent": args.agent,
-                    **({"title": args.title} if args.title is not None else {})},
-            preconditions={"repository_id": args.repository_id, "binding_digest": args.binding_digest},
+                    **({"title": args.title} if args.title is not None else {}),
+                    **({"model": args.model} if args.model is not None else {}),
+                    **({"artifacts": [json.loads(ref) for ref in args.artifact]} if args.artifact is not None else {}),
+                    **({"project_id": args.project_id} if args.project_id is not None else {})},
+            preconditions={"repository_id": args.repository_id, "binding_digest": args.binding_digest,
+                           **({"expected_project_version": args.project_version} if args.project_version is not None else {})},
             idempotency_key=key, wait_s=30, entry="cli", timeout=40)
         out = {**out, "idempotency_key": key}
     _print(out, True)

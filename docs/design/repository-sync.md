@@ -32,6 +32,12 @@ preview 不建立 clone、session 或 operation；不是永久授權。
  "preconditions":{"repository_id":123,"binding_digest":"<64 hex>"},"idempotency_key":"<original key>"}
 ```
 
+選填 `params.model`（1–256 字元）沿用既有 session start；`params.artifacts` 為 ready revision 的
+`{artifact_id, revision, digest}` 清單，沿用中央附件數量／總 bytes 限制。原 prompt 不被改寫，
+只附上已驗證相對路徑與 digest manifest，合計仍受 BAT prompt 長度限制。
+專案入口另固定 `params.project_id` 與 `preconditions.expected_project_version`；中央要求專案未封存、
+版本相同且 repository 屬於該專案。省略 project_id 的原有 published-start 合約維持相容。
+
 本切片只接受已檢視 ref 的**精確 head**，不提供 ancestor／tag／PR fork 選擇。首次 fetch 前 ref 前進
 即停止，永不把選定 SHA 換成 latest。已成功 fetch／固定的 receipt 優先於之後移動的 ref；重播不要求
 原 head 永遠停在遠端。repository numeric ID、原 ref／head、remote URL、host profile、workspace ID／folder、
@@ -49,6 +55,10 @@ managed root、設定 digest 存在同一 operation 的固定來源 receipt，�
    只依固定 marker／ref／object 讀回或安全補完。
 3. `worktree.prepare`：只在自有 clone 加固定 operation branch／worktree。重試已有 carrier 需核對
    common Git directory、branch、HEAD、原 creation intent；不 reset、pull、checkout 已有 worktree。
+   有附件時，先以同一 operation 保留精確 revisions，再於 `.batc-inputs/` materialize。
+   helper 額外核對 published clone 的 operation／binding marker、完整 source SHA、固定 branch／worktree。
+   每次傳輸前重查專案／目的地，每個未送出 start／prompt frame 前再驗證 materialized bytes。
+   已送出 prompt 的回復只讀原 receipt，不因輸入之後改變就重新傳輸或送出指示。
 4. 沿用中央 `verify.start`、`session.start`、`send` 的獨立 durable intents、claim／capacity、confinement
    與 receipt。每個未送出的 BAT frame 前重新驗證 host／workspace／設定與 ownership。回覆不明保留
    session ID／carrier／claims；沒有正向 readback 不再送 start 或 prompt。已完成 receipt 不因新政策而消失。
@@ -82,6 +92,16 @@ native bridge 僅增加固定且 typed 的 `/repository-previews`，接受四個
 remote URL、path、credential、force、query 或 operation key。它仍透過既有 `/operations` 執行中央動作。
 成功 published execution 可進入既有 B2 managed artifact capture；unknown／尚無原始 prompt receipt 不成為候選。
 介面不宣稱 clone／session 的完成表示任務完成、PR 合併或部署。
+
+專案詳情的 **Quick project dispatch／專案快速派工** 進入 `#/dispatch/<project_id>`，重用同一個
+composer。中央宣告 `features.project_dispatch.version = 1` 才提供新入口；只有唯一明確綁定時
+自動選取目的地，多個綁定需自行選擇。預覽固定專案版本，專案更新會清除舊預覽而保留輸入。
+標題／模型放在進階設定；附件沿用既有瀏覽器上傳、native file adapter 或已上傳 revision 選擇。
+草稿依中央／身分／專案隔離；送出後固定原 envelope、key 與附件 digest，不建立額外 Work Item
+或 Task Service task。封存或取消 host tier 後，未知回覆仍可用原 key 交中央判斷 replay。
+同主機未發布狀態仍走既有 checkpoint continuation，此入口只消費已發布版本。
+CLI `repository continue --project-id … --project-version … --model … --artifact '<ref JSON>'` 與
+MCP `work_continue_from_repository` 使用相同 action；`--artifact` 可重複指定。
 
 ## 驗證與尚未涵蓋
 

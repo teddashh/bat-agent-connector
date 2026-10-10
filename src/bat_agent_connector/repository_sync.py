@@ -10,12 +10,27 @@ import uuid
 from dataclasses import asdict
 from importlib import resources
 
-from . import checkpoints, registry, resource_policy, service, task_control
+from . import artifacts, checkpoints, registry, resource_policy, service, task_control, work_items
 from .operations import RERUN, ActionDef, AmbiguousOutcome, NeedsAttention, OperationError, StepFailed
 
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
-FIELDS = {"source_ref", "source_sha", "agent", "prompt", "title"}
+FIELDS = {"source_ref", "source_sha", "agent", "prompt", "title", "model", "artifacts", "project_id"}
+
+
+def project_context(ops, target, params, pre):
+    pid = params.get("project_id")
+    if pid is None:
+        if "expected_project_version" in pre:
+            raise OperationError("INVALID_PARAMS", "project version requires project_id", 422)
+        return
+    if not isinstance(pid, str) or not work_items.PROJECT_ID.fullmatch(pid):
+        raise OperationError("INVALID_PARAMS", "an exact project_id is required", 422)
+    project = work_items._get_project(ops.db, pid, active=True)
+    if type(pre.get("expected_project_version")) is not int or pre["expected_project_version"] != project["version"]:
+        raise OperationError("PROJECT_CHANGED", "review the current project before starting", 409)
+    if target["repository"].lower() not in {r.lower() for r in project["repositories"]}:
+        raise OperationError("PROJECT_REPOSITORY_CHANGED", "selected repository does not belong to this project", 409)
 
 
 def install(ops):
@@ -64,7 +79,8 @@ def check_ref(ref):
 
 def admit(ops, principal, target, params, pre):
     configured(ops, target)
-    if set(params) - FIELDS or set(pre) != {"repository_id", "binding_digest"}:
+    expected = {"repository_id", "binding_digest"} | ({"expected_project_version"} if "project_id" in params else set())
+    if set(params) - FIELDS or set(pre) != expected:
         raise OperationError("INVALID_PARAMS", "published start requires exact preview preconditions", 422)
     check_ref(params.get("source_ref"))
     if (not isinstance(params.get("source_sha"), str) or not SHA.fullmatch(params["source_sha"])
@@ -73,10 +89,14 @@ def admit(ops, principal, target, params, pre):
         raise OperationError("INVALID_PARAMS", "full source SHA, repository ID and binding digest required", 422)
     if not isinstance(params.get("agent", "claude"), str) or params.get("agent", "claude") not in {"claude", "codex"}:
         raise OperationError("INVALID_PARAMS", "agent must be claude or codex", 422)
-    for key, limit in (("prompt", 12000), ("title", 256)):
+    for key, limit in (("prompt", 12000), ("title", 256), ("model", 256)):
         if key == "prompt" or key in params:
             if not isinstance(params.get(key), str) or not params[key].strip() or len(params[key]) > limit:
                 raise OperationError("INVALID_PARAMS", f"{key} must contain 1-{limit} characters", 422)
+    project_context(ops, target, params, pre)
+    refs = artifacts.normalize_refs(ops.db, params.get("artifacts", []), ops.context["artifact_store"].settings)
+    if len(checkpoints._input_instructions(ops.db, params["prompt"], refs)) > service.MAX_PROMPT_CHARS - 100:
+        raise OperationError("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit", 422)
 
 
 async def gh_read(call):
@@ -147,10 +167,11 @@ def receipt(ctx, name):
 
 
 async def resolve(ctx):
+    project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions)
     selected = await source_preview(ctx.service, {**ctx.target, "source_ref": ctx.params["source_ref"]})
     if selected["source_sha"] != ctx.params["source_sha"]:
         raise StepFailed("REPOSITORY_REF_CHANGED", "selected published head changed")
-    if selected["preconditions"] != ctx.preconditions:
+    if selected["preconditions"] != {k: ctx.preconditions[k] for k in ("repository_id", "binding_digest")}:
         raise StepFailed("REPOSITORY_BINDING_CHANGED", "reviewed repository/workspace configuration changed")
     config = config_snapshot(ctx.service, ctx.target)
     suffix = ctx.operation_id[3:15]
@@ -165,6 +186,7 @@ async def resolve(ctx):
 
 def guard(ctx, plan):
     ctx.check_cancel()
+    project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions)
     if digest(config_snapshot(ctx.service, ctx.target)) != plan["config_digest"]:
         raise StepFailed("REPOSITORY_BINDING_CHANGED", "fixed repository target configuration changed")
     from .cleanup import guard as cleanup_guard
@@ -221,6 +243,15 @@ async def run(ctx):
     async def reread(_):
         return RERUN
     plan = await ctx.step("source.resolve", lambda: resolve(ctx), reconcile=reread)
+    refs = artifacts.normalize_refs(ctx.service.db, ctx.params.get("artifacts", []), ctx.service.context["artifact_store"].settings)
+    if refs or ctx.params.get("project_id"):
+        def bind_inputs():
+            project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions)
+            artifacts.reference(ctx.service.db, "operation", ctx.operation_id, refs, ctx.operation_id)
+            return {"project_id": ctx.params.get("project_id"), "artifacts": refs}
+        ctx.effect("published_inputs", bind_inputs, request={"artifacts": refs, "project_id": ctx.params.get("project_id")})
+        ctx.set_refs(project_id=ctx.params.get("project_id"), input_manifest_digest=digest({
+            "target": ctx.target, "params": ctx.params, "preconditions": ctx.preconditions}))
     ctx.set_refs(host=ctx.target["host"], session_id=plan["session_id"], repository=plan["config"]["repository"],
                  repository_id=plan["repository_id"], clone_path=plan["clone_path"], worktree_path=plan["worktree_path"],
                  branch=plan["branch"], source_sha=plan["source_sha"], source_ref=plan["source_ref"],
@@ -238,15 +269,29 @@ async def run(ctx):
     await ctx.step("worktree.prepare", lambda: host_call(ctx, plan, "prepare"),
                    request={"clone_path": plan["clone_path"], "worktree_path": plan["worktree_path"], "branch": plan["branch"]},
                    reconcile=reconcile_carrier)
+    binding = {"binding_digest": plan["binding_digest"], "source_sha": plan["source_sha"]}
+    context = {"host": ctx.target["host"]}
+    if refs and not ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name='send'",
+                                          (ctx.operation_id,)).fetchone():
+        await artifacts.materialize(ctx, context, plan["clone_path"], plan["worktree_path"], plan["branch"], refs,
+                                    published_binding=binding, before_transfer=lambda: frame(ctx, plan))
+
+    async def input_frame():
+        await frame(ctx, plan, at_frame=True)
+        if refs:
+            await artifacts.verify_materializations(ctx, context, plan["clone_path"], plan["worktree_path"],
+                                                   plan["branch"], published_binding=binding)
+        guard(ctx, plan)
     marker = "[batc:" + ctx.operation_id + "]"
     fields = {"start_operation_id": ctx.operation_id, "repository_binding": plan["binding_digest"],
               "repository": plan["config"]["repository"], "repository_id": plan["repository_id"],
               "published_sha": plan["source_sha"], "origin_root": plan["clone_path"], "worktree_made_by": "connector"}
     result = await checkpoints.start_in_worktree(ctx, host=ctx.target["host"], workspace=ctx.target["workspace_id"],
         agent=ctx.params.get("agent", "claude"), worktree=plan["worktree_path"], branch=plan["branch"], head=plan["source_sha"],
-        title=ctx.params.get("title") or "Published " + plan["source_sha"][:12], text=marker + "\n" + ctx.params["prompt"],
+        title=ctx.params.get("title") or "Published " + plan["source_sha"][:12], model=ctx.params.get("model"),
+        text=marker + "\n" + checkpoints._input_instructions(ctx.service.db, ctx.params["prompt"], refs),
         marker=marker, registry_fields={}, creation_fields=fields,
-        frame_check=lambda: frame(ctx, plan, at_frame=True), final_check=lambda: guard(ctx, plan))
+        frame_check=input_frame, final_check=lambda: guard(ctx, plan))
     return {**result, "host": ctx.target["host"], "workspace_id": ctx.target["workspace_id"],
             "repository": plan["config"]["repository"], "repository_id": plan["repository_id"],
             "source_ref": plan["source_ref"], "source_sha": plan["source_sha"], "worktree_path": plan["worktree_path"],
