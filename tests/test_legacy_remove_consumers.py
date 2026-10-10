@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from bat_agent_connector import orchestrate, registry, service
+from bat_agent_connector import orchestrate, platform_files, registry, service
 from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.task_journal import Journal
 
@@ -14,8 +14,7 @@ from bat_agent_connector.task_journal import Journal
 def dependency_journal(tmp_path):
     journal = Journal(tmp_path / "central.sqlite")
     pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
-    pointer.parent.mkdir(parents=True, exist_ok=True)
-    pointer.write_text(json.dumps({"db_path": str(journal.path)}))
+    platform_files.atomic_write(pointer, json.dumps({"db_path": str(journal.path)}).encode())
     yield journal
     journal.close()
 
