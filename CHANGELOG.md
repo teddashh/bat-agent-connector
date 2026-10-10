@@ -594,7 +594,7 @@
   timeline, filters, scope card and browser reconnect checks remain Part B.
 
 - Operations unification Part A ([design](docs/design/operations-unification.md), plan §09/§10/§24,
-  A05/A07/A09): task submit/pause/resume/stage, scoped send/verification/request-Ted and command reconciliation
+  A05/A07/A09): task submit/pause/resume/stage, scoped send/verification/request-user and command reconciliation
   use OperationService with receipts committed alongside the original journal effects. Legacy task tools keep
   their results and add operation ID/status, with optional keys and control versions. Shared coordinator gates
   cover legacy session writes, client-resume, permission channels, approval/deferred raises and relay; paused,
@@ -605,7 +605,7 @@
   requires a new send key. Success requires the operation's accepted/settled command receipt (A05/A07, §09/§10).
   Recovery after a cancelled/rejected command commits preserves the original refusal or local task outcome,
   without inventing uncertainty, commands or frames; legacy coordinator sends and ticks use the same rule.
-  Locked verification, request-Ted and stage actions now recheck their state rules before the first effect,
+  Locked verification, request-user and stage actions now recheck their state rules before the first effect,
   preserving state refusal codes and succeeded receipt replay (A05/A07). Task-bound operations now persist
   `external_refs.admission_binding` atomically with the operation: the admitted task version and targeted session
   role remain fixed even when callers omit control_version. Stale execution, including pause/resume and task
@@ -775,7 +775,7 @@
   continuation does not create a task. Jev runs only when an orchestrator passes `executor_model`
   for already-split work.
 - Routing decisions now start the BAT agent they name. Sessions use the host's actually available
-  agents in Ted's order: Claude Opus 5.5 (pinned `claude-opus-5-5:auto-compact-300k`, offered only
+  agents in the configured order: Claude Opus 5.5 (pinned `claude-opus-5-5:auto-compact-300k`, offered only
   while the host usage snapshot is fresh and under 85%/90%), then Codex. The reviewer is the other
   model family from the lead when possible; a reviewer that hits its usage limit falls back to the
   next provider instead of counting as a review. `provider_usage` records real session starts and
@@ -796,7 +796,7 @@
 - Verification has two clocks: last meaningful progress (idle budget per recipe) and an absolute cap
   (3x) from the start of the verifying phase; `updated_at` heartbeats no longer extend it.
 - A trusted-test code failure goes back to the lead with a redacted output tail for bounded rework;
-  missing dependencies get one lockfile install and a retry; environment problems go to Ted.
+  missing dependencies get one lockfile install and a retry; environment problems require operator action.
 - The task service no longer knows about chat delivery. The Discord publisher, its per-event outbox columns,
   the board table and `batc task-delivery` / `work_delivery_*` are removed; opening an older journal drops the
   outbox (`events.discord_status`, `events.discord_message_id`, `board`) so the old backlog can never be posted.

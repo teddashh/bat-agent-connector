@@ -43,7 +43,6 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 | O：[#48](https://github.com/teddashh/bat-agent-connector/pull/48) R04 UI | [`90e2392`](https://github.com/teddashh/bat-agent-connector/tree/90e2392bb8409c1d37cb76f27c8caae72af8e00c)：observation UI、pending/linked events、`desktop/tests/observation*` | 經 #51 合併；browser/native IPC mock/真中央加 MockBat 的 F 證據，最終整組 CI 綠；不是 M1。 |
 | I：[#49](https://github.com/teddashh/bat-agent-connector/pull/49) R01 interrupt | [`3877da5`](https://github.com/teddashh/bat-agent-connector/tree/3877da5d0f8dc949fe19e3d8bfc61455d1eef5e0)：legacy interrupt adapter、`test_interrupt_operations.py` | 經 #51 合併；focused/peer 及最終整組 CI 綠。只是 Part B 第一片，其他 legacy mutations 尚未統一。 |
 | B1：[#50](https://github.com/teddashh/bat-agent-connector/pull/50) manual single-file capture | [`c3b4abd`](https://github.com/teddashh/bat-agent-connector/tree/c3b4abd2617f4d46a1f35beb0230fa1bb5a4d80e)：`artifact_capture*.py`、capture/interrupt/principal tests | 經 #51 合併；139 focused tests 各 Python 版本、38 seam checks 及最終整組 CI 通過。同 credential/雙 scope replay/control 已審；UI/native preview allowlist、B2/C 尚缺。 |
-| P：私有 installer #6 | reviewed `60ff6bd`，merge `2026750`：canonical pin/digest、principal-only、保留既有配置 | 已 pin `e634c30`/workflow `.4`；17 mock tests default Python/3.10、source verify-only、獨立審查通過。沒有實際安裝；不複製私有配置。 |
 
 整合候選 `e634c3067e0ba1761336f2bb02360281f9f8e93d` 已經 #51 合併。其 [Python 3.10–3.13 full CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510798) 各 2264 passed/33 skipped；
 [Windows NSIS/Linux deb、74 UI、8 state、Rust checks](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510691) 皆通過。
@@ -118,7 +117,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | C04 Merge queue／accepted／existing request | M `test_delivery.py` 的 C04、`pr_delivery.py`；保留 #40 metadata settlement。 | 選定 repo 的真 queue/provider 行為與 exact intent；queued/accepted 不顯示 merged。 |
 | C05 Merge 後 crash／check 後 base 前進 | M `test_delivery.py` 的 C05、固定 merge preview/readback。 | 真 provider 的 actual merged SHA、範圍與重啟查回；記錄 base 競態限制，不宣稱跨系統原子鎖。 |
 | C06 無 managed task ID 的人工 PR | M PR merge operation；D `desktop/tests/delivery.spec.ts`、`delivery-integration.mjs`：UI 直接 central action。 | 有權限 Windows 使用者對真人工 PR merge/deploy；不建立虛構 task。 |
-| C07 UI／agent／CLI 共用 action 與 caller scopes | M `test_delivery.py` C07；D `test_deployment_surfaces.py`、`test_delivery_resume_scopes.py`；S principal-only；B1 replay/control credential 回歸。 | 同 RC 三入口與不同 principal 實測；composite resume 需目前雙 scope，agent 不借 local-admin/Ted authority。 |
+| C07 UI／agent／CLI 共用 action 與 caller scopes | M `test_delivery.py` C07；D `test_deployment_surfaces.py`、`test_delivery_resume_scopes.py`；S principal-only；B1 replay/control credential 回歸。 | 同 RC 三入口與不同 principal 實測；composite resume 需目前雙 scope，agent 不借 local-admin/操作者 authority。 |
 
 ### D：部署
 
@@ -140,7 +139,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | E03 選兩台、零 BAT profiles、Dashboard、一台 auth 卡住 | K `tests/fleet-client.tests.ps1` 的 E03、`fleet-readiness.tests.ps1`；F `desktop/tests/fleet.spec.ts` selection/readback。 | Installed app＋Kit＋真中央、Dashboard-only 的完整組合；不開 BAT、不停中央工作，故障 host 不拖累其他項目。 |
 | E04 重開／crash／tray quit／其他登入／PID reuse | K `fleet-lifecycle.tests.ps1`、`fleet-desktop.tests.ps1` ownership/budget；F Rust subprocess timeout 只終止自有 facade。 | 真同/跨 Windows login session、foreign listener 與 crash；#64 Rust supervisor 已實作、最終 Windows CI 待收斂；不能以 Tauri single-instance 代替跨登入 owner。 |
 | E05 TCP 通但 identity/auth/version/workspace/contract 不符 | K `fleet-readiness.tests.ps1`、`fleet-desktop.tests.ps1` applied generation；F typed DTO；U central actor/contract refusal。 | 真 host 各 readiness 層、舊 generation、修配置後 budget；blocked/degraded 不標 Ready，不擅自重啟。 |
-| E06 新舊 skill/client/backend 混用 | S generator/version checks、`test_agent_skills.py`／`test_mcp_principal.py`；P pin/digest installer。 | 同 RC 實際安裝、升級／不相容拒絕；顯示 repo、installed、server contract、skill version，兩個 agent 各用自身 actor。 |
+| E06 新舊 skill/client/backend 混用 | S generator/version checks、`test_agent_skills.py`／`test_mcp_principal.py`；canonical pin/digest 檢查。 | 同 RC 實際安裝、升級／不相容拒絕；顯示 repo、installed、server contract、skill version，兩個 agent 各用自身 actor。 |
 
 ### T：真正桌面產品
 

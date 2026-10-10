@@ -4,7 +4,7 @@
 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)。基底 main
 `565a7d57074f6628b5ef9cecec6cc9eb5b56c1e6`。兩份計畫仍是同一產品，Tauri 與 browser
 共用 frontend；Python authority、人工資源唯讀、不做 Hub importer 的決策不變。
-候選完整 SHA、最後 exact-head CI、peer review、merge 與 private installer pin 以 #57 關聯 PR
+候選完整 SHA、最後 exact-head CI、peer review、merge 與 外部安裝版本 以 #57 關聯 PR
 及收斂留言為準。以下局部驗證不代替整組 CI，也不代表 installed/live 驗收。
 
 ## 本輪行為
@@ -89,6 +89,4 @@ Task Service integration/cleanup、Rust Fleet parity 都留在共用 backlog。W
 credentials、逐 host confinement、同 RC 的 46 項驗收仍缺；Linux production distribution gate
 [#53](https://github.com/teddashh/bat-agent-connector/issues/53) 保留。
 
-本輪沒有真 host/provider writes 或安裝。原 checkout 與 Claude worktrees 保留；工作線在
-`~/agent-work/bac-v2/permissions`、`permissions-core`、`permissions-ui`，installer 在
-`installer-permissions`。共用核心由主協調整合；原 full local test lock 保留，避免多組長測試互相干擾。
+本輪沒有真 host/provider writes 或安裝。共用核心由單一整合者處理，完整本機測試依序執行。

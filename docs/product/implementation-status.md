@@ -99,7 +99,7 @@ backend 及 PowerShell 相容預設；完整無設定檔首次安裝精靈、正
 來源／整理檢查、674 項共用 UI 與 31 項 Rust bridge 檢查已通過。實際中央 HTTP／IPC 的
 兩次原派工已各自接到同一個測試 PR，固定來源 receipt 一致，人工 checkout 不變。預覽選擇
 不再被自己的事件刷新清除；Tauri bridge 限定開放指定成果的查詢。完整候選 gates 另留紀錄於
-`~/agent-work/artifacts/delivery-lineage-20261009/`；合併、固定候選安裝及使用者真實主機驗收
+本機驗證紀錄（未隨原始碼發布）；合併、固定候選安裝及使用者真實主機驗收
 不能由這些 fixture 結果推論。實機目標尚待指定，見 [固定候選驗收](acceptance-v2.md)。
 
 ### 2026-10-09 專案快速派工、進階設定與附件草稿
@@ -116,7 +116,7 @@ BAT frame 前重查專案／目的地與 bytes。回覆丟失、專案封存或 
 
 相關 128 項後端與 57 項初次 UI 回歸已通過；實際中央的 HTTP／IPC 派工與原 published 流程亦通過。
 `test:dispatch` 已加入 desktop CI；候選完整 gate 與平台證據由 PR/checks 及
-`~/agent-work/artifacts/project-quick-dispatch-20261009/` 記錄。#71 已合併為 `481f407`，tree
+本機驗證紀錄（未隨原始碼發布） 記錄。#71 已合併為 `481f407`，tree
 與通過 Python 3.10–3.13、Windows／Linux／Mac 兩架構 CI 的 `3f4ed88` 相同；尚未安裝或 live 驗收。
 P1-4 手機資訊／輸入區收合及可調側欄、P1-5 設定分組／首次使用導引仍在後續 backlog。
 
@@ -137,7 +137,7 @@ principal 與 unread filter；Rust bridge 只允許 work-items 的布林 unread 
 分支已通過 107 項後端相關測試、30 項 Rust bridge 測試、20 項 Node 測試及實際中央 fixture。
 另驗證 14 項身份切換、延遲回覆與草稿保留回歸：初次完整 UI run 抓出的舊首頁請求晚到問題
 已修正。`test:attention` 已加入 desktop CI；完整 shared UI 與 Python 3.13／3.10 gate 的
-候選結果另由 PR/checks 與 `~/agent-work/artifacts/shared-attention-states-20261009/` 記錄。
+候選結果另由 PR/checks 與 本機驗證紀錄（未隨原始碼發布） 記錄。
 #70 已合併為 `3072af9`，tree 與通過完整 CI 的 `f33b837` 相同；尚未安裝或進行 Mac/Windows 實機驗收。
 
 ### 2026-10-09 共用 Web／Tauri 與對話閱讀
@@ -155,7 +155,7 @@ retention reset 與草稿恢復通過；兩種 build 的 JavaScript 相同，CSS
 初次 clipboard fallback 測試發現 textarea 會正規化 CRLF，已修正整段手動複製並通過回歸。
 實作提交 `e4350b9`；Ruff、generated browser drift 與 Python 3.13 全套
 **3187 passed／33 skipped** 通過（磁碟暫存 wrapper；1574.89 秒）。測試暫存已清除，
-證據保存在 `~/agent-work/artifacts/shared-conversation-reading-20261009/`。
+證據保存在 本機驗證紀錄（未隨原始碼發布）。
 尚未合併或安裝；IPC fixture 不代表 Windows/macOS 原生剪貼簿驗收。
 
 ### 2026-10-09 Project Hub 前端完整複查
@@ -189,15 +189,12 @@ Developer ID／公證 candidate workflow；待各自 exact-head 結果。正式�
 [desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37967171409)
 591 shared UI、Windows NSIS／Linux deb 與 Apple Silicon／Intel DMG 原生 fixture 通過，
 包含 Mac 隔離 Keychain、安裝／啟動／關窗／Reopen／Quit 及清理證據。
-私有 installer #14 已合併並 pin 同一候選；Linux／Mac 兩架構 × Python 3.10／3.13 六組 checks 通過。
 Mac 驗證包仍為 ad-hoc 簽署；正式 Developer ID／公證、Mac updater、實機／live 驗收尚未完成。
 
 #68 的固定候選 `771d0099a9cae74e3446f3121a2747439583b136` 已通過
 [Python 四版各 3187／33](https://github.com/teddashh/bat-agent-connector/actions/runs/37949144734)
 及 [Windows 真 NSIS 安裝／Linux 實際 deb WebView](https://github.com/teddashh/bat-agent-connector/actions/runs/37949144823)，
 merge tree 與候選同為 `992aa5b356d6ee9cab04bd126f0ae54f0045ef5c`。
-私有 installer #13 已合併，pin 該 source；Python 3.10／3.13 各 17 regressions 與真正隔離
-Connector／Hermes installs 通過並清理。這些均不代表使用者主機或 live 服務已安裝。
 
 ### 2026-10-09 發行門檻收斂
 
@@ -216,8 +213,7 @@ GLib 保留 0.18.5 原版本並 backport upstream 的兩行指標修正，來源
 Windows NSIS／Linux deb、585 shared UI、12 state、每平台 81 app Rust、release verifier、GLib release
 regression 及 Linux 真 packaged WebView／關窗隱藏／single-instance 通過。Windows metadata locale
 failure 已修正並由最終 Windows job 通過，舊失敗保留。這些仍是 unsigned／F／N 證據。
-私有 installer #12 已合併，pin 同一候選與 `.14`；17 temporary tests 在 Python 3.10／3.13 通過，
-source verify-only 通過。未執行 live 安裝。正式簽章、實機／live 驗收及 release feed 發布仍未完成。
+正式簽章、實機／live 驗收及 release feed 發布仍未完成。
 
 新增 Windows installed fixture 只允許 GitHub-hosted disposable runner：驗證 NSIS 真安裝、
 binary digest／PE 與 registry version、license resources、真 WebView loopback polling、WM_CLOSE、
@@ -239,8 +235,7 @@ Fleet core Windows 63／Linux 58 通過。Windows NSIS／Linux deb unsigned pack
 generated browser drift 與 secrets scan 通過。Actual-central fixtures 用 temporary Git／MockBat 驗證 start、bulk、
 cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full Python 3.10、3.13 各 2680／33；先前磁碟
 壅塞的 3.13 run 有未釐清 failures 且中止，沒有計為通過，後續 isolated fixtures 與 exact-head CI 完整通過。
-私有 installer #10 已合併 `67be22ea748c49e055a58e9fb72ef0c91d8b2161`，pin 此候選／`.8`；17 temporary tests
-在 3.13／3.10 通過，真 source verify-only 通過，沒有修改 live 安裝。當時 Linux GLib release gate #53 尚開啟；現況見上方收斂紀錄。
+當時 Linux GLib release gate #53 尚開啟；現況見上方收斂紀錄。
 
 後續主線與候選分開追蹤，不計為 installed 完成：
 
@@ -322,8 +317,7 @@ Canonical workflow 為 `2026-10-08.6`；最新候選 SHA、exact-head CI、peer 
 
 候選 `867864b75cf2cf1898ce5b5ddedcdd6308003b76` 已合併為 `565a7d57074f6628b5ef9cecec6cc9eb5b56c1e6`，
 tree 完全相同。Python 3.10–3.13 各 **2370 passed／33 skipped**；101 UI、8 state、20 Windows／21 Linux Rust、
-六組 actual-central fixtures 與 Windows／Linux unsigned packages 通過。Installer #7 已合併並 pin 此候選與
-workflow `.5`；17 mock tests 兩 Python 版本及 real-source verify-only 通過，沒有真安裝。
+六組 actual-central fixtures 與 Windows／Linux unsigned packages 通過。
 收斂證據見 [#55](https://github.com/teddashh/bat-agent-connector/issues/55#issuecomment-6072185401)。
 
 追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，基底 main `0c7c8fb`。
@@ -349,9 +343,6 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
   [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510691)：Windows NSIS、Linux deb、74 shared UI、8 state tests 通過；Rust Windows 19、Linux 20 tests 通過，Windows 包含真正 system PowerShell 子程序 fixture。
 - 產品整合 commit `6d88f4d` 的 Git tree 與已測候選完全相同：`c89ee4c6b09b74d08f71459c405c96c2e76f2064`。
   本次收斂文件是後續 docs-only 更新，未更動該 runtime/build/skill source，沒有另宣稱文件 head 跑過一次 full suite。
-- Fleet Kit #8 已合併 `d3697dc`；私有 installer #6 已合併 `2026750`，reviewed head `60ff6bd`。
-  Installer pin 是上述完整 candidate、workflow `2026-10-08.4`、canonical digest `5f7e04d84dd9b207ee553e3308e988a07d890ba219ceebb9b26fc09a21c1b723`。
-  17 temporary/mock tests 在 default Python 與 3.10 通過；真 source verify-only 通過。保留 `draft_candidate`，並非完整產品發行。
 - 獨立審查修正了 artifact scalar admission、deployment cursor bounds、interrupt history prefix binding、capture replay/control credential binding、installer YAML 與 concurrent config preservation。
   先前 full/CI failures 均保留；#48/#49/#50 的舊 fixture failures 已由 #51 的 canonical-source/data-step 修正及整組 CI 覆蓋，未把舊紅燈改稱綠燈。
 - #38 早期本機 3.10 full 曾為 1834 passed/33 skipped/1 個 60 秒 settlement timeout；journal 顯示持續進展，原碼單測 2.52 秒重跑通過。後續 exact-head 四版 CI 各 1835/33 通過；不把單測 retry 當 full。

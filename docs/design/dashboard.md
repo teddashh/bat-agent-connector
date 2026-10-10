@@ -114,7 +114,7 @@ Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_conf
 預設不勾選。工作項目完成／封存與 task 控制沒有連動，也不新增 Task Service 派工或 failover 策略。
 
 - 必須成功讀到同一 task ID、有效 `control_version`、paused 狀態，以及正向 action capability 和 operate
-  scope 才能準備控制。已結束的 task 不能新建控制。Authenticated operation actor 是身份來源；不捏造 Ted
+  scope 才能準備控制。已結束的 task 不能新建控制。Authenticated operation actor 是身份來源；不捏造 操作者
   source message 或 task capability。中央 coordinator／最後 frame gates 仍是唯一權威。
 - 草稿依 backend/principal namespace 與 task ID 分區，送出前保存完整 action/target/params/preconditions/key。
   Replay 永遠保留原 control version；accepted ID 只讀回，不因新的 paused 狀態再送一次。First receipt 必須
