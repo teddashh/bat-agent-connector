@@ -7,12 +7,9 @@ connections, readonly readiness, fixed configured bootstrap and BAT window launc
 
 ## Sources and boundaries
 
-Port the reviewed Fleet Kit source at `2ec4b11bc010bfd669040e942648c741b63d0b7c` (desktop facade working
-head based on its merged inventory/lifecycle work). Before claiming full parity, compare against the latest
-reviewed Kit main and record any intervening fixes. Source files are `client/fleet-core.ps1`,
-`fleet-client.ps1`, `fleet-monitor.ps1`, `fleet-desktop-core.ps1`, `fleet-transport.cs` and their
-`tests/fleet-{inventory,client,lifecycle,readiness,transport,desktop}.tests.ps1` fixtures.
-Only synthetic fixture inventory/index/SSH data may enter this public repository. Never copy the Kit's
+The public [Fleet core source](../../desktop/fleet-core/) and its tests define the
+native contract. Preserve the documented Fleet Kit compatibility formats when upgrading
+an existing PowerShell installation. Only synthetic fixture inventory/index/SSH data may enter this public repository. Never copy the Kit's
 tracked private inventory, profile index, token files, fingerprints, service paths or SSH configuration.
 
 | Responsibility | Required native behavior and evidence |

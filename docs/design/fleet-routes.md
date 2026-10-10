@@ -1,6 +1,6 @@
 # Native Fleet route selection and recovery
 
-This ports the local route policy from reviewed Kit `2ec4b11` `bat-servers.ps1`
+This ports the local route policy from reviewed Kit `bat-servers.ps1`
 (`Test-TailscaleDirect`, `Test-TcpPort`, `Get-ServerAlias`) and `bat-connect.ps1`
 (`Select-Alias`, `Register-TunnelExit`, `Ensure-Tunnel`). It does not spawn SSH,
 change central tasks, declare BAT ready, or query installed/live Tailscale in tests.

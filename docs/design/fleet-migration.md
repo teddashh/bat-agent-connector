@@ -4,7 +4,7 @@ This implements the local transition contract in the Tauri plan §§08/09/21 and
 [fleet-rust.md](fleet-rust.md). It does not change central tasks, inventory, profile
 selection or credentials, and is not installed Windows parity evidence.
 
-Reviewed Kit `2ec4b11` installs only the current-user Startup `Open BAT.lnk`:
+Reviewed Kit installs only the current-user Startup `Open BAT.lnk`:
 `client/install-autostart.ps1` targets system `wscript.exe`, exactly the quoted
 `client/Open BAT.vbs`, with the client directory as working directory. No registry
 Run value or scheduled task belongs to this Kit. Migration touches only this fixed

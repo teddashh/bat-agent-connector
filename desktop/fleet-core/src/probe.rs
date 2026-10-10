@@ -1,6 +1,6 @@
 //! Native-only, readonly Fleet probes. Not wired to IPC or supervisor runtime.
 //!
-//! Port basis: Kit 2ec4b11, Invoke-BatProbe / Read-ConnectorCapabilities and
+//! Port basis: Fleet Kit, Invoke-BatProbe / Read-ConnectorCapabilities and
 //! readiness contracts. Callers resolve each credential from its own configured
 //! reference: the desktop mutation credential is never a fallback. An attempt
 //! captures ProbeGeneration before IO; revalidate config and selection before

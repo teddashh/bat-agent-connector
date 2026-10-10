@@ -1,4 +1,4 @@
-//! Bounded BAT v2 transport port of Fleet Kit 2ec4b11 fleet-transport.cs.
+//! Bounded BAT v2 transport port of Fleet Kit fleet-transport.cs.
 //! Only auth and readonly workspace load are exposed by the public probe module.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rustls::{
