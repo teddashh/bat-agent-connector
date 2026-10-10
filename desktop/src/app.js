@@ -230,7 +230,36 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
   saved.attachments = saved.attachments.filter(a => a && typeof a === "object");
   for (const a of saved.attachments) delete a.busy;
   if (typeof saved.text === "string") text.value = saved.text;
-  const files = new Map(), rows = h("div", {class: "attachment-list"});
+  const files = new Map(), previews = new Map(), rows = h("div", {class: "attachment-list"});
+  const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+  const generateThumbnail = (file, onReady) => {
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) return;
+    try {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const maxDim = 96;
+            let w = img.width, h = img.height;
+            if (w <= 0 || h <= 0) return;
+            if (w > maxDim || h > maxDim) {
+              if (w > h) { h = Math.max(1, Math.round((h * maxDim) / w)); w = maxDim; }
+              else { w = Math.max(1, Math.round((w * maxDim) / h)); h = maxDim; }
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.drawImage(img, 0, 0, w, h);
+            onReady(canvas.toDataURL("image/png"));
+          } catch { /* canvas error */ }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    } catch { /* reader error */ }
+  };
   let pendingSelections = 0;
   const changed = () => queueMicrotask(() => {if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();});
   const status = h("p", {class: "muted", role: "status"});
@@ -255,7 +284,8 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
   const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
   const ready = () => pendingSelections === 0 && saved.attachments.every(a => a.ref);
-  const render = () => {changed(); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row"},
+  const render = () => {changed(); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row attachment-row"},
+    previews.has(a) ? h("img", {class: "attachment-thumb", src: previews.get(a), alt: a.name || t("attachments")}) : null,
     h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
       : h("div", {class: "muted"}, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))),
     a.ref && roles ? h("select", {"aria-label": t("attachment_role"), onchange: e => {guard(); a.ref.role = e.target.value; persist();}},
@@ -264,7 +294,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     !a.ref && files.has(a) && !a.busy ? h("button", {class: "secondary", onclick: () => upload(a)}, t("retry")) : null,
     h("button", {class: "secondary", disabled: a.busy, onclick: () => {
       guard(); if (a.native_handle) {saved.native_ignored ||= []; saved.native_ignored.push(a.native_handle);}
-      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
+      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); previews.delete(a); persist(); render();
     }}, t("remove")))));};
   if (nativeFiles) {
     if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
@@ -305,7 +335,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
       const bytes = await file.arrayBuffer(); guard(true);
       const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(x => x.toString(16).padStart(2, "0")).join("");
       guard(true);
-      const request = {action: "artifact.upload", target: {}, params: {display_name: file.name,
+      const request = {action: "artifact.upload", target: {}, params: {display_name: a.name || file.name,
         media_type: file.type || "application/octet-stream", size_bytes: file.size, expected_digest: digest}, preconditions: {}};
       if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
       a.request ||= request; a.key ||= crypto.randomUUID(); persist();
@@ -346,10 +376,121 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     for (const file of choose.files) {
       let a = saved.attachments.find(x => !x.ref && !files.has(x) && x.name === file.name);
       if (!a) {a = {name: file.name}; saved.attachments.push(a);}
-      files.set(a, file); upload(a);
+      files.set(a, file);
+      if (ALLOWED_IMAGE_TYPES.has(file.type)) {
+        generateThumbnail(file, thumb => { previews.set(a, thumb); if (box.isConnected) render(); });
+      }
+      upload(a);
     }
     choose.value = ""; persist(); render();
   };
+  const handleIncomingFile = file => {
+    guard();
+    fill(status);
+    const limit = Math.min(state.caps?.artifacts?.limits?.max_file_bytes || 16 * 1024 * 1024,
+      nativeDesktop ? 16 * 1024 * 1024 : Number.MAX_SAFE_INTEGER);
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      fill(status, errorBox(new Error(t("attachment_unsupported_image"))));
+      return;
+    }
+    if (file.size > limit) {
+      fill(status, errorBox(new Error(`ARTIFACT_TOO_LARGE (${limit})`)));
+      return;
+    }
+    let name = file.name;
+    const ext = file.type === "image/jpeg" ? ".jpg" : file.type === "image/webp" ? ".webp" : ".png";
+    if (!name || name === "image.png" || name === "blob") {
+      name = `pasted-image-${Date.now()}${ext}`;
+    }
+    name = name.replace(/[^\w.-]/g, "_").replace(/^(\.+)/, "image_");
+    let uniqueName = name;
+    let counter = 1;
+    while (saved.attachments.some(x => x.name === uniqueName)) {
+      const dot = name.lastIndexOf(".");
+      uniqueName = dot > 0 ? `${name.slice(0, dot)}-${counter}${name.slice(dot)}` : `${name}-${counter}`;
+      counter++;
+    }
+    const a = {name: uniqueName};
+    saved.attachments.push(a);
+    files.set(a, file);
+    generateThumbnail(file, thumb => {
+      previews.set(a, thumb);
+      if (box.isConnected) render();
+    });
+    upload(a);
+    persist();
+    render();
+  };
+  const onPaste = e => {
+    if (e.isComposing) return;
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const items = cd.items ? Array.from(cd.items) : [];
+    const cdFiles = cd.files ? Array.from(cd.files) : [];
+    const imageCandidates = [];
+    if (cdFiles.length > 0) {
+      for (const f of cdFiles) {
+        if (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name)) {
+          imageCandidates.push(f);
+        }
+      }
+    } else if (items.length > 0) {
+      for (const it of items) {
+        if (it.kind === "file") {
+          const f = it.getAsFile();
+          if (f && (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name) || it.type.startsWith("image/"))) {
+            imageCandidates.push(f);
+          }
+        }
+      }
+    }
+    if (!imageCandidates.length) return;
+    e.preventDefault();
+    if (!supported || !may("manage") || (nativeFiles && !nativeUploadAllowed) || !state.online || !state.viewReady) {
+      fill(status, errorBox(new Error(t("offline_actions_paused"))));
+      return;
+    }
+    for (const file of imageCandidates) {
+      handleIncomingFile(file);
+    }
+  };
+  const onDragOver = e => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      box.classList.add("drag-over");
+      if (text && text.classList) text.classList.add("drag-over");
+    }
+  };
+  const onDragLeave = e => {
+    if (!box.contains(e.relatedTarget) && e.target !== text) {
+      box.classList.remove("drag-over");
+      if (text && text.classList) text.classList.remove("drag-over");
+    }
+  };
+  const onDrop = e => {
+    box.classList.remove("drag-over");
+    if (text && text.classList) text.classList.remove("drag-over");
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    if (!supported || !may("manage") || (nativeFiles && !nativeUploadAllowed) || !state.online || !state.viewReady) {
+      fill(status, errorBox(new Error(t("offline_actions_paused"))));
+      return;
+    }
+    for (const file of e.dataTransfer.files) {
+      handleIncomingFile(file);
+    }
+  };
+  text.addEventListener("paste", onPaste);
+  box.addEventListener("paste", onPaste);
+  box.addEventListener("dragover", onDragOver);
+  box.addEventListener("dragleave", onDragLeave);
+  box.addEventListener("drop", onDrop);
+  if (text && text.addEventListener) {
+    text.addEventListener("dragover", onDragOver);
+    text.addEventListener("dragleave", onDragLeave);
+    text.addEventListener("drop", onDrop);
+  }
   const existing = h("select", {"aria-label": t("existing_artifact")}, h("option", {value: ""}, t("existing_artifact")));
   box.append(h("div", {class: "actions"}, existing, h("button", {class: "secondary", onclick: async () => {
     if (!existing.value) return;
@@ -453,7 +594,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     if (!ready()) throw new Error(t("attachments_not_ready"));
     const ignored = [...(saved.native_ignored || []), ...saved.attachments.map(a => a.native_handle).filter(Boolean)];
     saved = {text: "", attachments: [], native_draft: saved.native_draft, native_ignored: ignored};
-    text.value = ""; files.clear(); persist(); render();
+    text.value = ""; files.clear(); previews.clear(); persist(); render();
   }};
 }
 
@@ -1314,13 +1455,14 @@ function checkpointPanel(host, sid) {
     draft.bindFields({agent});
     let expectedHead = null;
     const go = h("button", { class: "primary", onclick: async () => {
-      if (!instr.value.trim()) return;
+      const instructions = instr.value.trim() || (draft.refs().length ? t("dispatch_inspect_images") : "");
+      if (!instructions) return;
       go.disabled = true;
       try {
         if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
         if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
         const op = await draft.perform("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
-            { instructions: instr.value, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs()} : {}) },
+            { instructions, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs()} : {}) },
             state.caps?.artifacts ? { expected_source_head_sha: expectedHead } : {}, `continue.${cp.checkpoint_id}`);
         out.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
       } catch (e) { out.replaceChildren(errorBox(e)); }
@@ -2935,13 +3077,15 @@ function continueFrom(w, checkpointId, notice, children = []) {
   draft.bindFields({agent});
   let expectedHead = null;
   const go = h("button", { class: "primary", onclick: async () => {
+    const instructions = instr.value.trim() || (draft.refs().length ? t("dispatch_inspect_images") : "");
+    if (!instructions) return;
     go.disabled = true;
     let op;
     try {
       if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
       if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
       op = await draft.perform("checkpoint.continue", { checkpoint_id: checkpointId },
-          { instructions: instr.value, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs(), work_item_id: w.work_item_id} : {}) },
+          { instructions, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs(), work_item_id: w.work_item_id} : {}) },
           state.caps?.artifacts ? { expected_source_head_sha: expectedHead, expected_work_item_fingerprint: w.completion.fingerprint } : {}, `continue.${checkpointId}`);
     } catch (e) { fill(out, errorBox(e)); go.disabled = false; return; }
     assertView(connection);
