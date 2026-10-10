@@ -8,7 +8,7 @@ Better Agent Dashboard brings together **Windows Fleet connectivity and startup,
 
 You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
-> **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but is pending final validation (draft PR #81). The candidate source now implements the bundled managed runtime, auto personal identity, and a browser one-use ticket. [Installation status and trial paths →](docs/getting-started.md)
+> **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but are pending final validation (draft PR #81). The candidate source now implements the bundled managed runtime, auto personal identity, and a browser one-use ticket. [Installation status and trial paths →](docs/getting-started.md)
 
 ![Select work in the project tree and keep its conversation, reply controls and results together.](site/images/workspace-en.png)
 
@@ -119,18 +119,22 @@ The **desktop client** and **central service** have different platform requireme
 
 Download validation packages under **Artifacts** in a successful [desktop workflow run](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml). Match the source commit and central compatibility. GitHub may require sign-in, and artifacts expire; this is not a stable release channel.
 
-The [2026-10-10 candidate CI build](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) provides source-implemented candidate artifacts. The integration is pending final PR #81 merge. Final full gates and native fixtures are still running. Note that the current installed release assets remain historical client validation and do not automatically bundle the new runtime. No new version number, tag, or release has been invented yet; mark final validation pending for root to finalize.
+The [2026-10-10 candidate CI build](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) provides candidate artifacts from PR #81. The candidate implements the bundled managed runtime, auto personal identity generation, and browser one-use tickets. Note that installed release assets from earlier runs remain clearly historical client validation and do not automatically bundle the new runtime.
 
 ## Start using it
 
-**The intended normal path** is install → background service ready → guided BAT / GitHub connection → open Dashboard. The candidate source implements a bundled managed runtime, auto personal identity generation, browser one-use ticket, and setup BAT profiles/GitHub binding, but final validation is pending. Account sign-in and authorization still require your participation.
+**The normal path** is now implemented in the candidate: install the candidate matching the successful PR81 CI artifact, launch it, and the owned local background central and personal credential (native-only) are automatically prepared.
 
-For a **supervised trial today**, use one of these documented paths:
+For a **supervised trial today**, use this candidate path:
 
-- **An environment is already configured:** open its Web Dashboard or connect a desktop client with the address and identity supplied by its operator. Start with Pending, Projects and Sessions.
-- **Windows with an existing BAT / Fleet setup:** use the [Windows guide](docs/windows.md) to check inventory, connection choices, backend and BAT profiles. Linux central setup is not a replacement for these Windows capabilities.
-- **You operate the first environment:** follow the [Linux central setup guide](docs/getting-started.md). It covers installation, BAT profile import, service startup, identity issuance and desktop connection.
-- **You are connecting an agent:** register `bat-agent-connector-mcp` in its MCP client. Use `--principal-only --read-only` for scoped central observation; give authorized automation its own scoped `BATC_API_TOKEN` through private configuration.
+1. **Install and Launch:** Download and install the candidate artifact. It automatically prepares the background service and your personal credentials.
+2. **Connect BAT:** In the UI Settings, either add a trusted BAT profile, or manually enter the URL, fingerprint, workspace profile, and token. Credentials never hand-edit JSON.
+3. **Bind GitHub:** Select a host/workspace and set up the GitHub binding in the UI.
+   - For published-repo dispatch, managed roots and an SSH trusted alias are required.
+   - For BAT direct starts, a shared-clone-worktree is an explicit opt-in.
+4. **Agent observation:** Register `bat-agent-connector-mcp` in its MCP client. Give authorized automation its own scoped `BATC_API_TOKEN`.
+
+*Note: The manual external central setup remains preserved as an advanced choice.*
 
 Working on remote BAT hosts does not require BAT to be installed on the Dashboard machine. [Canonical skill and Hermes / Grokbot adapters](docs/agent-skills.md).
 
@@ -155,16 +159,16 @@ A native BAT `worktree.merge` with a fully unknown ACK and insufficient positive
 
 ## Current evidence and remaining work
 
-Baseline: **2026-10-10, draft PR #81 (unmerged)**. The candidate source is implemented, but final validation is pending.
+Baseline: **2026-10-10, candidate source from PR #81**. The normal first-launch setup is now implemented.
 
 | Evidence | What it establishes |
 | --- | --- |
 | [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723049) | Python 3.10–3.13 passed; the local 3.13 full run recorded 3,228 passed / 33 skipped. |
-| Shared frontend checks | 694 UI cases passed before final affected-layout regressions. HTTP / native transport fixtures test behavior; mock IPC is not native installation. |
-| [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) | Windows, both Mac architectures and Linux packaging / native fixtures. Installed fixtures use controlled loopback services and synthetic data. |
-| Real central integration fixtures | Actual Python API, journal and temporary Git, with fake BAT / GitHub providers. Not production merge / deploy acceptance. |
+| Shared frontend checks | 694 UI cases passed before final affected-layout regressions. HTTP / native transport fixtures test behavior. |
+| [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) | Windows, both Mac architectures and Linux packaging / native fixtures. Installed fixtures use controlled loopback services and synthetic data. |
+| Real central integration fixtures | Actual Python API, journal and temporary Git, with fake BAT / GitHub providers. |
 
-The remaining delivery work includes **automatic managed installation**, formal signing / releases / updates, the specific unknown-ACK recovery flow, and a complete working-day acceptance run on the user's selected hosts, network and deployment targets. Supervised trials and unattended operation are different readiness claims.
+Note: Formal signing, Mac notarization, update channels, Linux persistent vaults, and user-run human acceptance are exclusions and not implemented features. The remaining delivery work includes the specific unknown-ACK recovery flow.
 
 [Implementation record](docs/product/implementation-status.md) · [Acceptance matrix](docs/product/acceptance-v2.md)
 

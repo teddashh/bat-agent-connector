@@ -8,7 +8,7 @@ Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的
 
 你繼續在 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) coding；Hermes、Grokbot 等 Agent 透過各自的身分協作。Repository 與 Python 套件仍叫 **`bat-agent-connector`**，Connector 是 Dashboard、CLI 與 MCP 共用的後端。
 
-> **產品方向：**安裝桌面包後，由程式準備並啟動背景服務，引導接上 BAT 環境，再點一下開 Dashboard。**目前實作：**共用 Dashboard 與中央背景服務已具備，但仍等待最終驗證 (draft PR #81)。候選原始碼目前已實作打包好的 managed runtime、自動個人身分產生與 browser one-use ticket。[安裝現況與試用方式 →](docs/getting-started.zh-TW.md)
+> **產品方向：**安裝桌面包後，由程式準備並啟動背景服務，引導接上 BAT 環境，再點一下開 Dashboard。**目前實作：**候選原始碼（PR #81）已經實作打包好的 managed runtime、自動個人身分產生與 browser one-use ticket。[安裝現況與試用方式 →](docs/getting-started.zh-TW.md)
 
 ![從左側專案工作樹選工作，在同一畫面閱讀對話、回覆與追蹤成果。](site/images/workspace-zh.png)
 
@@ -119,7 +119,7 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 
 到成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 執行頁面，在 **Artifacts** 下載驗證包，核對 commit 與中央相容性。GitHub 可能要求登入，artifact 也會到期；它不是穩定發行通道。
 
-[2026-10-10 候選 CI 建置](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 提供了原始碼實作的候選版本 artifact。目前等待最終 PR #81 (draft) 合併。最終全套關卡與原生 fixtures 正在執行中。注意：目前的已安裝釋出資產僅為歷史的客戶端驗證，並未自動包含新 runtime。目前未創造新的版本號、標籤或釋出，請標記最終驗證等待 root 完成。
+[2026-10-10 候選 CI 建置](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 提供了來自 PR #81 原始碼實作的候選版本 artifact。候選版本已實作打包好的 managed runtime、自動個人身分產生與 browser one-use tickets。注意：早期產生的已安裝釋出資產僅為歷史的客戶端驗證，並未自動包含新 runtime。
 
 ## 開始使用
 
