@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from bat_agent_connector import cleanup, observation, registry
+from bat_agent_connector import api_auth, cleanup, observation, registry
 from bat_agent_connector.resource_ids import worktree_id
 from tests.test_cleanup import daemon as cleanup_daemon
 from tests.test_cleanup import human as cleanup_human
@@ -69,7 +69,8 @@ async def test_cleaned_session_document_stays_shared_and_read_only_after_host_re
                    ("session", "removed-host/old-session", doc["host"], doc["resource_id"]))
     before, calls = list(db.iterdump()), copy.deepcopy(mock.invokes)
     shared = daemon.inventory.session_document("removed-host", "old-session")
-    status, http = await daemon.api.session(query={}, host="removed-host", sid="old-session")
+    reader = api_auth.Principal("reader", frozenset({"observe"}))
+    status, http = await daemon.api.session(query={}, host="removed-host", sid="old-session", principal=reader)
     assert status == 200 and http == shared
     assert shared["session"] is None and shared["cleanup"] == [doc]
     assert shared["relations_summary"] == []
