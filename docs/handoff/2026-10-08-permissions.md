@@ -1,5 +1,7 @@
 # 共用產品：durable permissions 交接
 
+下方 commit 引用使用重寫後公開歷史中保留的對應來源；CI 與審查結果仍描述當時的執行，不代表對重寫後 commit 重新驗證。目前驗證及下載方式見[實作狀態](../product/implementation-status.md#目前續作)。
+
 接續 [#56 的交接](2026-10-08-shared-product.md)；本輪追蹤
 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)。基底 main
 `da66c545120c1b5fb2703277ae6c0e180c309c46`。兩份計畫仍是同一產品，Tauri 與 browser
