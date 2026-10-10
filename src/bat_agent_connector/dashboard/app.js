@@ -1516,15 +1516,15 @@ function parsePullRequest(value) {
 //#region src/session-labels.js
 var object$6 = (v) => v && typeof v === "object" && !Array.isArray(v);
 var version$1 = (v) => Number.isSafeInteger(v) && v >= 0;
-var opId$3 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
-var equal$7 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$7(v, b[i])) || object$6(a) && object$6(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$7(a[k], b[k]));
+var opId$4 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var equal$8 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$8(v, b[i])) || object$6(a) && object$6(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$8(a[k], b[k]));
 function validLabels(v) {
 	return Array.isArray(v) && v.length <= 8 && new Set(v).size === v.length && v.every((x) => typeof x === "string" && x === x.trim() && [...x].length >= 1 && [...x].length <= 40 && !/[\p{C}\u2028\u2029]/u.test(x));
 }
 var metadata = (v) => object$6(v) && version$1(v.version) && validLabels(v.labels);
 function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorBox, opStatus }) {
 	const path = `/sessions/${encodeURIComponent(target.host)}/${encodeURIComponent(target.session_id)}`;
-	const valid = (request) => request?.action === "session.labels.set" && equal$7(request.target, target) && object$6(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$6(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
+	const valid = (request) => request?.action === "session.labels.set" && equal$8(request.target, target) && object$6(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$6(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
 	let saved = {}, current = null, operation = null, busy = false, submission = null, refreshing = null, readable = false, damaged = false;
 	try {
 		const raw = JSON.parse(localStorage.getItem(storageKey));
@@ -1537,7 +1537,7 @@ function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorB
 			saved.intent = {
 				request: proven ? raw.intent.request : null,
 				key: proven ? raw.intent.key : null,
-				operation_id: opId$3(raw.intent.operation_id) ? raw.intent.operation_id : null
+				operation_id: opId$4(raw.intent.operation_id) ? raw.intent.operation_id : null
 			};
 			if (proven) {
 				saved.text = raw.intent.request.params.labels.join("\n");
@@ -1583,16 +1583,16 @@ function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorB
 	const accept = (candidate) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !opId$3(candidate?.operation_id) || candidate.action !== "session.labels.set" || !equal$7(candidate.target, target) || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$7({
+		if (!intent || !opId$4(candidate?.operation_id) || candidate.action !== "session.labels.set" || !equal$8(candidate.target, target) || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$8({
 			action: candidate.action,
 			target: candidate.target,
 			params: candidate.params,
 			preconditions: candidate.preconditions
 		}, intent.request)) throw Error(t("labels_wrong_receipt"));
-		if (candidate.status === "succeeded" && (!equal$7({
+		if (candidate.status === "succeeded" && (!equal$8({
 			host: candidate.result?.host,
 			session_id: candidate.result?.session_id
-		}, target) || !metadata(candidate.result?.connector_metadata) || intent.request && (!equal$7(candidate.result.connector_metadata.labels, intent.request.params.labels) || candidate.result.connector_metadata.version !== intent.request.preconditions.expected_version + 1))) throw Error(t("labels_wrong_receipt"));
+		}, target) || !metadata(candidate.result?.connector_metadata) || intent.request && (!equal$8(candidate.result.connector_metadata.labels, intent.request.params.labels) || candidate.result.connector_metadata.version !== intent.request.preconditions.expected_version + 1))) throw Error(t("labels_wrong_receipt"));
 		operation = candidate;
 		intent.operation_id = candidate.operation_id;
 		persist();
@@ -2378,7 +2378,7 @@ var fields$1 = [
 var modelKey = (model) => `${model.agent}:${model.id}`;
 var copyPreferences = (prefs) => Object.fromEntries(fields$1.map((key) => [key, Array.isArray(prefs[key]) ? [...prefs[key]] : prefs[key] ?? null]));
 var date$1 = (value) => typeof value === "number" && Number.isFinite(value) ? new Date(value * 1e3).toLocaleString() : "—";
-var equal$6 = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+var equal$7 = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 var validPreferences = (value) => value && typeof value === "object" && fields$1.every((key) => key in value) && ["initial_agent", "last_agent"].every((key) => value[key] === null || ["claude", "codex"].includes(value[key])) && ["initial_model", "last_model"].every((key) => value[key] === null || typeof value[key] === "string" && value[key].length <= 256) && ["hidden", "order"].every((key) => Array.isArray(value[key]) && value[key].length <= 1e3 && value[key].every((id) => typeof id === "string" && id.length <= 300));
 var validDraft = (value) => value && Number.isInteger(value.revision) && value.revision >= 0 && validPreferences(value.params);
 function orderedModels(doc, current = "") {
@@ -2765,7 +2765,7 @@ function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onE
 				...(next.unknown_models || []).map((model) => h("p", { class: "note" }, t("models_unknown_current", { model: `${model.agent}:${model.id}` })))
 			].filter(Boolean));
 			if (draft.revision !== next.model_preferences.revision) status.textContent = t("models_conflict");
-			else if (!equal$6(draft.params, copyPreferences(next.model_preferences))) status.textContent = t("models_unsaved");
+			else if (!equal$7(draft.params, copyPreferences(next.model_preferences))) status.textContent = t("models_unsaved");
 			renderRows();
 			showUsage(next.usage);
 			update();
@@ -3719,6 +3719,266 @@ function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, erro
 		refresh,
 		dispose() {
 			disposed = true;
+		}
+	};
+}
+//#endregion
+//#region src/create-record.js
+var equal$6 = (a, b) => a === b || a && b && typeof a === "object" && typeof b === "object" && Array.isArray(a) === Array.isArray(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((key) => Object.hasOwn(b, key) && equal$6(a[key], b[key]));
+var opId$3 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var terminal$7 = (value) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(value?.status);
+function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId = null, onCreated, errorBox, opStatus }) {
+	const project = kind === "project", action = project ? "project.create" : "work_item.create";
+	const target = project ? {} : { project_id: projectId }, key = `batc.create.${namespace}.${kind}.${projectId || "root"}`;
+	const primary = project ? "name" : "title", fields = new Map(), choices = new Map();
+	const names = project ? [
+		"name",
+		"repository",
+		"description",
+		"task_project",
+		"parent_id",
+		"derived_from"
+	] : [
+		"title",
+		"goal",
+		"request",
+		"acceptance",
+		"steps",
+		"state",
+		"parent_id",
+		"derived_from"
+	];
+	let saved = {
+		version: 1,
+		values: {}
+	}, busy = false, allowed = false, operation = null, damaged = false;
+	try {
+		const raw = localStorage.getItem(key);
+		if (raw) {
+			const value = JSON.parse(raw);
+			if (value?.version !== 1 || !value.values || names.some((name) => value.values[name] !== void 0 && typeof value.values[name] !== "string")) throw Error();
+			saved = value;
+			if (saved.intent && (saved.intent.request?.action !== action || !equal$6(saved.intent.request.target, target) || typeof saved.intent.key !== "string" || !saved.intent.key || saved.intent.operation_id && !opId$3(saved.intent.operation_id))) throw Error();
+		}
+	} catch {
+		damaged = true;
+	}
+	const status = h("div", { role: "status" }), receipt = h("div"), scope = h("p", {
+		class: "muted",
+		hidden: project
+	});
+	const unsaved = h("span", {
+		class: "muted",
+		hidden: true
+	}, t("create_unsaved"));
+	const persist = () => {
+		guard();
+		localStorage.setItem(key, JSON.stringify(saved));
+	};
+	const capture = () => Object.fromEntries([...fields].map(([name, input]) => [name, input.value]));
+	const changed = () => {
+		if (busy || saved.intent || damaged) return;
+		saved.values = capture();
+		unsaved.hidden = false;
+		try {
+			persist();
+		} catch (error) {
+			status.replaceChildren(errorBox(error));
+		}
+	};
+	const field = (name, label, multiline = false, max = 2e4) => {
+		const input = h(multiline ? "textarea" : "input", {
+			maxlength: max,
+			required: name === primary,
+			"aria-label": t(label)
+		});
+		input.value = saved.values[name] || "";
+		fields.set(name, input);
+		input.addEventListener("input", changed);
+		return h("label", {}, t(label), input);
+	};
+	const select = (name, label, rows) => {
+		const input = h("select", { "aria-label": t(label) });
+		fields.set(name, input);
+		input.addEventListener("change", changed);
+		choices.set(name, input);
+		for (const [value, text] of rows) input.append(h("option", { value }, text));
+		const current = saved.values[name] || "";
+		if (current && ![...input.options].some((option) => option.value === current)) input.append(h("option", { value: current }, `${current} · ${t("create_source_missing")}`));
+		input.value = current;
+		return h("label", {}, t(label), input);
+	};
+	const compact = h("div", { class: "capture-fields" }, field(primary, project ? "new_project_name" : "new_item_title", false, project ? 80 : 120));
+	if (project) compact.append(select("repository", "project_repository_optional", [["", t("project_repository_later")], ...[...new Set((caps()?.features?.repository_sync || []).map((row) => row.repository))].sort().map((value) => [value, value])]));
+	const advanced = h("details", { "data-create-advanced": "" }, h("summary", {}, t("create_details")), h("div", { class: "capture-fields" }, ...project ? [field("description", "description", true), field("task_project", "task_project", false, 120)] : [
+		field("goal", "goal", true),
+		field("request", "request", true),
+		field("acceptance", "acceptance", true),
+		field("steps", "create_steps", true),
+		select("state", "state", [
+			["", t("wi_state_todo")],
+			["doing", t("wi_state_doing")],
+			["waiting", t("wi_state_waiting")]
+		])
+	], select("parent_id", "parent_id", [["", t("create_no_parent")]]), select("derived_from", "derived_from", [["", t("create_no_source")]])), h("p", { class: "muted" }, t(project ? "create_project_help" : "create_item_help")));
+	const params = () => {
+		const value = capture(), result = { [primary]: value[primary].trim() };
+		for (const name of names) {
+			if (name === primary || !value[name]) continue;
+			if (name === "repository") result.repositories = [value[name]];
+			else if (name === "steps") result.steps = value.steps.split(/\r?\n/).map((text) => text.trim()).filter(Boolean).map((text) => ({
+				text,
+				done: false
+			}));
+			else result[name] = value[name];
+		}
+		return result;
+	};
+	const permitted = () => caps()?.scopes?.includes("manage") && caps()?.actions?.find((row) => row.action === action)?.allowed !== false;
+	const accept = async (value) => {
+		guard();
+		const intent = saved.intent;
+		if (!opId$3(value?.operation_id) || value.action !== action || value.actor !== caps()?.actor || value.idempotency_key !== intent.key || !equal$6(value.target, target) || !equal$6(value.params, intent.request.params) || !equal$6(value.preconditions, intent.request.preconditions) || intent.operation_id && intent.operation_id !== value.operation_id) throw Error(t("create_invalid_receipt"));
+		saved.intent.operation_id = value.operation_id;
+		persist();
+		operation = value;
+		receipt.replaceChildren(opStatus(value), " ", h("a", { href: `#/op/${value.operation_id}` }, t("create_operation")));
+		if (value.status === "succeeded") {
+			saved = {
+				version: 1,
+				values: {}
+			};
+			persist();
+			for (const input of fields.values()) input.value = "";
+			unsaved.hidden = true;
+			advanced.open = false;
+			await onCreated(value);
+		}
+	};
+	const run = async () => {
+		if (busy || damaged || !allowed || !permitted()) return;
+		if (!saved.intent && !form.reportValidity()) return;
+		busy = true;
+		update();
+		status.replaceChildren();
+		try {
+			guard();
+			if (!saved.intent) {
+				const next = {
+					version: 1,
+					values: capture(),
+					intent: {
+						key: crypto.randomUUID(),
+						request: {
+							action,
+							target,
+							params: params(),
+							preconditions: {}
+						}
+					}
+				};
+				localStorage.setItem(key, JSON.stringify(next));
+				saved = next;
+			}
+			const intent = saved.intent;
+			const result = intent.operation_id ? await api("GET", `/operations/${intent.operation_id}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
+			await accept(result.operation);
+		} catch (error) {
+			try {
+				guard();
+				if (saved.intent && !saved.intent.operation_id && [
+					400,
+					401,
+					403,
+					404,
+					422
+				].includes(error.status)) {
+					saved.intent.refused = true;
+					persist();
+				}
+				status.replaceChildren(errorBox(error));
+			} catch {}
+		} finally {
+			busy = false;
+			try {
+				guard();
+				update();
+			} catch {}
+		}
+	};
+	const create = h("button", {
+		class: "primary",
+		type: "submit"
+	}, t(project ? "add_project" : "add_item"));
+	const review = h("button", {
+		class: "secondary",
+		type: "button",
+		hidden: true,
+		onclick: () => {
+			guard();
+			if (busy || !(terminal$7(operation) || saved.intent?.refused)) return;
+			try {
+				const next = {
+					version: 1,
+					values: saved.values
+				};
+				localStorage.setItem(key, JSON.stringify(next));
+				saved = next;
+				operation = null;
+				receipt.replaceChildren();
+				status.replaceChildren();
+				update();
+			} catch (error) {
+				status.replaceChildren(errorBox(error));
+			}
+		}
+	}, t("create_edit_request"));
+	const form = h("form", {
+		class: "panel",
+		"data-create-record": kind,
+		onsubmit: (event) => {
+			event.preventDefault();
+			run();
+		}
+	}, scope, compact, advanced, h("div", { class: "actions" }, create, review, unsaved), status, receipt);
+	function update() {
+		for (const input of fields.values()) input.disabled = !allowed || !permitted() || busy || !!saved.intent || damaged;
+		create.disabled = !allowed || !permitted() || busy || damaged || !!saved.intent?.refused || !!saved.intent && terminal$7(operation);
+		create.textContent = t(saved.intent ? "create_check_original" : project ? "add_project" : "add_item");
+		review.hidden = !(saved.intent?.refused || saved.intent && terminal$7(operation) && operation.status !== "succeeded");
+		review.disabled = busy || !allowed || !permitted();
+	}
+	if (damaged) status.replaceChildren(h("p", { class: "error" }, t("create_invalid_draft")));
+	update();
+	return {
+		box: form,
+		setContext({ rows, name = "", active = true }) {
+			guard();
+			allowed = active;
+			scope.textContent = t("create_project_scope", {
+				name,
+				id: projectId
+			});
+			const flattened = [];
+			const walk = (list) => {
+				for (const row of list || []) {
+					if (!row.archived) flattened.push(row);
+					walk(row.children);
+				}
+			};
+			walk(rows);
+			for (const field of ["parent_id", "derived_from"]) {
+				const input = choices.get(field), current = input.value, id = project ? "project_id" : "work_item_id";
+				const options = flattened.map((row) => [row[id], row.name || row.title]);
+				input.replaceChildren(h("option", { value: "" }, t(field === "parent_id" ? "create_no_parent" : "create_no_source")), ...options.map(([value, text]) => h("option", { value }, text)));
+				if (current && !options.some(([value]) => value === current)) input.append(h("option", { value: current }, `${current} · ${t("create_source_missing")}`));
+				input.value = current;
+			}
+			update();
 		}
 	};
 }
@@ -4735,6 +4995,23 @@ var STRINGS = {
 		close: "關閉",
 		nav_projects: "專案",
 		projects_help: "專案與工作項目是 Connector 自己的紀錄：目標、需求原文、驗收、步驟，以及做這件事的 sessions、版本、操作與 PR。改名不會改 ID；排序與固定只影響顯示。",
+		create_details: "詳細資料與關係",
+		create_no_parent: "最上層",
+		create_no_source: "沒有來源",
+		create_source_missing: "目前清單中未找到",
+		create_steps: "步驟（每行一項）",
+		create_unsaved: "草稿已變更",
+		create_project_scope: "建立於專案：{name} · {id}",
+		create_operation: "查看建立操作",
+		create_check_original: "查核原建立請求",
+		create_edit_request: "編輯新的建立請求",
+		create_invalid_receipt: "回執與原建立請求不符；原請求仍保留。",
+		create_invalid_draft: "無法讀取已存的建立請求。請先從操作紀錄確認結果，避免重複建立。",
+		create_project_help: "上層決定樹狀位置，來源保留衍生關係。Task Service 名稱只建立關聯；建立專案不會啟動 Agent。",
+		create_item_help: "工作保留需求原文與驗收條件。步驟初始皆未完成；建立工作不會派工或修改 BAT 工作區。",
+		managed_locations: "資料與工作位置",
+		managed_locations_central: "中央服務將身分、操作紀錄與成果保存在安裝電腦的應用程式資料中。Dashboard 的草稿與閱讀版面設定則保存在目前瀏覽器或桌面用戶端。",
+		managed_locations_work: "程式碼與 Agent 執行位於你選定的 BAT 主機和工作區。設定中央服務不會搬移這些工作目錄；跨主機程式碼同步使用已綁定的 GitHub 儲存庫與已發布版本。",
 		new_project_name: "新專案名稱",
 		add_project: "新增",
 		show_archived: "顯示已封存",
@@ -6168,6 +6445,23 @@ var STRINGS = {
 		close: "Close",
 		nav_projects: "Projects",
 		projects_help: "Projects and work items are the connector's own records: goals, the request verbatim, acceptance, steps, and the sessions, checkpoints, operations and PRs that carried them. A rename never changes an ID; order and pins only change the display.",
+		create_details: "Details and relationships",
+		create_no_parent: "Top level",
+		create_no_source: "No source",
+		create_source_missing: "not found in current list",
+		create_steps: "Steps (one per line)",
+		create_unsaved: "Draft changed",
+		create_project_scope: "Create in project: {name} · {id}",
+		create_operation: "View creation operation",
+		create_check_original: "Check original creation request",
+		create_edit_request: "Edit a new creation request",
+		create_invalid_receipt: "The receipt does not match the original creation request; that request is retained.",
+		create_invalid_draft: "The saved creation request could not be read. Check operation history before creating a duplicate.",
+		create_project_help: "Parent sets the tree position; source keeps the derivation link. The Task Service name records a relationship. Creating a project does not start an agent.",
+		create_item_help: "Keep the original request and acceptance criteria with this work. New steps are unchecked; creating a work item does not dispatch work or change a BAT workspace.",
+		managed_locations: "Data and work locations",
+		managed_locations_central: "Central stores your identity, operation history and artifacts in application data on the installation computer. Dashboard drafts and reading layout choices stay in the current browser or desktop client.",
+		managed_locations_work: "Code and agent execution stay on the selected BAT host and workspace. Configuring central does not relocate those directories; code synchronization between hosts uses the bound GitHub repository and published commits.",
 		new_project_name: "New project name",
 		add_project: "Add",
 		show_archived: "Show archived",
@@ -15347,7 +15641,7 @@ async function viewManagedSettings(main) {
 	const local = h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
 		actor: state.caps.actor,
 		scopes: state.caps.scopes.join(", ")
-	})), h("p", { class: "muted" }, t("managed_background_help")), status);
+	})), h("p", { class: "muted" }, t("managed_background_help")), h("details", { "data-managed-locations": "" }, h("summary", {}, t("managed_locations")), h("p", { class: "muted" }, t("managed_locations_central")), h("p", { class: "muted" }, t("managed_locations_work"))), status);
 	main.append(h("h1", {}, t("nav_settings")), local);
 	const setup = managedSetupPanel({
 		h,
@@ -15941,45 +16235,28 @@ async function viewProjects(main) {
 	const out = h("div", {});
 	const tree = h("div", { class: "panel" });
 	const archived = h("div", {});
-	const name = h("input", {
-		placeholder: t("new_project_name"),
-		"aria-label": t("new_project_name"),
-		maxlength: 80,
-		required: true
-	});
-	const repositories = [...new Set((state.caps?.features?.repository_sync || []).map((binding) => binding.repository))].sort();
-	const repository = h("select", { "aria-label": t("project_repository_optional") }, h("option", { value: "" }, t("project_repository_later")), ...repositories.map((value) => h("option", { value }, value)));
-	const add = h("button", {
-		class: "primary",
-		type: "submit",
-		disabled: !may("manage")
-	}, t("add_project"));
-	const create = async (event) => {
-		event.preventDefault();
-		if (add.disabled || !name.value.trim()) return;
-		add.disabled = true;
-		const params = {
-			name: name.value.trim(),
-			...repository.value ? { repositories: [repository.value] } : {}
-		};
-		const op = await change(out, "project.create", {}, params, {}, "project.create");
-		add.disabled = false;
-		if (op) {
-			name.value = "";
+	const create = createRecordForm({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		namespace: connection.namespace,
+		kind: "project",
+		errorBox,
+		opStatus,
+		onCreated: async (op) => {
 			location.hash = `#/project/${op.result.project_id}`;
 		}
-	};
-	const fields = h("div", { class: "capture-fields" }, h("label", {}, t("new_project_name"), name), ...repositories.length ? [h("label", {}, t("project_repository_optional"), repository)] : []);
+	});
 	const showArchived = h("input", { type: "checkbox" });
-	main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "", h("form", {
-		class: "panel",
-		onsubmit: create
-	}, fields, h("div", { class: "actions" }, add)), out, tree, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+	main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "", create.box, out, tree, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		try {
 			const data = await api("GET", `/projects${showArchived.checked ? "?include_archived=true" : ""}`);
 			if (!tree.isConnected) return;
+			create.setContext({ rows: data.projects });
 			if (holdRender(fromEvent, opens)) {
 				idleReload = () => render(true);
 				return;
@@ -16087,25 +16364,20 @@ async function viewProject(main, pid) {
 	const out = h("div", {});
 	const archived = h("div", {});
 	const showArchived = h("input", { type: "checkbox" });
-	const title = h("input", {
-		placeholder: t("new_item_title"),
-		maxlength: 120
+	const create = createRecordForm({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		namespace: connection.namespace,
+		kind: "work_item",
+		projectId: pid,
+		errorBox,
+		opStatus,
+		onCreated: async () => render()
 	});
-	const add = h("button", {
-		class: "primary",
-		disabled: !may("manage"),
-		onclick: async () => {
-			if (!title.value.trim()) return;
-			add.disabled = true;
-			const op = await change(out, "work_item.create", { project_id: pid }, { title: title.value.trim() }, {}, `wi.create.${pid}`);
-			add.disabled = false;
-			if (op) {
-				title.value = "";
-				render();
-			}
-		}
-	}, t("add_item"));
-	main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+	main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), create.box, items, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		let data;
@@ -16122,6 +16394,11 @@ async function viewProject(main, pid) {
 		}
 		freshPage();
 		const p = data.project;
+		create.setContext({
+			rows: data.work_items,
+			name: p.name,
+			active: !p.archived
+		});
 		work.hidden = !Array.isArray(data.work);
 		fill(work, h("h2", {}, t("delivery_project_work")), ...data.work?.length ? data.work.map((item) => deliveryWork(item, p.repositories)) : [h("p", { class: "muted" }, t("delivery_no_work"))]);
 		const msg = out;
@@ -16244,7 +16521,6 @@ async function viewProject(main, pid) {
 				render();
 			}
 		}, t("restore")))));
-		add.disabled = !may("manage") || p.archived;
 	};
 	showArchived.onchange = () => render();
 	await render();
