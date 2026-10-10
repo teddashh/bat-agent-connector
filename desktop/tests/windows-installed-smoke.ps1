@@ -57,11 +57,12 @@ function Run-Installer([string]$Path, [string]$Arguments) {
     }
     if ($process.ExitCode -ne 0) { throw "Installer exit code: $($process.ExitCode)" }
 }
-function Start-Dashboard {
+function Start-Dashboard([bool]$Managed = $false) {
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
     $info.WorkingDirectory = $installDir
-    $info.Environment['BATC_DESKTOP_TOKEN'] = 'fixture-native-token'
+    if ($Managed) { $null = $info.Environment.Remove('BATC_DESKTOP_TOKEN') }
+    else { $info.Environment['BATC_DESKTOP_TOKEN'] = 'fixture-native-token' }
     [Diagnostics.Process]::Start($info)
 }
 function Stop-Owned([Diagnostics.Process]$Process) {
@@ -177,6 +178,28 @@ try {
     Save-Window $windows[0] 'reopened.png'
     Record-Step 'Owned process termination/relaunch resumed WebView polling and preserved configuration'
     Stop-Owned $reopened
+    Remove-Item -LiteralPath $central
+    $app = Start-Dashboard $true
+    $managedIdentity = node tests/managed-installed-probe.mjs wait $dataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Managed clean-profile first-run failed' }
+    Wait-Until { @([DashboardWindows]::Find($app.Id)).Count -eq 1 } 'Managed first-run window missing'
+    $window = @([DashboardWindows]::Find($app.Id))[0]
+    Save-Window $window 'managed-first-run.png'
+    if (-not [DashboardWindows]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Managed WM_CLOSE failed' }
+    Wait-Until { -not [DashboardWindows]::IsWindowVisible($window) } 'Managed close did not hide window'
+    $closedIdentity = node tests/managed-installed-probe.mjs probe $dataRoot
+    if ($LASTEXITCODE -ne 0 -or $closedIdentity -cne $managedIdentity) { throw 'Managed identity changed after close' }
+    Stop-Owned $app
+    $backgroundIdentity = node tests/managed-installed-probe.mjs probe $dataRoot
+    if ($LASTEXITCODE -ne 0 -or $backgroundIdentity -cne $managedIdentity) { throw 'Central did not survive UI process termination' }
+    $reopened = Start-Dashboard $true
+    $reopenedIdentity = node tests/managed-installed-probe.mjs wait $dataRoot
+    if ($LASTEXITCODE -ne 0 -or $reopenedIdentity -cne $managedIdentity) { throw 'Managed relaunch changed installation identity' }
+    Wait-Until { @([DashboardWindows]::Find($reopened.Id)).Count -eq 1 } 'Managed reopened window missing'
+    Stop-Owned $reopened
+    node tests/managed-installed-probe.mjs stop $dataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Managed fixture service cleanup failed' }
+    Record-Step 'Clean managed first-run without central config/token; same identity across close and relaunch; central survived UI termination'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
     Run-Installer $uninstaller '/S'
     Wait-Until { -not (Test-Path -LiteralPath $binary) -and @(Get-Registration).Count -eq 0 } 'Uninstall left binary or registration'
@@ -190,6 +213,8 @@ try {
     Stop-Owned $second
     Stop-Owned $reopened
     Stop-Owned $app
+    node tests/managed-installed-probe.mjs stop $dataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Managed fixture service cleanup failed' }
     $receipt | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $Evidence 'result.json') -Encoding utf8
     # State was proven absent before this fixture; only fixture-created app data is removed.
     foreach ($path in @($configRoot, $dataRoot)) {

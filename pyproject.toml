@@ -37,6 +37,9 @@ dev = [
   "trustme>=1.2.1,<2",
   "ruff>=0.16,<0.17",
 ]
+desktop-build = [
+    "pyinstaller==6.22.3",
+]
 
 [project.scripts]
 batc = "bat_agent_connector.cli:main"

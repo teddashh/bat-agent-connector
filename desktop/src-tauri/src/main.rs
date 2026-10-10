@@ -11,6 +11,8 @@ mod fleet_lifecycle;
 #[cfg(windows)]
 mod fleet_native;
 mod fleet_readiness;
+mod managed;
+mod managed_login;
 mod tailscale_control;
 mod updates;
 
@@ -24,6 +26,74 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum ManagedRequest {
+    Status,
+    SetLogin { enabled: bool },
+    OpenBrowser,
+}
+
+#[tauri::command]
+async fn managed_control(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<managed::Managed>>,
+    input: ManagedRequest,
+) -> Result<managed::Status, String> {
+    local_main(&window)?;
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _serial = state
+            .serial
+            .try_lock()
+            .map_err(|_| "MANAGED_SERVICE_BUSY")?;
+        match input {
+            ManagedRequest::Status => Ok(state.status()),
+            ManagedRequest::SetLogin { enabled } => state.set_login(enabled),
+            ManagedRequest::OpenBrowser => {
+                let path = state.browser_file()?;
+                app.opener()
+                    .open_path(path.to_string_lossy(), None::<&str>)
+                    .map_err(|_| "MANAGED_BROWSER_OPEN_FAILED")?;
+                Ok(state.status())
+            }
+        }
+    })
+    .await
+    .map_err(|_| "MANAGED_SERVICE_UNAVAILABLE".to_string())?
+}
+
+fn open_managed_browser(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let state = app.state::<Arc<managed::Managed>>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let browser_app = app.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _serial = state
+                .serial
+                .try_lock()
+                .map_err(|_| "MANAGED_SERVICE_BUSY")?;
+            let path = state.browser_file()?;
+            browser_app
+                .opener()
+                .open_path(path.to_string_lossy(), None::<&str>)
+                .map_err(|_| "MANAGED_BROWSER_OPEN_FAILED".to_string())
+        })
+        .await
+        .unwrap_or_else(|_| Err("MANAGED_SERVICE_UNAVAILABLE".into()));
+        if let Err(code) = result {
+            show(&app);
+            app.dialog()
+                .message(format!(
+                    "Browser entry needs attention ({code}). / 瀏覽器入口需要檢查設定。"
+                ))
+                .title("Better Agent Dashboard")
+                .show(|_| {});
+        }
+    });
+}
 
 #[tauri::command]
 async fn desktop_update(
@@ -533,7 +603,11 @@ fn main() {
     let token = Zeroizing::new(std::env::var("BATC_DESKTOP_TOKEN").unwrap_or_default());
     std::env::remove_var("BATC_DESKTOP_TOKEN");
     use bat_fleet_core::installation::Entry;
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let managed_login = arguments.len() == 1 && arguments[0] == "--managed-login";
+    if managed_login {
+        arguments.clear();
+    }
     let entry = Entry::parse(&arguments).unwrap_or_else(|_| std::process::exit(2));
     if let Entry::Supervisor(path) = &entry {
         drop(token);
@@ -576,7 +650,27 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
-            let bridge = Arc::new(Bridge::load(&app.path().app_config_dir()?, token));
+            let (managed, launch) = managed::Managed::prepare(
+                &app.path().resource_dir()?,
+                &app.path().app_local_data_dir()?,
+                &app.path().app_config_dir()?,
+            );
+            let managed_status = managed.status();
+            let bridge = Arc::new(match launch {
+                Some(launch) => {
+                    Bridge::managed(launch.config(), launch.token.clone(), launch.identity())
+                }
+                None if managed_status.mode == "external" => {
+                    Bridge::load(&app.path().app_config_dir()?, token)
+                }
+                None => Bridge::managed_failure(
+                    managed_status
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "MANAGED_SERVICE_UNAVAILABLE".into()),
+                ),
+            });
+            app.manage(Arc::new(managed));
             app.manage(NativeFiles(files::Files::open(
                 &app.path().app_local_data_dir()?.join("file-transfers"),
                 bridge.clone(),
@@ -607,7 +701,9 @@ fn main() {
             bootstrap.start_auto(control.clone());
             app.manage(QuitState::default());
             let mut config = app.config().app.windows[0].clone();
-            config.visible = update_pending || !matches!(login_options, Some(Ok((false, false))));
+            config.visible = update_pending
+                || managed_status.error.is_some()
+                || !managed_login && !matches!(login_options, Some(Ok((false, false))));
             let window = tauri::WebviewWindowBuilder::from_config(app, &config)?
                 .initialization_script(if login_path.is_some() || update_pending {
                     "location.hash = '/settings';"
@@ -636,14 +732,34 @@ fn main() {
             if !update_pending && matches!(login_options, Some(Ok((false, _)))) {
                 control.start_login();
             }
+            #[cfg(windows)]
+            if !update_pending && managed_login && managed_status.ready {
+                control.start_login();
+            }
             let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
+            let browser = MenuItem::with_id(
+                app,
+                "browser",
+                "Open in Browser",
+                managed_status.ready,
+                None::<&str>,
+            )?;
+            let settings =
+                MenuItem::with_id(app, "settings", "Background Settings", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Dashboard", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit_item])?;
+            let menu = Menu::with_items(app, &[&open, &browser, &settings, &quit_item])?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("Better Agent Dashboard")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show(app),
+                    "browser" => open_managed_browser(app),
+                    "settings" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.eval("location.hash = '/settings';");
+                        }
+                        show(app);
+                    }
                     "quit" => quit(app),
                     _ => {}
                 })
@@ -689,6 +805,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            managed_control,
             desktop_update,
             native_files_status,
             native_files_pick,
