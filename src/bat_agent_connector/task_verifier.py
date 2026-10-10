@@ -120,6 +120,11 @@ def load_settings(path: str | None = None) -> VerificationSettings:
     elif stat.S_IMODE(p.stat().st_mode) & 0o077:
         raise ValueError("task settings must be mode 0600")
     raw = tomllib.loads(platform_files.read_private(p).decode() if platform_files.WINDOWS else p.read_text())
+    return parse_settings(raw)
+
+
+def parse_settings(raw: dict) -> VerificationSettings:
+    """Parse an already read settings document for managed atomic configuration."""
     section = raw.get("verification", {})
     commands = {k: tuple(v) for k, v in section.get("commands", {}).items()}
     if any(not cmd or not all(isinstance(a, str) and a for a in cmd) for cmd in commands.values()):

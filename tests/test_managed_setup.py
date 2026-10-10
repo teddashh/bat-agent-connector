@@ -31,10 +31,11 @@ async def installed(tmp_path, monkeypatch):
                                   **dashboard_sync.identity(daemon.journal, principal)}
     setup.install(daemon)
     yield daemon, principal, root
-    await daemon.ops.drain()
-    await daemon.fleet.close()
-    await daemon.inventory.close()
-    daemon.journal.close()
+    if daemon._lease_fd is not None:  # restart tests already shut down this exact owner
+        await daemon.ops.drain()
+        await daemon.fleet.close()
+        await daemon.inventory.close()
+        daemon.journal.close()
 
 
 def host_params(daemon, principal, mock, **extra):
@@ -62,7 +63,7 @@ async def test_setup_real_bat_preserves_config_and_exposes_no_secrets(installed,
     async def ssh(alias):
         aliases.append(alias)
     monkeypatch.setattr(setup, "_probe_ssh", ssh)
-    params = host_params(daemon, principal, mock, ssh_alias="fixture-bat")
+    params = host_params(daemon, principal, mock, ssh_alias="fixture-bat", shared_clone_worktrees=True)
     before = setup.state(daemon, principal)["revision"]
     operation = create(installed, "setup.host", {"host": "fixture"}, params, revision=before)
     result = await settle(installed, operation)
@@ -75,6 +76,7 @@ async def test_setup_real_bat_preserves_config_and_exposes_no_secrets(installed,
     assert data["operator_extension"] == {"keep": ["one", "two"], "nested": {"enabled": True}}
     assert data["safety"]["write_min_interval_s"] == 0
     assert daemon.fleet.config.host("fixture").orchestrate
+    assert daemon.fleet.config.host("fixture").shared_clone_worktrees
     assert daemon.inventory.fleet.config is daemon.fleet.config
     assert daemon.inventory.observation.config is daemon.fleet.config
     assert daemon.adapter.verifier.settings.ssh_hosts == {"fixture": "fixture-bat"}
@@ -112,7 +114,7 @@ async def test_revision_conflict_rejected_before_journaling_or_network(installed
 
 @pytest.mark.parametrize("change", [{"token_ref": "file:/unrelated/private"}, {"secret_ref": "../outside"},
     {"writes": "yes"}, {"url": "wss://user:credential@fixture:9876"}, {"managed_roots": ["/"]},
-    {"ssh_alias": "-oProxyCommand=untrusted"}])
+    {"ssh_alias": "-oProxyCommand=untrusted"}, {"shared_clone_worktrees": "true"}])
 async def test_setup_rejects_unsafe_or_untyped_fields(installed, mock, change):
     daemon, principal, _ = installed
     params = host_params(daemon, principal, mock, **change)
@@ -215,6 +217,51 @@ async def test_accepted_secret_expiry_does_not_change_durable_original_intent(in
     assert metadata_path.exists()  # pending original intent keeps its already admitted credential
     result = await settle(installed, operation)
     assert result["status"] == "succeeded", result
+
+
+async def test_explicit_verification_commands_persist_without_execution_and_restore(installed, tmp_path):
+    daemon, principal, root = installed
+    marker = tmp_path / "must-not-run-during-save"
+    params = {"commands": {"Reviewed task project": ["python3", "-c", f"open({str(marker)!r}, 'w').write('unexpected')"]},
+              "timeout_s": 120}
+    operation = create(installed, "setup.verification", {}, params)
+    result = await settle(installed, operation)
+    assert result["status"] == "succeeded", result
+    assert not marker.exists()
+    assert setup.state(daemon, principal)["verification"] == params
+    assert daemon.adapter.verifier.settings.commands["Reviewed task project"] == tuple(params["commands"]["Reviewed task project"])
+    assert daemon.adapter.verifier.settings.timeout_s == 120
+    # A second service instance loading the persisted document restores commands
+    # through the same installation hook, without BATC_TASK_SETTINGS or execution.
+    await daemon.ops.drain()
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+    daemon.journal.close()
+    restored = TaskDaemon(daemon.fleet.config, root / "state" / "tasks.sqlite3")
+    restored.managed_installation = daemon.managed_installation
+    try:
+        setup.install(restored)
+        assert restored.adapter.verifier.settings.commands == daemon.adapter.verifier.settings.commands
+        assert restored.adapter.verifier.settings.timeout_s == 120
+        assert not marker.exists()
+        # An explicitly reviewed empty replacement removes prior mappings.
+        replacement = restored, principal, root
+        cleared = create(replacement, "setup.verification", {}, {"commands": {}, "timeout_s": 30}, key="clear-verification")
+        assert (await settle(replacement, cleared))["status"] == "succeeded"
+        assert not restored.adapter.verifier.settings.commands
+    finally:
+        await restored.ops.drain()
+        await restored.fleet.close()
+        await restored.inventory.close()
+        restored.journal.close()
+
+
+@pytest.mark.parametrize("params", [{"commands": {"project": "python -m pytest"}, "timeout_s": 60},
+    {"commands": {"project": []}, "timeout_s": 60}, {"commands": {}, "timeout_s": True},
+    {"commands": {}, "timeout_s": 3601}, {"commands": {"project": ["python\nother"]}, "timeout_s": 60}])
+async def test_verification_settings_refuse_ambiguous_or_unbounded_commands(installed, params):
+    with pytest.raises(OperationError):
+        create(installed, "setup.verification", {}, params)
 
 
 async def test_repository_binding_checks_provider_and_exact_workspace(installed, mock, monkeypatch):
