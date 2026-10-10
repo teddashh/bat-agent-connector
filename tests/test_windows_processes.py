@@ -77,6 +77,18 @@ def test_recycled_unrelated_pid_is_never_waited_or_terminated(native):
     tree.close()
 
 
+def test_wait_failure_does_not_close_completed_handle_twice(native, monkeypatch):
+    module, state = native
+    tree = module.ProcessTree()
+    tree.terminate()
+    monkeypatch.setattr(module, "_wait", lambda handle, _timeout: 0 if handle == 1001 else 0xFFFFFFFF)
+    with pytest.raises(OSError, match="native query"):
+        tree.alive()
+    assert state.closed == [1001]
+    tree.close()
+    assert state.closed == [1001, 1002, 100]
+
+
 def test_new_member_during_termination_remains_unconfirmed(native):
     module, state = native
     tree = module.ProcessTree()
