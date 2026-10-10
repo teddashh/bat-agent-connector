@@ -914,6 +914,7 @@ mod tests {
         .unwrap();
         let bridge = FleetBridge::load(&temp.0);
         // Synthetic process fixture has no inventory, credentials or mutation implementation.
+        let started = std::time::Instant::now();
         let result = bridge
             .request(
                 FleetRequest::Contract {},
@@ -921,13 +922,23 @@ mod tests {
             )
             .await;
         if result.is_err() {
+            let elapsed = started.elapsed();
+            let phase = std::fs::read_to_string(root.join("client/phase.txt"))
+                .unwrap_or_else(|_| "not-started".into());
+            eprintln!(
+                "synthetic original request: {:?}; elapsed: {elapsed:?}; phase: {phase}",
+                result.as_ref().err()
+            );
             // Synthetic diagnostics only: distinguish pipe, console and environment startup.
+            // The identical probe preserves the original launch conditions and deadline;
+            // it cannot turn the original failure into a pass or replay any real control.
             // No inventory, credentials or controls are implemented by this script.
             let executable = powershell().unwrap();
             let script = load_script(&bridge.config).unwrap();
-            for probe in ["null-input", "console", "windows-environment"] {
+            for probe in ["identical", "null-input", "console", "windows-environment"] {
                 let _ = std::fs::remove_file(root.join("client/phase.txt"));
                 let mut command = adapter_command(&executable, &script).unwrap();
+                let probe_started = std::time::Instant::now();
                 let outcome = if probe == "null-input" {
                     command
                         .stdin(Stdio::null())
@@ -942,7 +953,7 @@ mod tests {
                 } else {
                     if probe == "console" {
                         command.creation_flags(0);
-                    } else {
+                    } else if probe == "windows-environment" {
                         for name in [
                             "PSModulePath",
                             "ComSpec",
@@ -964,7 +975,7 @@ mod tests {
                         run_command(
                             command,
                             &request("contract", "fixture-diagnostic"),
-                            Duration::from_secs(5)
+                            Duration::from_secs(if probe == "identical" { 10 } else { 5 })
                         )
                         .await
                         .map(|_| ())
@@ -972,7 +983,10 @@ mod tests {
                 };
                 let phase = std::fs::read_to_string(root.join("client/phase.txt"))
                     .unwrap_or_else(|_| "not-started".into());
-                eprintln!("synthetic startup probe {probe}: {outcome}; phase: {phase}");
+                eprintln!(
+                    "synthetic startup probe {probe}: {outcome}; elapsed: {:?}; phase: {phase}",
+                    probe_started.elapsed()
+                );
             }
         }
         let result = result.unwrap();
