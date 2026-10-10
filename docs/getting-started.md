@@ -2,20 +2,37 @@
 
 [Product overview](../README.md) · **English** · [繁體中文](getting-started.zh-TW.md)
 
-## The intended installation experience
+## First-launch installation experience
 
-The desktop package should prepare the runtime, data, personal identity and background Connector for you. After guided BAT / GitHub authorization, open Dashboard from the tray or menu bar. Keep the service connected while the window is closed. You should not need to install Python, edit JSON or enter an API actor.
+The default first-launch path is now available as a candidate implementation (matching the successful PR #81 CI artifact).
 
-**That managed installation is not complete in the current validation packages.** The instructions below are the interim development-trial / operator path, not the intended onboarding for every user. Joining an already operated central service remains a supported advanced choice. [Managed installation contract](design/managed-installation.md).
+When you install and launch the desktop client:
+1. It automatically prepares the owned local background central service.
+2. It automatically generates your personal credentials (native-only).
+3. The Dashboard opens directly. You do not need to install Python or hand-edit JSON credentials.
 
-## Choose a trial path
+Desktop Fleet still owns connection/startup, BAT work execution, and Python Connector/Task Service remains the authority.
+
+## Choose a setup path
 
 | Your situation | Start here |
 | --- | --- |
-| Your environment already has a central service | Get its trusted Dashboard address and your own API credential from the operator. Open Web, or follow [desktop connection](#5-connect-the-desktop-client). |
-| You operate the first environment | Set up a Linux central host using the steps below. |
+| You want the default automated setup | Follow the [Automated Candidate Setup](#automated-candidate-setup) below. |
+| Your environment already has a central service | Get its trusted Dashboard address and your own API credential from the operator. Open Web, or configure the desktop client manually. (Manual external central setup is preserved as an advanced choice). |
 | You only want to observe BAT through an agent | Use a configured central identity and the read-only MCP path under [CLI and agent access](#cli-and-agent-access). |
-| You expect an installer with no engineering setup | That is the required product experience, but it is not yet available. Follow the [implementation record](product/implementation-status.md) and [Releases](https://github.com/teddashh/bat-agent-connector/releases). |
+
+## Automated Candidate Setup
+
+1. **Install and Launch:** Download the desktop candidate artifact from the successful PR #81 CI build. Install and launch it. The background central service and native personal credentials are automatically prepared.
+2. **Connect BAT:** In the UI Settings, either:
+   - Add a trusted BAT profile, or
+   - Manually enter the URL, fingerprint, workspace profile, and token.
+   *(Credentials are handled securely in the UI; never hand-edit JSON).*
+3. **GitHub Binding:** Select a host/workspace and configure the GitHub binding in the UI settings.
+   - **Managed roots and an SSH trusted alias** are required for published-repo dispatch.
+   - **Shared-clone-worktree** is an explicit opt-in for BAT direct starts.
+
+*(The rest of this guide details the manual external central setup, which remains available as an advanced choice for operators.)*
 
 ## 1. Prepare a central host
 

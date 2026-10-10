@@ -742,11 +742,11 @@ faqs = [
         "No. Dashboard can manage work on a configured remote BAT host. BAT remains where the coding sessions run. Local BAT launch and Fleet controls are optional platform capabilities.",
         "不必。Dashboard 可管理已配置遠端 BAT 主機的工作，coding sessions 留在 BAT。開本機 BAT 與 Fleet 控制是依平台提供的選用能力。",
     ),
-    (
+        (
         "Does the current installer set everything up?",
         "現在安裝包會把環境全部建好嗎？",
-        "Not yet. That is the required normal experience, including background service and one-click browser access. Current validation packages still need an operator-configured central service and identity.",
-        "還不會。包含背景服務與一鍵開網頁的完整安裝，是正式產品要求；現有驗證包仍需操作者先配置中央與身分。",
+        "Yes, the default candidate artifact (PR #81) automatically prepares the background service, generates personal credentials, and opens the Dashboard. Manual setup remains an advanced choice.",
+        "是的，預設的候選 artifact (PR #81) 會自動準備背景服務、產生個人憑證並開啟 Dashboard。手動設定則保留為進階選項。",
     ),
     (
         "Can Web and Tauri stay open together?",

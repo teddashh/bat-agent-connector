@@ -1,12 +1,21 @@
 # Better Agent Dashboard／Connector 實作狀態
 
-查核日期：2026-10-09。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
+查核日期：2026-10-10。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
 [`2026-10-08-dispatch.md`](../handoff/2026-10-08-dispatch.md)。此表以 source evidence
 追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `2568520`（#41 已合併）；
 本輪已依序合併 #36（`800f6ec`）、#35（`8e687fb`）、#37（`2ac5715`）及 #38（`8c755a3`）。下面的接手基線保留歷史，
 已合併證據以「本輪收斂結果」為準，續作以「目前續作」為準。
 
 ## 目前續作
+
+### 2026-10-10 候選自動化安裝與環境設定 (PR #81)
+
+Issue #81 / 候選實作將預設首次啟動路徑自動化：包含打包的 managed runtime、背景中央服務與個人身分憑證（僅限原生）自動產生，以及 browser one-use tickets。
+UI 設定支援新增受信任的 BAT profile、手動輸入連線資訊，並將選定的 host/workspace 進行 GitHub 綁定。
+公開 repo 派發需要 managed roots 與 SSH trusted alias；而 BAT direct starts 的 shared-clone-worktree 則需明確 opt-in。
+手動外部中央服務設定仍保留為進階選項。
+驗證了針對發送指令收據 (C08) 的處理、取消不必要的佇列推論，並保存了釘選的技能目錄選取 (不含自動啟動)。
+正式簽章、Mac 公證、更新頻道、Linux persistent vault 及人工驗收等已排除，不屬於實作功能。
 
 ### 2026-10-10 專案工作樹與對話工作空間
 

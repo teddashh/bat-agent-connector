@@ -22,15 +22,12 @@ interaction references; it is not the runtime or data backend.
 
 ## Use an existing Windows installation
 
-The candidate source implements the bundled managed runtime and background environment automatically, though it is pending final validation (draft PR #81). The frontend now includes an adjustable tree, unread and model preferences, a skills catalog, direct result links, repair workflows, and instructions presenting honest limits.
+The candidate source (PR #81) implements the bundled managed runtime and background environment automatically. The frontend now includes an adjustable tree, unread and model preferences, a skills catalog, direct result links, and repair workflows.
 
 For a supervised trial today:
 
 1. Get `desktop-Windows-unsigned` from the [candidate CI build](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
-   This is the new candidate artifact. No new version number, tag, or release has been invented yet.
-   Final validation is pending for root to finalize.
-2. Connect the trusted central and native credential using the
-   [current desktop setup](getting-started.md#5-connect-the-desktop-client).
+2. The background central service and native personal credential are automatically prepared on launch.
 3. If Fleet is already deployed, keep its reviewed Kit inventory, BAT profile index
    and SSH configuration. The native adapter reads that same configuration. Use
    [fleet.example.json](../desktop/fleet.example.json) and the
