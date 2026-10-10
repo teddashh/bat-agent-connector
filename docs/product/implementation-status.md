@@ -10,7 +10,7 @@
 
 ### 2026-10-10 Issue #59 候選收斂（PR #81）
 
-[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 為尚未合併的原始碼候選，最終 [Python／共用 UI／各平台套件檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks)仍在執行。此節以候選原始碼為準，不沿用舊 release 的測試總數或 artifacts，也不宣稱新安裝包已正式發行。
+這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的實作；各來源 commit 的 [Python／共用 UI／各平台套件檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks)保留對應驗證紀錄。原始碼、整合狀態與 release 資產分開核對，不沿用舊 release 的測試總數或 artifacts，也不由此推論已正式發行新安裝包。
 
 | 項目 | 候選實作與界線 |
 | --- | --- |
@@ -27,7 +27,7 @@
 
 **本次排除範圍：**正式簽章、Mac 公證、正式更新通道、Linux 原生憑證持久儲存。完整 46 項實際環境的人工驗收由使用者負責，不列入 Agent 未完成工作，也不宣稱已通過。原生 BAT merge 的 unknown ACK 保留原操作及資源；獨立人工裁決 API 不在[目前 merge 合約](../design/worktree-merge.md)範圍，不另列交付門檻。
 
-**目前仍待：**候選最終檢查與整合。以下保留各階段當時的實作紀錄及基線；其中「尚未實作」和「待驗收」描述是歷史狀態，不覆蓋本節的候選實作與最新排除範圍。
+**驗證與整合紀錄：**以對應 PR、來源 commit 與檢查頁為準。以下保留各階段當時的實作紀錄及基線；其中「尚未實作」和「待驗收」描述是歷史狀態，不覆蓋本節的候選實作與最新排除範圍。
 
 ## 歷史實作紀錄（保留當時狀態）
 

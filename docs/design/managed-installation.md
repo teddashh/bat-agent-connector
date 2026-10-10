@@ -1,6 +1,6 @@
 # Managed desktop installation and background service
 
-Status: **source implemented in candidate [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81); final checks running, not yet merged** (2026-10-10). Match package evidence to the exact candidate commit. Older published release assets are historical client packages and do not automatically contain this runtime.
+Implementation: **included in this source version, introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81)** (2026-10-10). Match package evidence to the exact source commit and consult the linked checks for validation records. Older published release assets are historical client packages and do not automatically contain this runtime.
 
 This contract covers the ordinary local installation and its advanced external-central alternative. Python Connector / Task Service remains the sole business authority. Windows Fleet manages local connection and startup choices; BAT executes work on the selected hosts. Rust owns packaging, native credentials, windows and restricted lifecycle controls, not another task journal or scheduler.
 
@@ -47,7 +47,7 @@ Candidate source and fixture locations:
 | Bundled integrity, empty child PATH and concurrent clients | `desktop/scripts/build-managed-runtime.py`, `desktop/tests/managed-runtime-fixture.py` |
 | Native installation/login lifecycle | `desktop/src-tauri/src/managed.rs`, `managed_login.rs`; platform jobs in `.github/workflows/desktop.yml` |
 
-The final [candidate checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) are still running. Package fixtures use controlled temporary resources; a successful job is evidence for its source commit and platform, not every user environment.
+The [PR #81 checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) record validation by source commit. Package fixtures use controlled temporary resources; a successful job is evidence for its source commit and platform, not every user environment.
 
 The owner explicitly excluded formal signing, Mac notarization, production update channels and Linux persistent native credential enrollment from this delivery. Full human execution of the 46-item real-environment acceptance matrix is user-owned and is not an outstanding agent task. Exclusion does not mean these capabilities or checks were completed. Unknown native BAT merge acknowledgements preserve original work under the [merge contract](worktree-merge.md); its separate human-adjudication API is not a delivery gate.
 

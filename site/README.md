@@ -24,8 +24,8 @@ bootstrap were retained from the repository's previous project-page-kit site
 (https://github.com/teddashh/teddashh.github.io/tree/main/kit).
 
 Keep both languages aligned. Update the evidence baseline only when the referenced
-candidate actually passed. Describe managed installation as candidate source until the matching final package
-checks and integration complete. Keep user-owned real-environment acceptance and
+candidate actually passed. Describe what the source version implements and link validation records for its
+exact package commit; do not embed temporary PR/check status in public copy. Keep user-owned real-environment acceptance and
 explicitly excluded distribution features separate from implementation status. Do not invent tool counts,
 use fixture screenshots as live evidence, or label validation artifacts as a signed
 release. Platform claims must distinguish desktop client, central service and Fleet.

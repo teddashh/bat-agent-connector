@@ -4,7 +4,7 @@
 
 Windows Fleet is the local connection and startup layer inside Tauri. Python Connector / Task Service authorizes and dispatches work; BAT executes it on the selected host. The candidate desktop package includes a local Python central runtime. Joining an existing central, including one on Linux, remains an advanced option.
 
-[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) is a source candidate with final checks still running, not a merged release. Older release assets are historical client packages. Follow [its checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) to a desktop run, match the source commit, and download `desktop-Windows-unsigned` only from a successful Windows package job.
+The implementation introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) is included in this source version; that does not update previously published release assets. Older release assets are historical client packages. Follow [its checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) to a desktop run, match the source commit, and download `desktop-Windows-unsigned` only from a successful Windows package job.
 
 ## What runs where
 
@@ -52,4 +52,4 @@ For Tailscale sign-in, open the installed Tailscale app from its panel, sign in 
 | Credential Manager, tray and native files | [Desktop client](design/desktop.md) · [file operations](design/native-files.md) |
 | Validation packages and installed fixtures | [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [acceptance matrix](product/acceptance-v2.md) |
 
-Windows package/WebView fixtures, Fleet source tests and a user's real SSH / Tailscale / BAT environment are distinct evidence. Final candidate checks remain pending. Formal signing and production update channels are excluded from this delivery; full real-environment acceptance belongs to the user. Neither exclusion is a completed feature or test. Mac Dashboard support does not imply a Windows Fleet port.
+Windows package/WebView fixtures, Fleet source tests and a user's real SSH / Tailscale / BAT environment are distinct evidence. Match validation records to the package source commit. Formal signing and production update channels are excluded from this delivery; full real-environment acceptance belongs to the user. Neither exclusion is a completed feature or test. Mac Dashboard support does not imply a Windows Fleet port.

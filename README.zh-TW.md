@@ -8,7 +8,7 @@ Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的
 
 你繼續在 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) coding；Hermes、Grokbot 等 Agent 透過各自的身分協作。Repository 與 Python 套件仍叫 **`bat-agent-connector`**，Connector 是 Dashboard、CLI 與 MCP 共用的後端。
 
-> **候選狀態：**[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 已實作打包的 Python runtime、自有背景中央、個人身分與已認證的瀏覽器入口。最終檢查仍在執行，尚未合併發行；請使用與候選 commit 相符且建置成功的桌面 artifact。早期 release 下載檔不會自動包含這些新功能。[安裝與首次使用 →](docs/getting-started.zh-TW.md)
+> **這版原始碼**包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的打包 Python runtime、自有背景中央、個人身分與已認證的瀏覽器入口。請使用與來源 commit 相符且建置成功的桌面 artifact，並核對其驗證紀錄。早期 release 下載檔不會自動包含這些新功能。[安裝與首次使用 →](docs/getting-started.zh-TW.md)
 
 ![從左側專案工作樹選工作，在同一畫面閱讀對話、回覆與追蹤成果。](site/images/workspace-zh.png)
 
@@ -18,7 +18,7 @@ Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的
 
 ## 內容導覽
 
-[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [Windows Fleet](#windows-fleet-與資源) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [現況](#目前證據與尚待完成的工作) · [文件](#文件索引) · [開發](#參與開發)
+[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [Windows Fleet](#windows-fleet-與資源) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [驗證](#實作與驗證) · [文件](#文件索引) · [開發](#參與開發)
 
 ## 你可以用它做什麼
 
@@ -107,7 +107,7 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 
 ## 平台與安裝包
 
-候選版本提供以下平台的打包流程。最終同版 CI 與安裝 fixture 仍在執行；原始碼實作、套件建置成功與使用者實際環境，是不同的證據。
+這版原始碼提供以下平台的打包流程。CI 與安裝 fixture 證據須核對精確來源 commit；原始碼實作、套件建置成功與使用者實際環境，是不同的證據。
 
 | 元件 | 候選實作 | 發行／平台界線 |
 | --- | --- | --- |
@@ -152,15 +152,15 @@ MCP／CLI 寫入保留明確確認、主機權限及稽核；UI 已檢視的操�
 
 原生 BAT `worktree.merge` 若 ACK 未知且沒有充分正向證據，會保留原操作及資源，不重送效果或釋放 ownership。這種情況的人工裁決 API 不在目前合約範圍，也不是剩餘交付門檻；GitHub 整合和部署有自己的讀回合約。[Merge 復原](docs/design/worktree-merge.md) · [資源政策](docs/design/resource-policy.md) · [安全說明](SECURITY.md)
 
-## 目前證據與尚待完成的工作
+## 實作與驗證
 
-截至 **2026-10-10**，原始碼候選為尚未合併的 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81)，最終[檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks)仍在執行。舊 release 的測試總數或 artifact 不能當成本候選的結果。
+這裡說明的實作由 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入，其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)保留各來源 commit 的驗證紀錄。請與使用的套件核對；舊 release 的測試總數或 artifact 不能當成這版原始碼的結果。
 
 候選實作包含自動安裝與引導設定、可調整的專案樹、易讀對話與發送回執、未讀／模型偏好、經檢視的技能選取、成果連結及修復工作。技能選取會固定來源 digest，不會自動套用到執行中的 Agent；歷史「已排入佇列」回執不代表目前 BAT 佇列位置，也未提供逐則訊息取消。
 
 自動驗證涵蓋 Python、共用 browser／native transport、打包 runtime 的 ownership／重開，以及各平台安裝 fixture。受控 fixture 與使用者實際 Fleet、帳號和部署目標的驗證分開記錄。
 
-負責人已將**正式簽章、Mac 公證、正式更新通道及 Linux 原生憑證持久儲存**排除於本次交付。**完整 46 項實際環境的人工驗收由使用者自行執行**，不列為 Agent 未完成工作。排除不表示相關能力或實機測試已完成；目前仍待候選最終檢查與整合。
+負責人已將**正式簽章、Mac 公證、正式更新通道及 Linux 原生憑證持久儲存**排除於本次交付。**完整 46 項實際環境的人工驗收由使用者自行執行**，不列為 Agent 未完成工作。排除不表示相關能力或實機測試已完成；驗證及整合紀錄請查對應 PR 與檢查頁。
 
 [實作紀錄](docs/product/implementation-status.md) · [驗收參考](docs/product/acceptance-v2.md)
 

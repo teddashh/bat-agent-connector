@@ -2,11 +2,11 @@
 
 ## Next release (unreleased)
 
-- Candidate [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81), not yet merged:
+- Introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81):
   bundle the matching Python central runtime and prepare private installation data,
   stable personal identity, authenticated browser handoff and installation-owned login startup.
   Windows uses native file locks and private storage; safe forward upgrades preserve the
-  journal and refuse busy work or downgrades. Final candidate checks remain in progress.
+  journal and refuse busy work or downgrades. Validation records are linked from the PR checks.
 - Add guided BAT/profile access, exact GitHub repository/host/workspace bindings and
   Task Service verification command settings. Configuration is revision-bound and journaled;
   saving probes access without dispatching, pushing or executing a saved verification command.

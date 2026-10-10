@@ -4,7 +4,7 @@
 
 ## Choose the matching candidate package
 
-[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) implements the normal desktop setup below. It is not yet merged, and final checks are still running. Open its [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks), follow the desktop run and use an artifact from the same source commit whose platform job succeeded. Earlier release assets do not automatically include this runtime. [Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
+This source version includes the normal desktop setup introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Source implementation and published release assets are separate. Open its [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks), follow the desktop run and use an artifact from the same source commit whose platform job succeeded. Earlier release assets do not automatically include this runtime. [Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
 
 | Platform | Artifact | Package |
 | --- | --- | --- |

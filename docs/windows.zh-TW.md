@@ -4,7 +4,7 @@
 
 Windows Fleet 是 Tauri 裡的本機連線與啟動層。Python Connector／Task Service 授權並派工，BAT 在選定主機執行工作。候選桌面包包含本機 Python 中央 runtime；加入既有中央（例如 Linux 中央）保留為進階選項。
 
-[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 是原始碼候選，最終檢查仍在執行，尚未合併發行。舊 release 資產仍是先前的 client 包。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對來源 commit，僅從 Windows 平台建置成功的 job 下載 `desktop-Windows-unsigned`。
+這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的實作，不會因此改變先前發布的 release 資產。舊 release 資產仍是先前的 client 包。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對來源 commit，僅從 Windows 平台建置成功的 job 下載 `desktop-Windows-unsigned`。
 
 ## 每一層負責什麼
 
@@ -52,4 +52,4 @@ runtime 或資料後端。
 | Credential Manager、系統匣與原生檔案 | [桌面 client](design/desktop.md) · [檔案操作](design/native-files.md) |
 | 驗證安裝包與 installed fixtures | [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [驗收矩陣](product/acceptance-v2.md) |
 
-Windows 套件／WebView fixture、Fleet 原始碼測試與使用者實際 SSH／Tailscale／BAT 環境是不同的證據。最終候選檢查仍待完成。正式簽章與正式更新通道已排除於本次交付；完整實際環境驗收由使用者負責。排除不等於能力或測試已完成，Mac Dashboard 支援也不表示 Windows Fleet 已移植。
+Windows 套件／WebView fixture、Fleet 原始碼測試與使用者實際 SSH／Tailscale／BAT 環境是不同的證據。驗證紀錄須與套件來源 commit 相符。正式簽章與正式更新通道已排除於本次交付；完整實際環境驗收由使用者負責。排除不等於能力或測試已完成，Mac Dashboard 支援也不表示 Windows Fleet 已移植。
