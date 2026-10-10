@@ -62,7 +62,8 @@ try {
   const operations = [];
   for (const page of [web, desktop]) {
     await page.goto(origin+'/dashboard/#/project/'+project.project_id);
-    await page.getByRole('link', {name: 'Quick project dispatch'}).click();
+    try {await page.getByRole('link', {name: 'Quick project dispatch'}).click();}
+    catch (error) {console.error({client: page === web ? 'HTTP' : 'IPC', errors, body: await page.locator('body').innerText()}); throw error;}
     const form = page.locator('[data-published-start]');
     await expect(form.getByRole('combobox', {name: 'Repository · host · workspace ID'})).toHaveValue(JSON.stringify({repository:'o/r',host:'h1',workspace_id:'ws-1'}));
     await form.getByRole('textbox', {name: 'Published branch ref'}).fill('main');

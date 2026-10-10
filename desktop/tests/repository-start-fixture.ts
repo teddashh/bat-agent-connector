@@ -63,7 +63,7 @@ export async function publishedFixture(page: Page, native: boolean, options: any
       }
       if (input.body.action === 'project.create') {
         state.project = {...state.project, ...input.body.params, repositories: input.body.params.repositories || []};
-        return {status: 200, data: {operation: {operation_id: publishedId, ...input.body, status: 'succeeded',
+        return {status: 200, data: {operation: {operation_id: publishedId, actor: state.actor, idempotency_key: input.idempotency_key, ...input.body, status: 'succeeded',
           result: {project_id: dispatchProject, version: 1}}}};
       }
       if (!state.operation || state.operation.idempotency_key !== input.idempotency_key) state.operation = {
