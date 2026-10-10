@@ -1381,17 +1381,17 @@ function parsePullRequest(value) {
 }
 //#endregion
 //#region src/session-labels.js
-var object$5 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var object$6 = (v) => v && typeof v === "object" && !Array.isArray(v);
 var version$1 = (v) => Number.isSafeInteger(v) && v >= 0;
 var opId$3 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
-var equal$7 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$7(v, b[i])) || object$5(a) && object$5(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$7(a[k], b[k]));
+var equal$7 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$7(v, b[i])) || object$6(a) && object$6(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$7(a[k], b[k]));
 function validLabels(v) {
 	return Array.isArray(v) && v.length <= 8 && new Set(v).size === v.length && v.every((x) => typeof x === "string" && x === x.trim() && [...x].length >= 1 && [...x].length <= 40 && !/[\p{C}\u2028\u2029]/u.test(x));
 }
-var metadata = (v) => object$5(v) && version$1(v.version) && validLabels(v.labels);
+var metadata = (v) => object$6(v) && version$1(v.version) && validLabels(v.labels);
 function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorBox, opStatus }) {
 	const path = `/sessions/${encodeURIComponent(target.host)}/${encodeURIComponent(target.session_id)}`;
-	const valid = (request) => request?.action === "session.labels.set" && equal$7(request.target, target) && object$5(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$5(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
+	const valid = (request) => request?.action === "session.labels.set" && equal$7(request.target, target) && object$6(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$6(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
 	let saved = {}, current = null, operation = null, busy = false, submission = null, refreshing = null, readable = false, damaged = false;
 	try {
 		const raw = JSON.parse(localStorage.getItem(storageKey));
@@ -2663,9 +2663,9 @@ function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onE
 }
 //#endregion
 //#region src/project-skills.js
-var digest$3 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-var refs = (value) => Array.isArray(value) && value.length <= 20 && value.every((ref) => ref && typeof ref.skill_id === "string" && digest$3(ref.digest)) && new Set(value.map((ref) => ref.skill_id)).size === value.length;
-var record$3 = (value) => value && refs(value.selected) && Number.isInteger(value.revision) && value.revision >= 0 && digest$3(value.digest);
+var digest$4 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+var refs = (value) => Array.isArray(value) && value.length <= 20 && value.every((ref) => ref && typeof ref.skill_id === "string" && digest$4(ref.digest)) && new Set(value.map((ref) => ref.skill_id)).size === value.length;
+var record$3 = (value) => value && refs(value.selected) && Number.isInteger(value.revision) && value.revision >= 0 && digest$4(value.digest);
 var key = (host, workspace) => JSON.stringify([host, workspace]);
 var same$1 = (a, b) => a.skill_id === b.skill_id && a.digest === b.digest;
 function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storageKey, onEvents, errorBox }) {
@@ -3062,9 +3062,487 @@ function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents
 	};
 }
 //#endregion
+//#region src/repair-intent.js
+var object$5 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var pid = (v) => typeof v === "string" && /^prj_[0-9a-f]{20}$/.test(v);
+var wid = (v) => typeof v === "string" && /^wi_[0-9a-f]{20}$/.test(v);
+var oid$3 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var digest$3 = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+var canonical = (v) => JSON.stringify(v, (_, value) => object$5(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
+var source = (v) => object$5(v) && (v.kind === "operation" && Object.keys(v).length === 2 && oid$3(v.operation_id) || v.kind === "discovery" && Object.keys(v).length === 3 && ["host", "profile_id"].every((k) => typeof v[k] === "string" && v[k].length > 0 && v[k].length <= 256));
+function repairRequest(doc) {
+	if (doc?.version !== 1 || !pid(doc.project_id) || !source(doc.source) || !digest$3(doc.evidence_digest) || !Number.isSafeInteger(doc.expected_project_version) || doc.expected_project_version < 1) throw new Error("Invalid fixed repair evidence");
+	return {
+		action: "repair.create",
+		target: { project_id: doc.project_id },
+		params: { source: structuredClone(doc.source) },
+		preconditions: {
+			expected_project_version: doc.expected_project_version,
+			expected_evidence_digest: doc.evidence_digest
+		}
+	};
+}
+function validRequest$4(request) {
+	if (!object$5(request) || canonical(Object.keys(request).sort()) !== canonical([
+		"action",
+		"params",
+		"preconditions",
+		"target"
+	])) return false;
+	if (request.action !== "repair.create" || !object$5(request.target) || !object$5(request.params) || !object$5(request.preconditions)) return false;
+	try {
+		return canonical(request) === canonical(repairRequest({
+			version: 1,
+			project_id: request.target.project_id,
+			source: request.params.source,
+			expected_project_version: request.preconditions.expected_project_version,
+			evidence_digest: request.preconditions.expected_evidence_digest
+		}));
+	} catch {
+		return false;
+	}
+}
+function repairDispatchSeed(record) {
+	if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest$3(record.evidence_digest) || !digest$3(record.expected_work_item_fingerprint) || typeof record.request !== "string" || !record.request.trim() || record.request.length > 12e3 || record.dispatchable !== true || record.dispatch_operation_id) throw new Error("Repair dispatch requires current server evidence");
+	return {
+		project_id: record.project_id,
+		work_item_id: record.work_item_id,
+		prompt: record.request,
+		expected_work_item_fingerprint: record.expected_work_item_fingerprint
+	};
+}
+function repairIntent({ api, guard, actor, allowed, storage, storageKey, newKey = () => crypto.randomUUID() }) {
+	guard();
+	let intent = null, operation = null, pending = null;
+	const raw = storage.getItem(storageKey);
+	if (raw) {
+		intent = JSON.parse(raw);
+		if (!validRequest$4(intent?.request) || typeof intent.key !== "string" || !intent.key || intent.key.length > 200 || intent.actor !== actor() || intent.operation_id !== null && !oid$3(intent.operation_id)) throw new Error("Stored repair intent is unavailable");
+	}
+	function accept(doc) {
+		guard();
+		const op = doc?.operation;
+		if (!oid$3(op?.operation_id) || op.actor !== intent.actor || op.idempotency_key !== intent.key || intent.operation_id && op.operation_id !== intent.operation_id || [
+			"action",
+			"target",
+			"params",
+			"preconditions"
+		].some((key) => canonical(op[key]) !== canonical(intent.request[key]))) throw new Error("Repair operation identity changed");
+		intent.operation_id = op.operation_id;
+		storage.setItem(storageKey, JSON.stringify(intent));
+		operation = structuredClone(op);
+		return structuredClone(operation);
+	}
+	async function check() {
+		guard();
+		if (!intent) return null;
+		if (pending) return pending;
+		if (intent.actor !== actor() || !allowed()) throw new Error("Repair authority unavailable");
+		const fixed = structuredClone(intent);
+		pending = (async () => accept(await (fixed.operation_id ? api("GET", `/operations/${fixed.operation_id}`) : api("POST", "/operations?wait=3", fixed.request, fixed.key))))();
+		try {
+			return await pending;
+		} finally {
+			pending = null;
+		}
+	}
+	async function create(doc) {
+		guard();
+		if (!allowed()) throw new Error("Repair authority unavailable");
+		const request = repairRequest(doc);
+		if (intent && canonical(request) !== canonical(intent.request)) throw new Error("Resume the original repair intent first");
+		if (!intent) {
+			const next = {
+				request,
+				key: newKey(),
+				actor: actor(),
+				operation_id: null
+			};
+			storage.setItem(storageKey, JSON.stringify(next));
+			intent = next;
+		}
+		return check();
+	}
+	return {
+		create,
+		check,
+		snapshot: () => {
+			guard();
+			return structuredClone({
+				intent,
+				operation
+			});
+		}
+	};
+}
+//#endregion
+//#region src/repair-panel.js
+function repairPanel({ h, t, api, caps, guard, namespace, source, errorBox, opStatus }) {
+	let controller, document, busy = false, disposed = false, serial = 0, initialized = false;
+	const alive = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	const key = `batc.repair.${namespace}.${JSON.stringify(source)}`;
+	const status = h("div", { role: "status" }), evidence = h("div"), outcome = h("div");
+	const project = h("select", { "aria-label": t("repair_project") }, h("option", { value: "" }, t("repair_choose_project")));
+	const allowed = () => caps()?.actions?.some((action) => action.action === "repair.create" && action.allowed === true);
+	const reload = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => read()
+	}, t("repair_read"));
+	const create = h("button", {
+		class: "secondary",
+		type: "button",
+		disabled: true,
+		onclick: async () => {
+			if (!alive() || busy || !allowed()) return;
+			busy = true;
+			update();
+			try {
+				show(await (controller.snapshot().intent ? controller.check() : controller.create(document)));
+			} catch (error) {
+				if (alive()) status.replaceChildren(errorBox(error));
+			} finally {
+				busy = false;
+				if (alive()) update();
+			}
+		}
+	}, t("repair_create"));
+	const next = h("button", {
+		class: "secondary",
+		type: "button",
+		hidden: true,
+		onclick: () => {
+			if (!alive() || busy || ![
+				"succeeded",
+				"failed",
+				"cancelled"
+			].includes(controller.snapshot().operation?.status)) return;
+			try {
+				localStorage.removeItem(key);
+				initializeController();
+				outcome.replaceChildren();
+				read();
+			} catch (error) {
+				if (alive()) status.replaceChildren(errorBox(error));
+			}
+		}
+	}, t("repair_review_new"));
+	const box = h("details", {
+		class: "panel",
+		"data-repair-panel": ""
+	}, h("summary", {}, t("repair_title")), h("p", { class: "muted" }, t("repair_help")), h("label", {}, t("repair_project"), project), h("div", { class: "actions" }, reload, create, next), status, evidence, outcome);
+	function initializeController() {
+		controller = repairIntent({
+			api,
+			guard: () => {
+				guard();
+				if (disposed) throw Error("Retired view");
+			},
+			actor: () => caps()?.actor,
+			allowed,
+			storage: localStorage,
+			storageKey: key
+		});
+	}
+	function update() {
+		const snapshot = controller?.snapshot(), fixed = !!snapshot?.intent;
+		project.disabled = busy || fixed;
+		reload.disabled = busy || !project.value;
+		create.disabled = busy || !allowed() || !document && !fixed;
+		create.textContent = t(fixed ? "repair_recover" : "repair_create");
+		next.hidden = ![
+			"succeeded",
+			"failed",
+			"cancelled"
+		].includes(snapshot?.operation?.status);
+	}
+	function links(record) {
+		if (!record?.work_item_id || !/^wi_[0-9a-f]{20}$/.test(record.work_item_id)) return;
+		outcome.append(h("p", {}, h("a", { href: `#/item/${record.work_item_id}` }, t("repair_open_work")), " · ", record.dispatch_operation_id ? h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch")) : h("a", { href: `#/dispatch/${record.project_id || project.value}/${record.work_item_id}` }, t("repair_review_dispatch"))));
+	}
+	function show(operation) {
+		if (!alive()) return;
+		outcome.replaceChildren(opStatus(operation), " ", h("a", { href: `#/op/${operation.operation_id}` }, operation.operation_id));
+		if (operation.status === "succeeded") links(operation.result);
+	}
+	async function read() {
+		if (!alive() || busy || !project.value) return;
+		const mine = ++serial, pid = project.value;
+		document = null;
+		status.replaceChildren();
+		update();
+		try {
+			const doc = await api("GET", `/projects/${pid}/repair-evidence?${new URLSearchParams(source)}`);
+			if (!alive() || mine !== serial || project.value !== pid) return;
+			document = doc;
+			evidence.replaceChildren(h("p", {}, t("repair_fixed_evidence"), " ", h("code", {}, doc.evidence_digest)), h("details", {}, h("summary", {}, t("repair_evidence_details")), h("pre", { class: "pre" }, JSON.stringify(doc.evidence, null, 2))));
+			if (!controller.snapshot().intent) {
+				outcome.replaceChildren();
+				links(doc.existing);
+			}
+		} catch (error) {
+			if (alive() && mine === serial) status.replaceChildren(errorBox(error));
+		} finally {
+			if (alive() && mine === serial) update();
+		}
+	}
+	async function init() {
+		if (initialized || !alive()) return;
+		initialized = true;
+		try {
+			initializeController();
+			const selected = controller.snapshot().intent?.request.target.project_id;
+			const doc = await api("GET", "/projects");
+			if (!alive()) return;
+			const rows = new Map();
+			const visit = (row) => {
+				if (row?.project_id && !row.archived) rows.set(row.project_id, row);
+				for (const child of row.children || []) visit(child);
+			};
+			for (const row of doc.projects || []) visit(row);
+			project.replaceChildren(h("option", { value: "" }, t("repair_choose_project")), ...[...rows.values()].map((row) => h("option", { value: row.project_id }, row.name)));
+			if (selected && !rows.has(selected)) project.append(h("option", { value: selected }, selected));
+			if (selected) project.value = selected;
+			update();
+			if (controller.snapshot().intent?.operation_id) show(await controller.check());
+		} catch (error) {
+			if (alive()) status.replaceChildren(errorBox(error));
+		} finally {
+			if (alive()) update();
+		}
+	}
+	project.addEventListener("change", () => read());
+	box.addEventListener("toggle", () => {
+		if (box.open) init();
+	});
+	return {
+		box,
+		dispose() {
+			disposed = true;
+			serial++;
+		}
+	};
+}
+//#endregion
+//#region src/instruction-receipts.js
+var oid$2 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var phases = new Set([
+	"accepted",
+	"not_accepted",
+	"unconfirmed",
+	"operation_cancelled",
+	"operation_failed",
+	"pending"
+]);
+var instructionReceiptStrings = {
+	"en-US": {
+		instruction_receipts: "Sent instructions",
+		instruction_receipts_note: "These are central send receipts. “Was queued” records submission history; it does not show a current queue position. Interrupt affects the session.",
+		instruction_accepted: "Accepted by BAT",
+		instruction_not_accepted: "Not accepted",
+		instruction_unconfirmed: "Acceptance unconfirmed",
+		instruction_operation_cancelled: "Central operation cancelled",
+		instruction_operation_failed: "Central operation failed",
+		instruction_pending: "Send pending",
+		instruction_was_queued: "Was queued at submission",
+		instruction_requested_queue: "Queueing requested",
+		instruction_operation: "View original operation",
+		instruction_empty: "No central send receipts for this session.",
+		instruction_more: "Older instructions",
+		instruction_refresh: "Refresh receipts",
+		instruction_stale: "Receipts could not be refreshed. Previously loaded records remain visible.",
+		instruction_excerpt: "Preview only; open the operation for the full instruction."
+	},
+	"zh-TW": {
+		instruction_receipts: "已送出指示",
+		instruction_receipts_note: "這裡顯示中央送出紀錄。「曾排隊」是提交當時的紀錄，不代表目前排隊位置。中斷會作用於整個工作階段。",
+		instruction_accepted: "BAT 已接受",
+		instruction_not_accepted: "未被接受",
+		instruction_unconfirmed: "尚未確認接受",
+		instruction_operation_cancelled: "中央操作已取消",
+		instruction_operation_failed: "中央操作失敗",
+		instruction_pending: "等待送出結果",
+		instruction_was_queued: "提交時曾排隊",
+		instruction_requested_queue: "已要求排隊",
+		instruction_operation: "查看原操作",
+		instruction_empty: "這個工作階段尚無中央送出紀錄。",
+		instruction_more: "較早的指示",
+		instruction_refresh: "重新讀取紀錄",
+		instruction_stale: "無法更新紀錄，保留上次讀取的內容。",
+		instruction_excerpt: "這裡是內容預覽；完整指示請查看原操作。"
+	}
+};
+function instructionReceiptReader({ api, guard, host, sessionId }) {
+	let pages = 1, saved = null, pending = null;
+	async function load(older = false) {
+		guard();
+		if (pending) return pending;
+		const wanted = Math.min(5, pages + (older && saved?.next_cursor ? 1 : 0));
+		pending = (async () => {
+			const rows = new Map();
+			let cursor = null, readAt = null, loaded = 0;
+			do {
+				const query = new URLSearchParams({
+					limit: "30",
+					...cursor ? { cursor } : {}
+				});
+				const doc = await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sessionId)}/instructions?${query}`);
+				guard();
+				if (doc?.version !== 1 || doc.host !== host || doc.session_id !== sessionId || doc.live_queue_available !== false || doc.per_message_cancel !== false || !Array.isArray(doc.instructions) || doc.instructions.length > 30 || doc.next_cursor !== null && typeof doc.next_cursor !== "string") throw new Error("Invalid instruction receipts");
+				for (const row of doc.instructions) {
+					if (!oid$2(row?.operation_id) || row.host !== host || row.session_id !== sessionId || !phases.has(row.phase) || row.queue_position !== null || row.per_message_cancel !== false || typeof row.text_excerpt !== "string" || rows.has(row.operation_id)) throw new Error("Invalid instruction identity");
+					rows.set(row.operation_id, structuredClone(row));
+				}
+				loaded++;
+				cursor = doc.next_cursor;
+				readAt = doc.read_at;
+			} while (cursor && loaded < wanted);
+			guard();
+			pages = loaded;
+			saved = {
+				instructions: [...rows.values()],
+				next_cursor: cursor,
+				read_at: readAt,
+				can_load_more: Boolean(cursor) && pages < 5
+			};
+			return structuredClone(saved);
+		})();
+		try {
+			return await pending;
+		} finally {
+			pending = null;
+		}
+	}
+	return {
+		load,
+		snapshot: () => {
+			guard();
+			return structuredClone(saved);
+		}
+	};
+}
+function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, errorBox }) {
+	const reader = instructionReceiptReader({
+		api,
+		guard,
+		host,
+		sessionId
+	});
+	const list = h("div"), status = h("div", { role: "status" });
+	const more = h("button", {
+		type: "button",
+		class: "mini",
+		hidden: true,
+		onclick: () => refresh(true)
+	}, t("instruction_more"));
+	const reload = h("button", {
+		type: "button",
+		class: "mini",
+		onclick: () => refresh()
+	}, t("instruction_refresh"));
+	const box = h("details", {
+		class: "workspace-evidence",
+		"data-instruction-receipts": ""
+	}, h("summary", {}, t("instruction_receipts")), h("p", { class: "muted" }, t("instruction_receipts_note")), list, status, h("div", { class: "actions" }, reload, more));
+	const nodes = new Map();
+	let busy = false, disposed = false;
+	const alive = () => {
+		if (disposed) return false;
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	async function refresh(older = false) {
+		if (!alive() || busy) return;
+		busy = true;
+		reload.disabled = more.disabled = true;
+		try {
+			const value = await reader.load(older);
+			if (!alive()) return;
+			const retained = new Set();
+			for (const row of value.instructions) {
+				let entry = nodes.get(row.operation_id);
+				const signature = JSON.stringify(row);
+				if (!entry) {
+					entry = {
+						node: h("article", {
+							class: "msg",
+							"data-instruction-operation": row.operation_id
+						}),
+						signature: null
+					};
+					nodes.set(row.operation_id, entry);
+				}
+				if (entry.signature !== signature) {
+					entry.node.replaceChildren(...[
+						h("p", { class: "muted" }, t("instruction_" + row.phase), " · ", when(row.created_at * 1e3)),
+						h("div", { class: "message-body" }, row.text_excerpt),
+						row.was_queued === true ? h("p", { class: "muted" }, t("instruction_was_queued")) : null,
+						row.queue_requested && row.was_queued === null ? h("p", { class: "muted" }, t("instruction_requested_queue")) : null,
+						row.text_truncated ? h("p", { class: "muted" }, t("instruction_excerpt")) : null,
+						h("a", { href: `#/op/${row.operation_id}` }, t("instruction_operation"))
+					].filter(Boolean));
+					entry.signature = signature;
+				}
+				retained.add(entry.node);
+			}
+			for (const node of [...list.childNodes]) if (!retained.has(node)) node.remove();
+			let position = list.firstChild;
+			for (const row of value.instructions) {
+				const node = nodes.get(row.operation_id).node;
+				if (node === position) position = position.nextSibling;
+				else list.insertBefore(node, position);
+			}
+			if (!value.instructions.length) list.replaceChildren(h("p", { class: "muted" }, t("instruction_empty")));
+			for (const [id, entry] of nodes) if (!retained.has(entry.node)) nodes.delete(id);
+			status.replaceChildren();
+			more.hidden = !value.can_load_more;
+		} catch (error) {
+			if (alive()) status.replaceChildren(h("p", { class: "muted" }, t("instruction_stale")), errorBox(error));
+		} finally {
+			busy = false;
+			if (alive()) reload.disabled = more.disabled = false;
+		}
+	}
+	return {
+		box,
+		refresh,
+		dispose() {
+			disposed = true;
+		}
+	};
+}
+//#endregion
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		...instructionReceiptStrings["zh-TW"],
+		repair_title: "建立修復工作",
+		repair_help: "選擇歸屬專案，讀取這次失敗的固定證據，再建立或查回修復工作。派工前仍會讓你核對目的地與版本。",
+		repair_project: "修復工作的專案",
+		repair_choose_project: "選取專案",
+		repair_read: "讀取修復證據",
+		repair_create: "建立或查回修復工作",
+		repair_recover: "查回原修復請求",
+		repair_review_new: "檢視下一筆證據",
+		repair_fixed_evidence: "本次證據摘要",
+		repair_evidence_details: "查看證據內容",
+		repair_open_work: "開啟修復工作",
+		repair_open_dispatch: "查看原派工",
+		repair_review_dispatch: "核對並派工",
+		repair_unavailable: "目前無法派出這筆修復工作。請重新查回證據。",
+		repair_dispatched: "這筆修復工作已有派工紀錄，可從原操作查回結果。",
+		repair_dispatch_help: "修復指示取自這筆工作的固定證據。選取儲存庫與分支、核對版本後，再開始新的管理工作。",
 		setup_title: "準備開始工作",
 		setup_unsaved: "有未儲存設定",
 		setup_resume_help: "可稍後繼續。非機密草稿會保留；帳號授權與主機信任仍須由你確認。",
@@ -4460,6 +4938,23 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		...instructionReceiptStrings["en-US"],
+		repair_title: "Create repair work",
+		repair_help: "Choose a project and read fixed evidence from this failure. Create or recover repair work, then review its destination and version before starting it.",
+		repair_project: "Repair project",
+		repair_choose_project: "Choose a project",
+		repair_read: "Read repair evidence",
+		repair_create: "Create or recover repair work",
+		repair_recover: "Recover original repair request",
+		repair_review_new: "Review new evidence",
+		repair_fixed_evidence: "Fixed evidence digest",
+		repair_evidence_details: "View evidence",
+		repair_open_work: "Open repair work",
+		repair_open_dispatch: "View original dispatch",
+		repair_review_dispatch: "Review and dispatch",
+		repair_unavailable: "This repair cannot be dispatched yet. Read its current evidence again.",
+		repair_dispatched: "This repair already has a dispatch record. Check the original operation for its result.",
+		repair_dispatch_help: "Repair instructions come from this work item's fixed evidence. Select a repository and branch, review the version, then start new managed work.",
 		setup_title: "Get ready to work",
 		setup_unsaved: "Unsaved settings",
 		setup_resume_help: "Continue later without losing non-secret drafts. You still confirm account authorization and host trust.",
@@ -9661,8 +10156,21 @@ var ref = (v) => typeof v === "string" && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\
 var branchRef = (value) => value.startsWith("refs/") ? value : "refs/heads/" + value;
 var preconditions = (v) => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest$1(v.binding_digest);
 var projectId = (v) => typeof v === "string" && /^prj_[0-9a-f]{20}$/.test(v);
+var workItemId = (v) => typeof v === "string" && /^wi_[0-9a-f]{20}$/.test(v);
 var artifactRefs = (v) => Array.isArray(v) && v.every((r) => object(r) && Object.keys(r).length === 3 && /^art_[0-9a-f]{32}$/.test(r.artifact_id) && Number.isSafeInteger(r.revision) && r.revision > 0 && digest$1(r.digest));
-var requestPreconditions = (r) => object(r.params) && "project_id" in r.params ? projectId(r.params.project_id) && object(r.preconditions) && Number.isSafeInteger(r.preconditions.expected_project_version) && r.preconditions.expected_project_version > 0 && preconditions(Object.fromEntries(Object.entries(r.preconditions).filter(([k]) => k !== "expected_project_version"))) : preconditions(r.preconditions);
+var requestPreconditions = (r) => {
+	if (!object(r.params) || !object(r.preconditions)) return false;
+	const fixed = { ...r.preconditions };
+	if ("project_id" in r.params) {
+		if (!projectId(r.params.project_id) || !Number.isSafeInteger(fixed.expected_project_version) || fixed.expected_project_version < 1) return false;
+		delete fixed.expected_project_version;
+	}
+	if ("work_item_id" in r.params) {
+		if (!projectId(r.params.project_id) || !workItemId(r.params.work_item_id) || !digest$1(fixed.expected_work_item_fingerprint)) return false;
+		delete fixed.expected_work_item_fingerprint;
+	}
+	return preconditions(fixed);
+};
 var validRequest = (r) => r?.action === "repository.continue" && target(r.target) && requestPreconditions(r) && object(r.params) && Object.keys(r.params).every((k) => [
 	"agent",
 	"prompt",
@@ -9670,12 +10178,14 @@ var validRequest = (r) => r?.action === "repository.continue" && target(r.target
 	"model",
 	"artifacts",
 	"project_id",
+	"work_item_id",
 	"source_ref",
 	"source_sha"
 ].includes(k)) && ref(r.params.source_ref) && sha(r.params.source_sha) && ["claude", "codex"].includes(r.params.agent) && typeof r.params.prompt === "string" && r.params.prompt.trim() && r.params.prompt.length <= 12e3 && ["title", "model"].every((k) => !(k in r.params) || text(r.params[k], 256)) && (!("artifacts" in r.params) || artifactRefs(r.params.artifacts));
 var validPreview$1 = (p, input) => object(p) && equal$1(p.target, input.target) && p.source_ref === input.source_ref && sha(p.source_sha) && p.exact_ref_head_only === true && preconditions(p.preconditions) && p.repository_id === p.preconditions.repository_id && p.binding_digest === p.preconditions.binding_digest && object(p.workspace) && p.workspace.workspace_id === input.target.workspace_id && text(p.workspace.folder, 4096) && (p.workspace.name == null || typeof p.workspace.name === "string");
 var noAdmission = new Set(["REPOSITORY_NOT_BOUND", "REPOSITORY_HOST_UNAVAILABLE"]);
-function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory, submitPreference }) {
+function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, repairSeed = null, attachmentFactory, submitPreference }) {
+	if (repairSeed && (repairSeed.project_id !== project || !workItemId(repairSeed.work_item_id) || !digest$1(repairSeed.expected_work_item_fingerprint) || typeof repairSeed.prompt !== "string" || !repairSeed.prompt.trim())) throw new Error(t("repair_unavailable"));
 	let raw;
 	try {
 		raw = JSON.parse(localStorage.getItem(storageKey));
@@ -9689,7 +10199,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		title: typeof raw?.title === "string" ? raw.title : ""
 	};
 	if (raw?.intent) {
-		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project);
+		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project) && (repairSeed ? raw.intent.request.params.work_item_id === repairSeed.work_item_id : !raw.intent.request.params.work_item_id);
 		saved.intent = {
 			request: valid ? raw.intent.request : null,
 			key: valid ? raw.intent.key : null,
@@ -9702,6 +10212,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			model: ""
 		}, raw.intent.request.params);
 	}
+	if (repairSeed && !saved.intent) saved.prompt = repairSeed.prompt;
 	let preview = null, operation = null, busy = false, reading = false, sequence = 0, readFailed = false, submission = null, refreshing = null;
 	let projectDoc = null, projectFailed = Boolean(project), previewProjectVersion = null, autoSelect = !raw, projectQueue = Promise.resolve();
 	const current = () => {
@@ -9717,7 +10228,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		localStorage.setItem(storageKey, JSON.stringify(saved));
 	};
 	const observe = () => caps()?.scopes?.includes("observe");
-	const allowed = () => observe() && caps()?.scopes?.includes("start") && caps()?.actions?.some((a) => a.action === "repository.continue" && a.allowed === true);
+	const allowed = () => observe() && caps()?.scopes?.includes("start") && (!repairSeed || caps()?.scopes?.includes("manage")) && caps()?.actions?.some((a) => a.action === "repository.continue" && a.allowed === true);
 	const expanded = () => caps()?.features?.project_dispatch?.version === 1;
 	const projectReady = () => !project || expanded() && projectDoc && !projectDoc.archived && !projectFailed;
 	const bindings = () => (caps()?.features?.repository_sync || []).filter((b) => b.exact_ref_head_only === true && target({
@@ -9780,7 +10291,8 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	});
 	let modelHost = null;
 	prompt.value = saved.prompt;
-	const attachments = expanded() && attachmentFactory ? attachmentFactory(prompt, () => {
+	prompt.readOnly = Boolean(repairSeed);
+	const attachments = expanded() && !repairSeed && attachmentFactory ? attachmentFactory(prompt, () => {
 		if (current()) update();
 	}) : null;
 	if (attachments && !saved.intent) saved.prompt = prompt.value;
@@ -9817,11 +10329,13 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			...saved.title ? { title: saved.title } : {},
 			...saved.model && expanded() ? { model: saved.model } : {},
 			...attachments?.refs().length ? { artifacts: attachments.refs() } : {},
-			...project ? { project_id: project } : {}
+			...project ? { project_id: project } : {},
+			...repairSeed ? { work_item_id: repairSeed.work_item_id } : {}
 		},
 		preconditions: preview ? {
 			...preview.preconditions,
-			...project ? { expected_project_version: previewProjectVersion } : {}
+			...project ? { expected_project_version: previewProjectVersion } : {},
+			...repairSeed ? { expected_work_item_fingerprint: repairSeed.expected_work_item_fingerprint } : {}
 		} : null
 	});
 	const inspect = h("button", {
@@ -9938,7 +10452,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal$1(operation) || saved.intent?.refused)) return;
+			if (repairSeed || !current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal$1(operation) || saved.intent?.refused)) return;
 			const previous = saved;
 			saved = {
 				target: saved.target,
@@ -9963,7 +10477,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		}
 	}, t("pub_new"));
 	function change(field, value) {
-		if (!current() || saved.intent || busy) {
+		if (!current() || saved.intent || busy || repairSeed && field === "prompt") {
 			fill();
 			return;
 		}
@@ -10024,7 +10538,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : reading || !projectReady() || !preview || !validPreview$1(preview, selected()) || !bound() || !hostAllowed() || attachments && !attachments.ready() || !validRequest(request()));
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
+		another.hidden = Boolean(repairSeed) || !(terminal$1(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || Boolean(attachments && !attachments.ready());
 		facts.replaceChildren();
 		const original = saved.intent?.request;
@@ -12698,6 +13212,23 @@ async function viewHostDiscovery(main, host) {
 		namespace: state.namespace,
 		generation
 	};
+	const profile = state.caps?.hosts?.find((item) => item.host === host)?.profile_id;
+	const repair = profile && state.caps?.features?.managed_repairs?.version === 1 ? repairPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		namespace: connection.namespace,
+		source: {
+			kind: "discovery",
+			host,
+			profile_id: profile
+		},
+		errorBox,
+		opStatus
+	}) : null;
+	if (repair) main.append(repair.box);
 	const load = async () => {
 		try {
 			const data = await api("GET", `/hosts/${encodeURIComponent(host)}/discovery`);
@@ -12709,9 +13240,13 @@ async function viewHostDiscovery(main, host) {
 	};
 	await load();
 	const reload = debounceRefresh(load, 500);
-	return onEvents((event) => {
+	const off = onEvents((event) => {
 		if (event.resource_type === "host" && event.resource_id === host) return reload();
 	});
+	return () => {
+		off();
+		repair?.dispose();
+	};
 }
 async function viewSession(main, host, sid, context = null) {
 	const connection = {
@@ -12853,10 +13388,23 @@ async function viewSession(main, host, sid, context = null) {
 	});
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
+	const instructions = state.caps?.features?.session_instructions?.version === 1 ? instructionReceiptPanel({
+		h,
+		t,
+		when,
+		api,
+		guard: () => assertView(connection),
+		host,
+		sessionId: sid,
+		errorBox
+	}) : null;
+	instructions?.box.addEventListener("toggle", () => {
+		if (instructions.box.open) instructions.refresh();
+	});
 	const inspector = h("details", {
 		class: "workspace-inspector",
 		open: true
-	}, h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot, h("details", { class: "workspace-evidence" }, h("summary", {}, t("sessions_details")), metadata), labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
+	}, h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot, h("details", { class: "workspace-evidence" }, h("summary", {}, t("sessions_details")), metadata), instructions?.box, labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
 	const lane = h("section", {
 		class: "workspace-conversation",
 		"aria-label": t("messages")
@@ -13143,12 +13691,14 @@ async function viewSession(main, host, sid, context = null) {
 			].includes(ev.resource_type) ? reload() : Promise.resolve(),
 			ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
 			ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
-			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation" ? labels.refresh(true) : Promise.resolve()
+			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation" ? labels.refresh(true) : Promise.resolve(),
+			instructions?.box.open && (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? instructions.refresh() : Promise.resolve()
 		]);
 	});
 	return () => {
 		clearInterval(retry);
 		off();
+		instructions?.dispose();
 		batHandoff?.dispose();
 		conversation.dispose();
 		mobileLayout?.dispose();
@@ -14193,12 +14743,40 @@ async function viewOperations(main, filter = "all") {
 }
 async function viewOperation(main, id) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	let repair;
 	const panel = h("div", { class: "panel" });
 	main.append(panel);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		try {
 			const { operation: op, work_items: linked, cleanup_receipts: cleanupReceipts } = await api("GET", `/operations/${id}`);
+			assertView(connection);
+			if (!repair && state.caps?.features?.managed_repairs?.version === 1 && [
+				"cleanup.apply",
+				"task.verify",
+				"session.record_verification"
+			].includes(op.action) && ["failed", "needs_attention"].includes(op.status)) {
+				repair = repairPanel({
+					h,
+					t,
+					api,
+					caps: () => state.caps,
+					guard: () => assertView(connection),
+					namespace: connection.namespace,
+					source: {
+						kind: "operation",
+						operation_id: id
+					},
+					errorBox,
+					opStatus
+				});
+				main.append(repair.box);
+			}
 			const refs = op.external_refs || {};
 			const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed" ? h("button", {
 				class: "primary",
@@ -14280,11 +14858,15 @@ async function viewOperation(main, id) {
 		}
 	};
 	await render();
-	return liveReload(render, [
+	const off = liveReload(render, [
 		"operation",
 		"integration",
 		"cleanup"
 	]);
+	return () => {
+		off();
+		repair?.dispose();
+	};
 }
 function mergeRecovery(op) {
 	if (op.action !== "worktree.merge") return null;
@@ -16229,12 +16811,24 @@ async function viewPublished(main) {
 		offEvents();
 	};
 }
-async function viewProjectDispatch(main, pid) {
+async function viewProjectDispatch(main, pid, repairWid = null) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
 		generation
 	};
+	let repairSeed = null;
+	if (repairWid) {
+		if (!/^wi_[0-9a-f]{20}$/.test(repairWid)) throw new Error(t("repair_unavailable"));
+		const record = await api("GET", `/work-items/${repairWid}/repair`);
+		assertView(connection);
+		if (record.project_id !== pid || record.work_item_id !== repairWid) throw new Error(t("repair_unavailable"));
+		if (record.dispatch_operation_id) {
+			main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")), h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch")));
+			return;
+		}
+		repairSeed = repairDispatchSeed(record);
+	}
 	const panel = repositoryStartPanel({
 		h,
 		t,
@@ -16242,14 +16836,15 @@ async function viewProjectDispatch(main, pid) {
 		caps: () => state.caps,
 		guard: () => assertView(connection),
 		submitPreference: submit,
+		repairSeed,
 		ready: () => state.online && !state.nativeBusy,
 		errorBox,
 		opStatus,
 		project: pid,
-		storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
-		attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)
+		storageKey: `batc.dispatch.${connection.namespace}.${pid}${repairWid ? "." + repairWid : ""}`,
+		attachmentFactory: repairSeed ? null : (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)
 	});
-	main.append(h("a", { href: `#/project/${pid}` }, t("dispatch_back")), h("h1", {}, t("dispatch_title")), h("p", { class: "muted" }, t("dispatch_intro")), panel.box);
+	main.append(h("a", { href: `#/project/${pid}` }, t("dispatch_back")), h("h1", {}, t("dispatch_title")), h("p", { class: "muted" }, t(repairSeed ? "repair_dispatch_help" : "dispatch_intro")), panel.box);
 	try {
 		await panel.init();
 	} catch {}
