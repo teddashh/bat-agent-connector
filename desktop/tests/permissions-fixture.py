@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from bat_agent_connector import api_auth
+from bat_agent_connector import api_auth, platform_files
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import adopt, make_config
 from tests.mockbat import TOKEN, MockBat
@@ -23,6 +23,8 @@ CHANNELS = {"claude:set-permission-mode", "claude:set-codex-sandbox-mode", "clau
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-permissions-ui-") as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / "config"), BATC_STATE_DIR=str(root / "state"), BATC_TEST_TOKEN=TOKEN)
         os.environ.pop("BATC_DEVICE_ID", None)
         mock = MockBat()
