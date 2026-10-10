@@ -329,8 +329,141 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 		}
 	};
 }
+var init_tslib_es6 = __esmMin((() => {}));
+async function invoke(cmd, args = {}, options) {
+	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
+}
+function isTauri() {
+	return !!(globalThis || window).isTauri;
+}
+var init_core = __esmMin((() => {
+	init_tslib_es6();
+}));
+//#endregion
+//#region src/transport/index.ts
+async function restoreBrowserSession() {
+	if (nativeDesktop) return false;
+	const response = await fetch("/api/v1/browser-session", {
+		credentials: "same-origin",
+		mode: "same-origin",
+		cache: "no-store",
+		redirect: "error"
+	});
+	if (!response.ok) return false;
+	const data = await response.json();
+	if (typeof data.csrf !== "string" || data.csrf.length < 32) return false;
+	browserCsrf = data.csrf;
+	return true;
+}
+function browserAuthHeaders(token) {
+	if (token !== "managed-browser-session") return { Authorization: `Bearer ${token}` };
+	if (!browserCsrf) throw new Error("Browser session needs to be restored");
+	return { "X-Batc-CSRF": browserCsrf };
+}
+function forgetBrowserSession() {
+	if (!browserCsrf) return;
+	const headers = {
+		...browserAuthHeaders(browserSessionToken),
+		"Content-Type": "application/json"
+	};
+	browserCsrf = null;
+	return fetch("/api/v1/browser-session/logout", {
+		method: "POST",
+		credentials: "same-origin",
+		mode: "same-origin",
+		redirect: "error",
+		headers,
+		body: "{}"
+	});
+}
+async function nativeStatus() {
+	const status = await invoke("native_status");
+	nativeFileSupport = status.file_transfers === true;
+	return status;
+}
+async function connectorRequest(method, path, body, key, browserToken) {
+	if (nativeDesktop) return invoke("connector_request", { input: {
+		method,
+		path,
+		body: body ?? null,
+		idempotency_key: key ?? null
+	} });
+	const headers = browserAuthHeaders(browserToken);
+	if (body !== void 0) headers["Content-Type"] = "application/json";
+	if (key) headers["Idempotency-Key"] = key;
+	const res = await fetch(`/api/v1${path}`, {
+		method,
+		headers,
+		credentials: "same-origin",
+		redirect: "error",
+		body: body === void 0 ? void 0 : JSON.stringify(body)
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+async function connectorUploadArtifact(operationId, bytes, browserToken) {
+	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
+	if (nativeDesktop) {
+		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
+		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
+	}
+	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
+		method: "POST",
+		redirect: "error",
+		credentials: "same-origin",
+		headers: {
+			...browserAuthHeaders(browserToken),
+			"Content-Type": "application/octet-stream"
+		},
+		body: bytes
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+var nativeDesktop, nativeFileSupport, browserSessionToken, browserCsrf, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
+var init_transport = __esmMin((() => {
+	init_core();
+	nativeDesktop = isTauri();
+	nativeFileSupport = false;
+	browserSessionToken = "managed-browser-session";
+	browserCsrf = null;
+	nativeFilesStatus = () => invoke("native_files_status");
+	nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
+	nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
+	nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
+		draftId,
+		enabled
+	});
+	nativeFilesControl = (transferId, action) => invoke("native_files_control", {
+		transferId,
+		action
+	});
+	nativeFilesSave = (reference) => invoke("native_files_save", { reference });
+	nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
+	nativeConnect = () => invoke("connector_connect");
+	nativeDisconnect = () => invoke("connector_disconnect");
+	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+	nativeSetupConfiguration = (config) => invoke("connector_setup_configuration", {
+		config,
+		locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
+	});
+	nativeForgetCredential = () => invoke("connector_forget_credential");
+	openExternal = (url) => invoke("open_external", { url });
+	fleetAvailability = () => invoke("fleet_availability");
+	fleetBootstrap = (input) => invoke("fleet_bootstrap", { input });
+	tailscaleControl = (input) => invoke("tailscale_control", { input });
+	fleetControl = (input) => invoke("fleet_control", { input });
+	fleetRequest = (input) => invoke("fleet_request", { input });
+	updateRequest = (input) => invoke("desktop_update", { input });
+}));
 //#endregion
 //#region src/attention.js
+init_transport();
 async function attentionView({ main, h, t, api, guard, caps, storageKey, route, onEvents, debounceRefresh, errorBox, sessionRow, workItemRow, opRow }) {
 	const unread = caps?.features?.work_item_reads?.version === 1;
 	const saved = sessionStorage.getItem(storageKey) || sessionStorage.getItem("batc.tab");
@@ -749,109 +882,14 @@ function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorB
 		update
 	};
 }
-var init_tslib_es6 = __esmMin((() => {}));
-async function invoke(cmd, args = {}, options) {
-	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
-}
-function isTauri() {
-	return !!(globalThis || window).isTauri;
-}
-var init_core = __esmMin((() => {
-	init_tslib_es6();
-}));
-//#endregion
-//#region src/transport/index.ts
-async function nativeStatus() {
-	const status = await invoke("native_status");
-	nativeFileSupport = status.file_transfers === true;
-	return status;
-}
-async function connectorRequest(method, path, body, key, browserToken) {
-	if (nativeDesktop) return invoke("connector_request", { input: {
-		method,
-		path,
-		body: body ?? null,
-		idempotency_key: key ?? null
-	} });
-	const headers = { Authorization: `Bearer ${browserToken}` };
-	if (body !== void 0) headers["Content-Type"] = "application/json";
-	if (key) headers["Idempotency-Key"] = key;
-	const res = await fetch(`/api/v1${path}`, {
-		method,
-		headers,
-		body: body === void 0 ? void 0 : JSON.stringify(body)
-	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
-	};
-}
-async function connectorUploadArtifact(operationId, bytes, browserToken) {
-	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
-	if (nativeDesktop) {
-		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
-		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
-	}
-	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
-		method: "POST",
-		redirect: "error",
-		headers: {
-			Authorization: `Bearer ${browserToken}`,
-			"Content-Type": "application/octet-stream"
-		},
-		body: bytes
-	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
-	};
-}
-var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
-var init_transport = __esmMin((() => {
-	init_core();
-	nativeDesktop = isTauri();
-	nativeFileSupport = false;
-	nativeFilesStatus = () => invoke("native_files_status");
-	nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
-	nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
-	nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
-		draftId,
-		enabled
-	});
-	nativeFilesControl = (transferId, action) => invoke("native_files_control", {
-		transferId,
-		action
-	});
-	nativeFilesSave = (reference) => invoke("native_files_save", { reference });
-	nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
-	nativeConnect = () => invoke("connector_connect");
-	nativeDisconnect = () => invoke("connector_disconnect");
-	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
-	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
-	nativeSetupConfiguration = (config) => invoke("connector_setup_configuration", {
-		config,
-		locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
-	});
-	nativeForgetCredential = () => invoke("connector_forget_credential");
-	openExternal = (url) => invoke("open_external", { url });
-	fleetAvailability = () => invoke("fleet_availability");
-	fleetBootstrap = (input) => invoke("fleet_bootstrap", { input });
-	tailscaleControl = (input) => invoke("tailscale_control", { input });
-	fleetControl = (input) => invoke("fleet_control", { input });
-	fleetRequest = (input) => invoke("fleet_request", { input });
-	updateRequest = (input) => invoke("desktop_update", { input });
-}));
-//#endregion
-//#region src/transport/artifact-content.ts
-init_transport();
 async function readArtifactContent(reference, size, token, signal) {
 	if (nativeDesktop || !/^art_[0-9a-f]{32}$/.test(reference.artifact_id) || !Number.isSafeInteger(reference.revision) || reference.revision < 1 || !/^[0-9a-f]{64}$/.test(reference.digest) || !Number.isSafeInteger(size) || size < 0 || size > 16777216) throw new Error("Artifact content exceeds the supported bound or has an invalid reference");
 	const response = await fetch(`/api/v1/artifacts/${reference.artifact_id}/revisions/${reference.revision}/content`, {
 		method: "GET",
-		headers: { Authorization: `Bearer ${token}` },
+		headers: browserAuthHeaders(token),
 		redirect: "error",
 		cache: "no-store",
-		credentials: "omit",
+		credentials: token === "managed-browser-session" ? "same-origin" : "omit",
 		mode: "same-origin",
 		signal: AbortSignal.any([signal, AbortSignal.timeout(3e4)])
 	});
@@ -1155,6 +1193,8 @@ function conversationPanel({ h, t, when, guard }) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		managed_browser_connected: "已連線至本機 Connector",
+		managed_browser_help: "此瀏覽器沿用桌面的個人身分。登出後，可從桌面選單重新開啟 Dashboard。",
 		workspace_navigation: "專案與工作",
 		workspace_search: "搜尋已載入的專案與工作",
 		workspace_manage: "新增／管理專案",
@@ -2379,6 +2419,8 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		managed_browser_connected: "Connected to your local Connector",
+		managed_browser_help: "This browser uses your desktop identity. After signing out, reopen Dashboard from the desktop menu.",
 		workspace_navigation: "Projects and work",
 		workspace_search: "Search loaded projects and work",
 		workspace_manage: "Add / manage projects",
@@ -8952,6 +8994,7 @@ function saveCursor() {
 	} catch {}
 }
 function disconnect() {
+	if (state.token === "managed-browser-session") forgetBrowserSession()?.catch(() => {});
 	state.epoch++;
 	clearToken();
 	state.token = null;
@@ -11913,6 +11956,22 @@ function mergeRecovery(op) {
 }
 function viewSettings(main) {
 	if (nativeDesktop) return viewNativeSettings(main);
+	if (state.token === "managed-browser-session") {
+		main.append(h("h1", {}, t("nav_settings")), h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
+			actor: state.caps.actor,
+			scopes: state.caps.scopes.join(", ")
+		})), h("p", { class: "muted" }, t("managed_browser_help")), h("button", {
+			class: "secondary",
+			onclick: () => {
+				disconnect();
+				route();
+			}
+		}, t("disconnect"))));
+		return mountTailscale(main, {
+			h,
+			t
+		});
+	}
 	const input = h("input", {
 		type: "password",
 		autocomplete: "off",
@@ -13890,7 +13949,9 @@ async function start() {
 			if (attempt === state.nativeAttempt) state.nativeBusy = false;
 		}
 	} else {
-		state.token = loadToken();
+		const browserSession = await restoreBrowserSession().catch(() => false);
+		if (browserSession) clearToken();
+		state.token = browserSession ? browserSessionToken : loadToken();
 		if (state.token) try {
 			await activate(await api("GET", "/capabilities"));
 		} catch {

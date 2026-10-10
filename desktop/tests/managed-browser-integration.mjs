@@ -1,0 +1,59 @@
+// Real central + file POST navigation, HttpOnly/CSRF and restart continuity.
+import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
+import {mkdtemp, mkdir, rm} from "node:fs/promises";
+import {resolve, join} from "node:path";
+import {pathToFileURL} from "node:url";
+import {chromium} from "@playwright/test";
+const temporaryRoot = process.env.BATC_TEST_TMP || resolve("../.test-tmp");
+await mkdir(temporaryRoot, {recursive: true, mode: 0o700});
+const temporary = await mkdtemp(join(temporaryRoot, "managed-browser-"));
+const directory = join(temporary, "installation");
+const python = process.env.BATC_TEST_PYTHON || resolve(process.platform === "win32" ? "../.venv/Scripts/python.exe" : "../.venv/bin/python");
+function runtime(command) {
+  const result = spawnSync(python, ["-m", "bat_agent_connector.managed_runtime", command, "--data-dir", directory],
+    {encoding: "utf8", timeout: 60000, cwd: resolve("..")});
+  assert.equal(result.status, 0, `managed ${command} failed (${result.error?.name || result.status})`);
+  return JSON.parse(result.stdout);
+}
+let browser, active = false;
+try {
+  const first = runtime("ensure"); active = true;
+  browser = await chromium.launch();
+  const context = await browser.newContext({locale: "en-US"});
+  const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const bearerRequests = [];
+  page.on("request", request => {if (request.headers().authorization) bearerRequests.push(request.url());});
+  const file = runtime("browser").handoff_file;
+  await page.goto(pathToFileURL(file).href);
+  await page.waitForURL(first.endpoint + "/dashboard/**");
+  await page.locator("body.has-workspace").waitFor();
+  assert.equal(new URL(page.url()).search, "");
+  assert.equal(bearerRequests.length, 0);
+  const storage = await page.evaluate(() => JSON.stringify({local: {...localStorage}, session: {...sessionStorage}}));
+  assert(!storage.includes(first.token) && !storage.includes("managed-browser-session"));
+  const cookies = await context.cookies();
+  assert(cookies.some(cookie => cookie.name.startsWith("batc_") && cookie.httpOnly && cookie.sameSite === "Strict"));
+  await page.reload();
+  await page.locator("body.has-workspace").waitFor();
+  await page.goto(first.endpoint + "/dashboard/#/settings");
+  await page.getByRole("heading", {name: "Connected to your local Connector"}).waitFor();
+  await page.getByRole("button", {name: "Disconnect", exact: true}).click();
+  await page.waitForFunction(() => !document.body.classList.contains("has-workspace"));
+  await page.reload();
+  assert.equal(await page.locator("body.has-workspace").count(), 0);
+  assert.deepEqual(errors, []);
+  await context.close();
+  runtime("stop"); active = false;
+  const second = runtime("ensure"); active = true;
+  assert.equal(second.server_id, first.server_id);
+  assert.equal(second.principal_id, first.principal_id);
+  console.log("Managed browser: file POST, authenticated dashboard, reload, sign-out and service restart passed");
+} finally {
+  await browser?.close();
+  if (active) runtime("stop");
+  await rm(temporary, {recursive: true, force: true});
+}

@@ -194,6 +194,16 @@ class ApiV1:
         try:
             if not _host_is_loopback(headers.get("host", "")):
                 raise ApiError(400, "BAD_HOST", "Host must be a loopback address")
+            parts = urlsplit(target)
+            path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
+            browser = getattr(self, "browser_sessions", None)
+            if browser and path == "/api/v1/browser-handoff" and method == "POST":
+                await browser.consume(headers, reader, writer)
+                return
+            if browser and path == "/api/v1/managed/identity" and method == "GET":
+                payload = self.daemon.managed_proof(self._q(query, "challenge", ""), headers.get("host"))
+                await self._send_json(writer, 200, payload)
+                return
             origin = headers.get("origin")
             if origin and not _origin_ok(origin, self.allowed_origins):
                 raise ApiError(403, "BAD_ORIGIN", "origin is not allowed")
@@ -209,12 +219,14 @@ class ApiV1:
                 with contextlib.suppress(Exception):
                     await writer.drain()
                 return
-            parts = urlsplit(target)
-            path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
+            token = self._bearer(headers)
+            if not token and browser:
+                token = browser.credential(method, headers,
+                    bootstrap=method == "GET" and path == "/api/v1/browser-session")
             content = re.fullmatch(r"/api/v1/artifacts/uploads/(?P<op>op_[0-9a-f]{32})/content", path)
             download = re.fullmatch(r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)/content", path)
             if content or download:
-                principal = api_auth.authenticate(self.daemon.journal.db, self._bearer(headers), self.daemon._admin_token)
+                principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
                 if principal is None:
                     raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
                 if content:
@@ -241,8 +253,41 @@ class ApiV1:
                     await writer.drain()
                 return
             body = await self._read_body(method, headers, reader)
-            token = self._bearer(headers)
+            if method == "POST" and getattr(self.daemon, "managed_stopping", False):
+                raise ApiError(503, "SERVICE_STOPPING", "owned service is stopping; reopen Dashboard to reconnect")
             principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
+            if browser and path in {"/api/v1/browser-session", "/api/v1/browser-session/logout",
+                                    "/api/v1/managed/browser-file", "/api/v1/managed/stop"}:
+                if principal is None:
+                    raise ApiError(401, "UNAUTHORIZED", "open Dashboard from the desktop menu")
+                if path == "/api/v1/browser-session" and method == "GET":
+                    payload = browser.describe(token)
+                elif path == "/api/v1/browser-session/logout" and method == "POST":
+                    browser.describe(token)  # only a browser credential can be signed out here
+                    browser.revoke(token)
+                    payload = {"signed_out": True}
+                elif path == "/api/v1/managed/browser-file" and method == "POST" and self._bearer(headers):
+                    if principal.actor != self.daemon.managed_installation["actor"]:
+                        raise ApiError(403, "FORBIDDEN", "browser entry belongs to the installation owner")
+                    payload = browser.create_handoff(principal)
+                elif path == "/api/v1/managed/stop" and method == "POST" and self._bearer(headers):
+                    if principal.actor != self.daemon.managed_installation["actor"]:
+                        raise ApiError(403, "FORBIDDEN", "service belongs to the installation owner")
+                    db = self.daemon.journal.db
+                    if db.execute("SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                        raise ApiError(409, "SERVICE_BUSY", "finish or reconcile current operations before stopping")
+                    if db.execute("SELECT 1 FROM tasks WHERE state NOT IN ('done','failed') LIMIT 1").fetchone():
+                        raise ApiError(409, "SERVICE_BUSY", "finish or pause service shutdown until current tasks settle")
+                    if self.daemon._active_ticks or self.daemon.ops._active:
+                        raise ApiError(409, "SERVICE_BUSY", "current work is still running")
+                    payload = {"protocol": 1, "stopped": True}
+                    self.daemon.managed_stopping = True
+                    # Reply is written before the ordinary service shutdown cancels background loops.
+                    asyncio.get_running_loop().call_later(0.1, self.daemon.managed_stop.set)
+                else:
+                    raise ApiError(405, "METHOD_NOT_ALLOWED", "method not allowed")
+                await self._send_json(writer, 200, payload)
+                return
             if principal is None and method == "POST" and path == "/api/v1/operations":
                 principal = self.daemon.capability_principal(
                     token, body.get("action"), body.get("target") or {},
@@ -302,10 +347,11 @@ class ApiV1:
                 body = (resources.files(__package__) / "dashboard" / name).read_bytes()
             else:
                 status, ctype, body = 404, "text/plain; charset=utf-8", b"not found\n"
+        referrer_policy = "same-origin" if getattr(self, "browser_sessions", None) else "no-referrer"
         head = (f"HTTP/1.1 {status} {_REASONS[status]}\r\n"
                 f"Content-Type: {ctype}\r\nContent-Length: {len(body)}\r\n{extra}"
                 f"Cache-Control: no-cache\r\nContent-Security-Policy: {DASHBOARD_CSP}\r\n"
-                "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+                f"X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: {referrer_policy}\r\n"
                 "Cross-Origin-Opener-Policy: same-origin\r\nConnection: close\r\n\r\n")
         writer.write(head.encode() + (b"" if method == "HEAD" else body))
         with contextlib.suppress(Exception):
@@ -412,7 +458,11 @@ class ApiV1:
                   "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
                   "confinement": confinement.host_capability(fleet, h)}
                  for h in fleet.config.hosts]
-        return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
+        managed = getattr(self.daemon, "managed_installation", None)
+        managed_fields = {"managed_installation": {"installation_id": managed["installation_id"],
+                            "runtime_version": managed["runtime_version"], "background": True},
+                          "desktop_identity": dashboard_sync.identity(self.daemon.journal, principal)} if managed else {}
+        return 200, {**managed_fields, "actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "artifacts": {"limits": self.daemon.artifact_store.settings.limits(),
                                    "capture": {"manual_single_file": True, "managed_single_file": True, "snapshot": False,
