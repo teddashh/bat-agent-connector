@@ -1,3 +1,4 @@
+import {prSelector} from "./pr-selector.js";
 import {workspaceNavigation} from "./workspace-nav.js";
 import {managedSetupPanel} from "./managed-setup.js";
 import {managedControl} from "./transport/index.ts";
@@ -165,7 +166,7 @@ function dropKey(scope, namespace) { try { localStorage.removeItem(`batc.key.${n
 class ApiError extends Error {
   constructor(status, code, message) { super(message || code); this.status = status; this.code = code; }
 }
-async function api(method, path, body, key) {
+export async function api(method, path, body, key) {
   if (!state.token) throw new ApiError(401, "UNAUTHORIZED", t("need_token"));
   if (method === "POST" && (state.nativeBusy || !state.online || !state.viewReady))
     throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
@@ -1395,10 +1396,15 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
   if (source) main.append(h("p", {class: "note"}, t("delivery_source_context"), " ", h("code", {}, source.id)));
   let selectedMethod = "";
   let reviewedPreview = null;
+  const selector = prSelector(api, repo, num, () => { load(); });
+  repo.addEventListener("change", () => selector.loadList());
   main.append(h("h2", {}, t("dep_pull_request")),
     h("form", { class: "filters delivery-controls", onsubmit: event => {event.preventDefault(); acceptLink(); load();} },
       h("label", {}, t("delivery_repository_input"), repo), h("label", {}, t("delivery_pr_number"), num),
-      h("button", { type: "submit", class: "secondary" }, t("load_pr"))), inputStatus, card);
+      h("button", { type: "submit", class: "secondary" }, t("load_pr"))),
+    h("details", {}, h("summary", {}, t("delivery_list_prs") || "List Pull Requests"), selector.container),
+    inputStatus, card);
+  setTimeout(() => { if (repo.value && !num.value) selector.loadList(); }, 100);
   if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
   const load = async (flash = null, fromEvent = false) => {
     const opens = drawerOpens;

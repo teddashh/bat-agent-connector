@@ -167,6 +167,8 @@ class ApiV1:
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/checkpoint-preview", self.checkpoint_preview,
              "observe"),
             ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
+            ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls",
+             self.pulls_list, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
             ("GET", r"/api/v1/delivery/previews/(?P<pv>mpv_[0-9a-f]{32})", self.merge_preview, "observe"),
@@ -712,6 +714,10 @@ class ApiV1:
             token=self._q(query, "checkpoint"),
             resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"), kind=self._q(query, "kind"),
             related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))
+
+    async def pulls_list(self, owner, repo, query, **_):
+        from . import pr_list
+        return 200, await pr_list.list_pulls(self.daemon.ops, f"{owner}/{repo}", self._q(query, "state", "open"), self._int(query, "page", 1))
 
     async def pull_preview(self, owner, repo, number, query, **_):
         return 200, {"pull_request": await integration.pr_card(
