@@ -2,10 +2,21 @@
 
 ## Next release (unreleased)
 
-- **Candidate PR #81:** Implementation of bundled managed runtime, auto personal identity generation, browser one-use ticket, setup BAT profiles/GitHub binding, and verification commands.
-- Implemented Windows file locks and isolated private storage.
-- Added adjustable tree, unread and model preferences, skills catalog, direct result links, and repair workflows to the shared frontend.
-- Note: Skills saved selection has a verified source digest but `selected_not_applied`, not automatic runtime activation. Instruction queued status (`true`) is historical, not current queue position, with no per-BAT message cancel. Existing task project verification exact `argv` is saved (no execute on save).
+- Candidate [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81), not yet merged:
+  bundle the matching Python central runtime and prepare private installation data,
+  stable personal identity, authenticated browser handoff and installation-owned login startup.
+  Windows uses native file locks and private storage; safe forward upgrades preserve the
+  journal and refuse busy work or downgrades. Final candidate checks remain in progress.
+- Add guided BAT/profile access, exact GitHub repository/host/workspace bindings and
+  Task Service verification command settings. Configuration is revision-bound and journaled;
+  saving probes access without dispatching, pushing or executing a saved verification command.
+- Add adjustable project navigation, readable conversation/send receipts, unread and model
+  preferences, reviewed skill selections, result links and repair work. Skill selections pin
+  source digests and remain unapplied; historical queued receipts do not imply a current BAT
+  queue position or support per-message cancellation.
+- Formal signing, Mac notarization, production update channels and Linux persistent native
+  credential enrollment are outside this delivery. Real-environment acceptance is user-owned;
+  these exclusions do not claim corresponding features or tests are complete.
 
 - Backport the official GLib iterator fix for RUSTSEC-2024-0429 into the Linux
   desktop dependency graph. Preserve the original crate version/license and exact

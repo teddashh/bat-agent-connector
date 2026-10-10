@@ -8,7 +8,7 @@ Better Agent Dashboard brings together **Windows Fleet connectivity and startup,
 
 You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
-> **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but are pending final validation (draft PR #81). The candidate source now implements the bundled managed runtime, auto personal identity, and a browser one-use ticket. [Installation status and trial paths →](docs/getting-started.md)
+> **Candidate status:** [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) implements the bundled Python runtime, owned background central, personal identity and authenticated browser entry. Final checks are still running; this is not yet a merged release. Use a successful desktop artifact matching the candidate commit. Earlier release downloads do not gain these features automatically. [Installation and first use →](docs/getting-started.md)
 
 ![Select work in the project tree and keep its conversation, reply controls and results together.](site/images/workspace-en.png)
 
@@ -84,7 +84,7 @@ Project Hub is a reference for session organization and interaction. Its runtime
 - Native credentials, files, tray / Dock behavior, Fleet and updates depend on platform support. Browser access does not grant local machine control.
 - MCP and CLI share central policies and durable operations. Each automation client uses its own principal and scopes.
 
-The intended installer owns the lifecycle of its managed local service: initial runtime and identity setup, background startup, connection recovery and a one-click browser entry. An **existing central connection is an advanced join path**, not the intended first step for a new user. This installer work is not yet complete; [the first-run contract](docs/design/managed-installation.md) defines the remaining behavior.
+The candidate installer bundles the matching Python runtime and prepares one owned local service, private data and personal identity on first launch. It supports background startup, verified reconnection and authenticated browser entry. Reopening and safe upgrades preserve the same installation and journal. **Joining an existing central is an advanced option**; an existing connection configuration is preserved, and connection failure never provisions a replacement database. [Installation and recovery contract](docs/design/managed-installation.md).
 
 [Shared frontend](docs/design/shared-frontend.md) · [Native client](docs/design/desktop.md) · [API](docs/design/api-v1.md)
 
@@ -101,40 +101,35 @@ Windows remains a core part of the product. Sharing the Dashboard with Web / Mac
 | Tailscale and central startup | Read Tailscale state and open its installed sign-in app; a separately configured fixed SSH recipe can query / start the selected central service. This is not arbitrary remote installation. |
 | Local resources | Windows Credential Manager, native attachment selection / upload / Save As, tray and controlled update entry. |
 
-**Windows Fleet and central have separate platform requirements.** Today's Windows client can connect to Linux central. Automatic installation of the complete runtime remains separate delivery work. Mac DMG / Keychain evidence does not replace Windows Fleet live acceptance.
+**Windows Fleet and central have separate responsibilities.** The candidate runs its bundled central locally on Windows, or joins a configured external central. Fleet keeps its own explicit connection, profile and ownership settings. Mac supports the shared Dashboard and bundled central; Windows Fleet remains a Windows capability.
 
 [Windows usage and resources](docs/windows.md) · [NSIS validation packages](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet configuration example](desktop/fleet.example.json) · [Rust Fleet source](desktop/fleet-core/README.md)
 
 ## Platforms and packages
 
-The **desktop client** and **central service** have different platform requirements today.
+Candidate packaging is defined for the following platforms. Final matching-candidate CI and installed fixtures remain in progress; source implementation, a successful package job and a real user environment are separate evidence.
 
-| Component | Available evidence | Current limit |
+| Component | Candidate implementation | Distribution or platform boundary |
 | --- | --- | --- |
-| Web Dashboard | Responsive English / Traditional Chinese interface, served by central | Uses trusted loopback / tunnel access. Public or LAN hosting needs a separate authenticated ingress design. |
-| Windows desktop | x64 NSIS, Credential Manager, native Fleet / BAT profile / sign-in controls; installed WebView and lifecycle tests in CI | Full live Fleet acceptance remains; no bundled / automatically provisioned Python central yet. |
-| macOS desktop | Apple Silicon and Intel DMGs; native WebView, lifecycle and isolated Keychain tests | Ad-hoc validation signing. Developer ID / notarization and an operational Mac updater remain release work; Windows Fleet parity is not implied. |
-| Linux desktop | Debian validation package and native WebView fixture | Native credentials currently use a memory-only source; persistent protected enrollment is not implemented. |
-| Python central / CLI / MCP | Python 3.10–3.13 tested on Linux; POSIX implementation | Linux is the documented central setup path. Windows-native central is not implemented. Mac client tests do not establish Mac central live acceptance. |
+| Web Dashboard | Shared English / Traditional Chinese UI served by central; one-click authenticated entry from the managed desktop | Uses trusted loopback / tunnel access; no general public-hosting ingress. |
+| Windows x64 | NSIS with bundled central, private Windows storage / file locks, Credential Manager for external-central credentials, native Fleet and tray | Validation package is unsigned. |
+| macOS Apple Silicon / Intel | DMGs with bundled central, browser entry, menu bar and Keychain for external-central credentials | Ad-hoc validation signing; no Windows Fleet port. |
+| Linux | Debian package, bundled central and native WebView | External-central native credentials use the memory-only adapter; a persistent Linux credential vault is outside this delivery. |
+| Python central / CLI / MCP | One operation authority; Windows private storage and locking plus POSIX support; Python 3.10–3.13 CI matrix | Manual operator deployment remains available. Desktop users do not need a preinstalled Python runtime. |
 
-Download validation packages under **Artifacts** in a successful [desktop workflow run](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml). Match the source commit and central compatibility. GitHub may require sign-in, and artifacts expire; this is not a stable release channel.
-
-The [2026-10-10 candidate CI build](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) provides candidate artifacts from PR #81. The candidate implements the bundled managed runtime, auto personal identity generation, and browser one-use tickets. Note that installed release assets from earlier runs remain clearly historical client validation and do not automatically bundle the new runtime.
+Open [PR #81 checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks), follow its [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml), and match the artifact's source commit and successful platform job. GitHub may require sign-in, and artifacts expire. These are candidate artifacts, not a newly published stable release or update channel; older release assets remain historical client packages.
 
 ## Start using it
 
-**The normal path** is now implemented in the candidate: install the candidate matching the successful PR81 CI artifact, launch it, and the owned local background central and personal credential (native-only) are automatically prepared.
+With a matching candidate package:
 
-For a **supervised trial today**, use this candidate path:
+1. **Install and launch.** The app prepares its local background central and personal identity. No Python / uv installation, endpoint entry or API-token copying is needed for this local path.
+2. **Connect BAT.** Open **Connection / Fleet → Get ready to work → Connect BAT**. Select an importable BAT connection profile, or enter the endpoint, trusted certificate fingerprint, workspace profile ID and BAT token. Use **Verify and save host**.
+3. **Choose where managed work may run.** Enable the intended conversation / start permissions, choose dedicated remote managed directories, and provide the existing trusted SSH alias used for Git and artifact operations. **Allow Git worktrees sharing a clone** is a separate explicit choice for direct BAT starts that need it; human resources remain read-only.
+4. **Bind the repository.** Under **Bind a GitHub repository**, read the host's workspaces and choose the exact workspace ID. Supply the GitHub repository, Git remote and authorization, then **Verify and bind repository**. Saving checks access without pushing or opening a PR.
+5. **Start and follow work.** Associate a project with that binding, review a fixed source commit and dispatch. Use **Configure verification commands** only when configuring Task Service projects; saving a command does not execute it. [Detailed setup and recovery](docs/getting-started.md).
 
-1. **Install and Launch:** Download and install the candidate artifact. It automatically prepares the background service and your personal credentials.
-2. **Connect BAT:** In the UI Settings, either add a trusted BAT profile, or manually enter the URL, fingerprint, workspace profile, and token. Credentials never hand-edit JSON.
-3. **Bind GitHub:** Select a host/workspace and set up the GitHub binding in the UI.
-   - For published-repo dispatch, managed roots and an SSH trusted alias are required.
-   - For BAT direct starts, a shared-clone-worktree is an explicit opt-in.
-4. **Agent observation:** Register `bat-agent-connector-mcp` in its MCP client. Give authorized automation its own scoped `BATC_API_TOKEN`.
-
-*Note: The manual external central setup remains preserved as an advanced choice.*
+Use **Open Dashboard in browser** or the tray / menu-bar entry for authenticated browser access, and **Start when I sign in** for installation-owned startup. Existing external-central configuration remains active; **Advanced: join an existing central** lets you choose another trusted service explicitly. Agents receive their own scoped central identities through the [MCP setup](docs/getting-started.md#cli-and-agent-access).
 
 Working on remote BAT hosts does not require BAT to be installed on the Dashboard machine. [Canonical skill and Hermes / Grokbot adapters](docs/agent-skills.md).
 
@@ -155,22 +150,19 @@ MCP / CLI writes retain explicit confirmation, host tiers and audit records. The
 
 **Read-only Connector policy is not an OS sandbox.** Host accounts and confinement determine whether an agent process can write to human directories. General starts and Task Service recipes have documented differences. Read [confinement](docs/design/confinement.md) before relying on unattended isolation.
 
-A native BAT `worktree.merge` with a fully unknown ACK and insufficient positive evidence still lacks a complete human adjudication API. This limitation is specific; GitHub integration and deployment have their own readback contracts. [Merge recovery](docs/design/worktree-merge.md) · [Resource policy](docs/design/resource-policy.md) · [Security](SECURITY.md)
+For native BAT `worktree.merge`, an unknown ACK without sufficient positive evidence preserves the original operation and resources; it does not resend or release ownership. A human-adjudication API for that case is outside the current contract, not a remaining delivery gate. GitHub integration and deployment use their own readback contracts. [Merge recovery](docs/design/worktree-merge.md) · [Resource policy](docs/design/resource-policy.md) · [Security](SECURITY.md)
 
 ## Current evidence and remaining work
 
-Baseline: **2026-10-10, candidate source from PR #81**. The normal first-launch setup is now implemented.
+As of **October 10, 2026**, the source candidate is [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81), not yet merged. Its final [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) are running. Do not apply older release test totals or artifacts to this candidate.
 
-| Evidence | What it establishes |
-| --- | --- |
-| [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723049) | Python 3.10–3.13 passed; the local 3.13 full run recorded 3,228 passed / 33 skipped. |
-| Shared frontend checks | 694 UI cases passed before final affected-layout regressions. HTTP / native transport fixtures test behavior. |
-| [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) | Windows, both Mac architectures and Linux packaging / native fixtures. Installed fixtures use controlled loopback services and synthetic data. |
-| Real central integration fixtures | Actual Python API, journal and temporary Git, with fake BAT / GitHub providers. |
+The candidate includes managed installation and onboarding, an adjustable project tree, readable conversations and send receipts, unread / model preferences, reviewed skill selections, linked results and repair work. Skill selection records a fixed source digest; it does not activate a skill in a running agent. A historical queued-send receipt does not report the current BAT queue position or offer per-message cancellation.
 
-Note: Formal signing, Mac notarization, update channels, Linux persistent vaults, and user-run human acceptance are exclusions and not implemented features. The remaining delivery work includes the specific unknown-ACK recovery flow.
+Automated validation covers Python, shared browser/native transport, packaged runtime ownership and restart, and platform installation fixtures. These controlled fixtures are distinct from a user's actual Fleet, accounts and deployment targets.
 
-[Implementation record](docs/product/implementation-status.md) · [Acceptance matrix](docs/product/acceptance-v2.md)
+The owner excluded **formal signing, Mac notarization, production update channels and Linux persistent native credential storage** from this delivery. **Human execution of the full 46-item real-environment acceptance matrix belongs to the user** and is not an outstanding agent task. These exclusions are not claims that the corresponding capabilities or real-host tests were completed. Final candidate checks and integration remain outstanding.
+
+[Implementation record](docs/product/implementation-status.md) · [Acceptance reference](docs/product/acceptance-v2.md)
 
 ## Documentation
 

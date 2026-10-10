@@ -2,24 +2,66 @@
 
 [產品介紹](../README.zh-TW.md) · [English](getting-started.md) · **繁體中文**
 
-## 正常安裝應該是什麼樣子？
+## 選擇相符的候選安裝包
 
-桌面安裝包應替你準備 runtime、資料、個人身分與背景 Connector。引導完成 BAT／GitHub 授權後，從系統匣或選單列點一下開 Dashboard；關視窗時背景服務繼續維持連線。不應要求你先裝 Python、手改 JSON 或輸入 API actor。
+[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 已實作下列一般桌面流程，尚未合併，最終檢查仍在執行。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對同一來源 commit，使用平台 job 成功產生的 artifact。早期 release 資產不會自動包含新 runtime。[Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)。
 
-**目前驗證包還沒完成這套 managed 安裝。**下面是過渡期的開發試用／操作者設定，不是每個一般使用者都應承擔的 onboarding。加入別人已維護的中央環境仍是進階選項。[安裝合約](design/managed-installation.md)。
+| 平台 | Artifact | 格式 |
+| --- | --- | --- |
+| Windows x64 | `desktop-Windows-unsigned` | NSIS `.exe` |
+| Mac Apple Silicon | `desktop-macOS-arm64-validation` | `.dmg` |
+| Mac Intel | `desktop-macOS-x64-validation` | `.dmg` |
+| Linux | `desktop-Linux-unsigned` | `.deb` |
 
-## 選擇目前的試用方式
+GitHub artifact 可能要求登入，也會到期。Windows 驗證包未正式簽署，Mac 採 ad-hoc 簽署。正式簽章、Mac 公證、正式更新通道及 Linux 原生憑證持久儲存不在本次交付範圍；此處不宣稱已發布新的穩定版本。
 
-| 你的情況 | 從這裡開始 |
-| --- | --- |
-| 已有維護中的中央服務 | 向維護者取得可信 Dashboard 網址和自己的 API 身分，開 Web 或接上桌面 client。 |
-| 由你建立第一套環境 | 依下列步驟建立 Linux 中央。 |
-| 只想讓 Agent 觀察 BAT | 準備已配置中央的個別身分，使用下方唯讀 MCP 設定。 |
-| 想下載後直接開始，不做工程設定 | 這就是正式產品要求，但現有包尚未達成。可查看[實作紀錄](product/implementation-status.md)及 [Releases](https://github.com/teddashh/bat-agent-connector/releases)。 |
+## 首次啟動：你的本機 Connector
 
-## 1. 準備中央主機
+安裝並開啟相符套件。包內含 Python runtime，會準備一套私人本機中央、資料與個人身分；這條流程不需先裝 Python／uv、輸入 actor、編輯憑證檔或複製 API token。尚未配置 BAT 主機時，Dashboard 會顯示「準備開始工作」。
 
-本文使用 Linux 與 Python 3.10–3.13。中央必須能存取 BAT server；若要 managed Git 工作，另需已配置的 SSH／Git、Connector 自有 managed root 及 repository 明確綁定。Windows／Mac 桌面支援不等於相同平台的中央已驗收。
+**Windows Fleet 管理本機連線與啟動；Python Connector／Task Service 授權並派工；BAT 在選定主機執行工作。** 使用遠端 BAT 主機時，Dashboard 電腦不需安裝 BAT。Windows Fleet 設定與中央引導設定各有分工。
+
+### 1. 連線至 BAT
+
+開啟「連線／Fleet → 準備開始工作 → 連線至 BAT」。若有可匯入的「BAT 連線 profile」可直接選取；否則選「手動設定主機」，填入「主機名稱」、「BAT 連線位址」、可信的「主機憑證 SHA-256 指紋」、「Workspace profile ID」及「BAT 連線 token」。請向主機持有人核對指紋。加密或損壞的 profile 憑證會顯示不可匯入，改在表單輸入有效 token，不略過信任檢查。
+
+需要派工時，展開「允許管理工作」，選擇所需的對話／開工權限與專用「遠端管理目錄」。Git 同步、checkpoint 及成果操作使用「此電腦已設定的 SSH alias」。SSH 帳號、金鑰、已知主機與遠端權限須已可用，程式不會猜測或產生這些授權。
+
+直接 BAT 開工若需共用 Git metadata，須明確勾選「允許共享 clone 的 Git worktree」；沒有此需求就保持關閉，也不因此取得人工 session／worktree 控制權。按「驗證並儲存主機」會做唯讀連線／profile 檢查，儲存不會派工。
+
+### 2. 連結 GitHub 儲存庫
+
+在「連結 GitHub 儲存庫」填入 `owner/repository` 與已配置主機，按「讀取這台主機的 workspace」，選擇實際「BAT workspace ID」，提供「Git remote 位址」及必要的 GitHub token。依工作需求開啟成果整合、PR merge 或 metadata 更新，再按「驗證並連結儲存庫」。
+
+Repository 與 host／workspace 必須明確綁定，不能用相似的專案名、資料夾或 remote URL 代替。驗證只讀取 BAT／GitHub，不會推送、建立 PR 或 merge。從已發布來源派工另需 managed 開工權限、專用遠端管理目錄及可信 SSH alias；部署 recipe 仍另外配置。
+
+### 3. 有需要時設定驗證命令
+
+「設定驗證命令」適用於 Task Service 專案。填入精確的「Task Service 專案名稱」、「執行程式」、「參數（每行一個）」及「逾時秒數（1–3600）」。每個非空白行是一個完整參數，行內空格會保留；不解析 shell 引號、管線或展開，也不要填入憑證。
+
+「儲存驗證命令」只保存設定，不執行命令。其他專案的命令保留，逾時秒數套用到所有已配置專案。請使用 task 實際的 project key，不會自動由 Dashboard 專案 ID／標題對應。若編輯期間中央設定改變，重新載入已存驗證設定、檢視保留草稿後再儲存。後續仍由既有 task、ownership 與執行條件決定何時驗證。
+
+### 4. 派工與追蹤
+
+開啟「專案」，連結已配置儲存庫，選擇綁定主機／workspace，先檢視固定來源 commit，再送出指示、模型與選用附件版本。同主機可從固定本機 checkpoint 接續；另一主機則經綁定 repository 取得明確已發布 commit。人工來源工作保持唯讀。
+
+可調整的左側樹讓所選對話、回覆控制與成果連結留在同一畫面。發送回執記錄該次請求結果；歷史「已排入佇列」不是目前 BAT 佇列位置。模型偏好影響選項，不會取代 provider 授權。已儲存技能會固定經檢視的目錄來源，不代表自動啟用到執行中的 Agent。「建立修復工作」保留固定失敗證據，仍須先檢視目的地與來源再派工。
+
+### 背景、瀏覽器與恢復
+
+按「在瀏覽器開啟 Dashboard」或使用系統匣／選單列入口。程式用一次性登入票證交接，長效 API token 不放入網址或瀏覽器儲存。Web 與 Tauri 使用同一個中央身分和帳本；瀏覽器登出後，從桌面入口重新開啟。
+
+勾選「登入電腦時啟動」可設定這套安裝的登入啟動。關閉網頁或 Dashboard 視窗，中央仍持續運作；明確退出桌面時，中央工作仍保留，Fleet 另依既有正常停止條件處理。重開會找回同一份安裝，新包只有在自有服務同意安全停止後才升級；忙碌／結果未知工作會阻止切換，舊包也不會降版帳本。
+
+設定變更會等待執行中的 operations／tasks。回覆遺失時使用「查回原設定請求」及「查看設定操作」，不要另送新請求猜結果。憑證失效、ownership 不符或啟動失敗需要恢復原安裝，不是另建資料庫的理由。
+
+## 進階：既有中央與操作者部署
+
+已存在的桌面中央設定會保留。要明確加入其他服務，可用「進階：加入既有中央」，再登錄該中央的獨立憑證。以下說明操作者自行維護中央的方法，不是一般打包安裝的前置條件。
+
+### 1. 準備中央主機
+
+以下操作者範例使用 Linux 與 Python 3.10–3.13，與桌面打包流程分開。中央必須能存取 BAT server；managed Git 工作另需 SSH／Git、Connector 自有 managed root 及明確的 repository 綁定。
 
 兩種 token 用途不同：
 
@@ -30,18 +72,18 @@
 
 Dashboard 登入欄位不能填 BAT remote token。
 
-## 2. 安裝 Connector
+### 2. 安裝 Connector
 
-在中央主機使用 `uv` 安裝。正式版本選定前，固定一個已檢視 commit，避免不知情跟著 `main` 變動。以下使用本文件產品基準：
+在中央主機使用 `uv` 安裝。正式版本選定前，固定一個已檢視 commit，避免不知情跟著 `main` 變動。請將 `REVIEWED_COMMIT` 換成與選定桌面／中央部署相符、已檢視的來源 commit：
 
 ```bash
-uv tool install 'git+https://github.com/teddashh/bat-agent-connector@15b2048de5c2ec3a31e0845ce76a79b612d1c32e'
+uv tool install 'git+https://github.com/teddashh/bat-agent-connector@REVIEWED_COMMIT'
 batc --help
 ```
 
 開發 checkout 可改用 `uv sync --locked --extra dev`，以下指令以 `uv run batc` 執行。桌面與中央須維持 contract 相容；桌面會拒絕不相容的合約或身分。
 
-## 3. 配置 BAT 存取
+### 3. 配置 BAT 存取
 
 這台主機已有 BAT desktop profiles 時：
 
@@ -62,7 +104,7 @@ Profile 位於別處可用 `batc import-bat --profiles-dir /path/to/profiles`；
 
 預設 profile 路徑不代表完整跨平台自動發現。保留 BAT 原設定，憑證不要提交至 repo。
 
-## 4. 啟動中央並開啟 Web
+### 4. 啟動中央並開啟 Web
 
 在中央的一個終端機執行：
 
@@ -88,37 +130,17 @@ ssh -N -L 18796:127.0.0.1:18796 central-alias
 
 保持 tunnel，再在 client 開同一個 loopback 網址。不要靠改 bind address 或關閉 Host／Origin 檢查來公開服務；目前沒有通用的公開 hosting 入口。
 
-## 5. 接上桌面 client
+### 5. 從桌面加入該外部中央
 
-Windows 另有原生 Fleet 連線、BAT profile 啟動與登入控制。請搭配
-[Windows 使用與資源指南](windows.zh-TW.md)；本頁中央設定與 Windows 能力是產品中互補的部分。
+在 managed 桌面的連線設定選「進階：加入既有中央」，輸入可信位址與預期 actor，在原生視窗確認後，透過「加入憑證」另行登錄該中央的 API token。Windows 使用 Credential Manager，Mac 使用 Keychain。原有 managed 服務與工作保留，其個人憑證不會轉送至外部位址。
 
-在成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 下載對應 artifact：
+升級會保留已存在的 `central.json`，即使它需要修復。外部中央連線失敗不會另建本機資料庫。舊版 client-only 包本來就以這個外部連線畫面開始；看到此畫面不代表下載檔包含新的 managed runtime。
 
-| 平台 | Artifact | 格式 |
-| --- | --- | --- |
-| Windows x64 | `desktop-Windows-unsigned` | NSIS `.exe` |
-| Mac Apple Silicon | `desktop-macOS-arm64-validation` | `.dmg` |
-| Mac Intel | `desktop-macOS-x64-validation` | `.dmg` |
-| Linux | `desktop-Linux-unsigned` | `.deb` |
+Linux 連外部中央時，原生憑證仍使用 `BATC_DESKTOP_TOKEN` 的記憶體 adapter，也可用瀏覽器登入。這不妨礙候選本機 managed 安裝保存自有服務的私人憑證。[原生設定與憑證](design/desktop.md#configure-the-native-client)。
 
-Artifact 可能到期或要求 GitHub 登入。Windows 未簽署、Mac 驗證包是 ad-hoc 簽署，尚非正式公開發行／更新通道。核對來源與測試回執；若系統政策擋下安裝，可先用 Web 試用，不必削弱整台電腦的安全設定。
+「忘記已存憑證」只移除本機記錄，不會撤銷中央 token。Windows Fleet 的連線／登入選擇另見 [Windows 指南](windows.zh-TW.md)。
 
-Windows／Mac 現行步驟：
-
-1. 安裝並啟動相符平台的包。
-2. 輸入可信中央位址與簽發 API token 時的 actor，例如 `personal-dashboard`。
-3. 檢視原生確認；確認後才建立第一份 `central.json`，不默默覆寫已存在的錯誤設定。
-4. 選擇「新增憑證」，在原生安全輸入框提供 Connector API token；驗證後才保存於 Credential Manager／Keychain。
-5. 連線後核對身分與中央資料，Web 可以同時開著。
-
-這是現有過渡流程。正式 managed 安裝對新本機環境必須消除手動 endpoint／actor／token 設定。
-
-Linux 原生目前使用明確提供的記憶體來源 `BATC_DESKTOP_TOKEN`，尚無持久憑證登錄；詳見[原生憑證合約](design/desktop.md#configure-the-native-client)。Linux 試用可先用 Web。
-
-各平台設定位置與恢復見 [desktop.md](design/desktop.md)。「忘記已保存憑證」只移除本機記錄，不撤銷中央 token。更換身分走連線頁，不把 token 貼進 URL。
-
-## 6. 啟用實際工作
+### 6. 啟用實際工作
 
 先確認觀察功能正常，再由操作者配置：
 
@@ -180,22 +202,20 @@ bat-agent-connector-mcp --principal-only --read-only --http --port 8765
 
 MCP 位址是 `http://127.0.0.1:8765/mcp`，不是 Dashboard 網址。Durable 工作及復原請使用[共用 skill](../skills/bat-agent-connector/SKILL.md)與[同版 Agent 配接](agent-skills.md)。Task Service recipes 另有設定；planner 關閉時 task 排隊，不代表派工出錯。[Task Service](design/task-service.md)。
 
-## 首次連線與工作流程排錯
+## 常見問題
 
-| 畫面情況 | 檢查與處理 |
+| 畫面／情況 | 檢查與處理 |
 | --- | --- |
-| 桌面一開始要求 central／actor | 這是現有 client-only 安裝器缺口；先按上述試用流程配置，不是永久正常 onboarding。 |
-| 網頁沒有回應 | 確認 `batc serve` 與可信 tunnel 仍在跑；核對設定地址，不盲目啟第二個 owner。 |
-| 憑證被拒絕 | 使用 Connector API token，不是 BAT token；核對 actor、`observe`、到期、contract 及中央身分。 |
-| 已連線但沒有 hosts／sessions | 核對 `hosts.toml`、BAT 遠端存取及 token 參照；離線／過期不代表工作停止。 |
-| 派工沒有 repository 可選 | 配置 `github.repos[].sync` 的明確綁定，並把該 repository 加入專案。 |
-| 按鈕不可按 | 看旁邊原因，檢查 scopes、host 開關、ownership 與目的地設定。 |
-| 啟動受理後斷線 | 保留原 operation ID／key，查回回執；不要為猜結果再派一份。 |
-| Agent 沒繼續輸出 | 看待回答、權限與活動；閒置不是完成，完成也不是部署。 |
-| 整理被拒絕 | 看保留原因；不要清 reservation 或刪可能還有 writer 的 worktree。 |
-| 桌面關閉但工作還在跑 | 中央與 UI 生命週期分開；關窗留背景也不同於明確 Quit。 |
-| Fleet 沒啟動 | Fleet 另需配置；沒寫 `backend` 沿用 PowerShell 相容預設，安裝 Dashboard 不等於自動遷移 Rust owner。 |
+| 桌面要求外部中央／actor | 核對是否下載舊版 client-only 包，或已有外部設定。相符的 managed 候選包，一般首次啟動會自行準備本機中央。 |
+| Managed 啟動／升級需要處理 | 保留安裝與資料，重開相符程式；未解工作或憑證問題可能阻止啟動／升級，不刪 journal 或另造 owner。 |
+| BAT profile 無法匯入 | 核對 metadata、憑證信任與 token 可用性；token store 加密或損壞時改用手動主機表單。 |
+| 已連線但沒有主機／sessions | 檢查「連線至 BAT」與實際可達性；離線或過期觀測不代表工作停止。 |
+| 專案派工沒有目的地 | 儲存精確 repository／host／workspace 綁定，並把專案連到該 repository。 |
+| 設定顯示忙碌或回執未確認 | 等目前工作穩定，先查回原設定請求和操作，再決定變更。 |
+| 操作不可用 | 閱讀 scopes、主機權限、ownership 及來源／binding 條件。 |
+| 發送／開工後回覆遺失 | 保留 operation ID 與 request key，先查回，不再派一次。 |
+| 原生 BAT merge ACK 持續未知 | 保留原操作與資源；另外的人工裁決 API 不在目前 merge 合約範圍。 |
+| 整理被拒絕 | 閱讀保留原因，未解 writer 與唯一內容須保留。 |
+| Fleet 沒有啟動 | 檢查所選連線、Kit 配置、前置條件及 ownership。未指定 backend 時沿用 PowerShell；安裝 Dashboard 不會自行遷移成 Rust。 |
 
-## 什麼才算一次成功試用？
-
-挑一個小型真實專案，固定 commit 與目的地。確認人工工作不變、managed 工作可追溯、成果到正確 PR、部署顯示實際版本、斷線重開查回同一份工作、整理後歷史仍在。[完整驗收](product/acceptance-v2.md)與 managed 安裝完成前，維持有人監督。
+真實 Fleet、帳號與部署驗收由使用者執行。[46 項驗收參考](product/acceptance-v2.md)供這項工作使用，不列入 Agent 完成清單，也不宣稱已經通過。

@@ -1,99 +1,54 @@
 # Managed desktop installation and background service
 
-Status: **candidate source implemented; pending final validation**.
-Owner clarification: 2026-10-10, following the README / website review. Formal signing, Mac notarization, update channels, Linux persistent vault, and human real host acceptance have been explicitly removed from agent delivery gates. This removed scope is distinct from the newly implemented candidate features.
+Status: **source implemented in candidate [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81); final checks running, not yet merged** (2026-10-10). Match package evidence to the exact candidate commit. Older published release assets are historical client packages and do not automatically contain this runtime.
 
-The candidate source now implements the bundled managed runtime, auto personal identity, and a browser one-use ticket for secure local access. The setup flow includes BAT profiles configuration, explicit GitHub binding, and verification commands. For Windows, actual file locks and private storage are implemented. The shared frontend includes an adjustable tree, unread/model preferences, skills catalog, direct result links, repair workflows, and instructions that reflect honest limits.
+This contract covers the ordinary local installation and its advanced external-central alternative. Python Connector / Task Service remains the sole business authority. Windows Fleet manages local connection and startup choices; BAT executes work on the selected hosts. Rust owns packaging, native credentials, windows and restricted lifecycle controls, not another task journal or scheduler.
 
-*Note: PR #81 (draft) is not merged yet, and final full gates/native fixtures are running. The current installed release assets remain historical client validation unless a new packaging workflow artifact is produced. Do not claim the latest published release automatically bundles the new runtime.*
+## Implemented first-use journey
 
-## User journey
+1. Install a matching Windows, Mac or Linux candidate package. It includes the matching Python runtime; the user does not first install Python, uv or developer tools.
+2. Launch the application. It verifies the bundled artifact, prepares private local data, one owned Python central and a personal identity, then connects the shared Dashboard. No endpoint, actor or copied API token is required for this local path.
+3. In **Get ready to work**, select an importable BAT profile or enter the actual endpoint, trusted fingerprint, profile ID and BAT token. Encrypted or damaged external profile credentials remain unavailable. Saving probes the host without dispatching work or bypassing trust.
+4. Configure managed permissions, dedicated remote roots and an existing trusted SSH alias where required. Select exact host/workspace/repository bindings and provider authorization. Repository setup reads BAT/GitHub; it does not push, create a PR or merge. Task Service verification settings accept explicit argv and a bounded timeout; saving does not execute them.
+5. Open Web through **Open Dashboard in browser** or the tray/menu-bar entry. A private one-use handoff signs into the same personal identity. The long-lived bearer never enters command arguments, URLs, browser storage or logs.
+6. Choose **Start when I sign in** for installation-owned autostart. Closing the browser or Dashboard window does not stop central work. On Windows, selected Fleet connections and BAT profile startup retain their own configuration and ownership rules.
 
-1. Install the Windows or Mac package. It contains the matching runtime; users do
-   not install Python, uv or developer tools first.
-2. Start the application. It prepares its private data directory, managed Python
-   central service and personal identity without hand-written JSON or copied tokens.
-3. Connect BAT through an understandable host/profile flow. Import existing
-   configuration where available; let the user choose the actual host and workspace.
-   Account sign-in, host trust and provider authorization cannot be fabricated.
-4. Open Dashboard from the tray / menu bar. A browser entry is sufficient for daily
-   access; the Tauri window remains another client of the same shared frontend.
-5. Keep Connector and the selected connections running in the background. Closing
-   the browser or Dashboard window does not stop work. Show background / login
-   startup settings and connection state in ordinary user language.
+Existing external-central configuration stays selected. **Advanced: join an existing central** requires explicit native confirmation and separate credential enrollment. It preserves the existing owned background service and never forwards its credential to the new address. Failure to reach an external service cannot provision a second database.
 
-Joining a deployed central service remains an advanced alternative. Failure to
-reach that configured service must never silently create a second database.
+## Ownership, identity and storage
 
-## Service and identity ownership
+- The persistent installation manifest binds runtime version, data location, installation actor, server ID and principal ID. Reopening and concurrent clients recover that installation.
+- Central uses kernel file leases, not an occupied port, stale PID or matching path, to enforce a single owner. The endpoint pointer is checked against the owned database, then a challenge verifies the live service before any bearer is sent.
+- Windows uses private ACLs, verified handles, reparse rejection and native locking. POSIX uses private owned directories/files and process locks. These protections also cover journal, token and atomic configuration publication.
+- The package pins its compressed runtime and executable digests. Installation does not download and execute an unversioned script. The frozen runtime starts without Python or uv on the user's PATH.
+- Browser handoff is short-lived and single-use. The resulting session uses an HttpOnly SameSite cookie plus origin/CSRF checks; this is not a public unauthenticated hosting mode.
+- Setup mutations use central durable actions, opaque staged credential references and the reviewed configuration revision. Publication is atomic. Recovery reads the original revision/receipt rather than inventing a new intent; live configuration changes wait for a safe point.
 
-- Python Connector / Task Service remains the sole operation and journal authority.
-  Rust owns local installation and service lifecycle, not business state.
-- A persistent installation manifest binds the runtime version, data location,
-  server identity, principal and owned service. Reopening, rebooting, upgrading or
-  starting a second client recovers that installation instead of creating another.
-- Use real cross-process ownership on every supported platform. A occupied port,
-  stale PID or matching path does not prove ownership of a service.
-- Pin runtime artifacts and verify package integrity. Do not download and execute
-  an unversioned installation script to simulate a bundled environment.
-- Keep bearer credentials out of command arguments, URLs, browser storage and logs.
-  One-click browser entry needs an authenticated local handoff design; opening an
-  unauthenticated dashboard and asking users to paste an API token is not completion.
-- The managed service keeps a stable loopback endpoint or publishes a verified
-  endpoint pointer. Preserve Host / Origin / CSRF boundaries and platform private
-  storage protections. This does not authorize public unauthenticated hosting.
+## Background recovery and upgrades
 
-## Background behavior and recovery
+Network recovery retries connections and reads, not a possibly accepted start, prompt, integration, merge or deployment. Original operation IDs, request keys, reservations and receipts remain authoritative. Manual and unknown resources remain read-only unless existing creation evidence proves the managed identity.
 
-Network recovery may retry connections and reads. It must not resend a possibly
-accepted start, prompt, integration, merge or deployment. Recover the original
-operation ID / request key and let central reconciliation decide its outcome.
+A newer bundled runtime proves ownership and asks the current central to stop safely. Active/nonterminal work blocks this transition. The launcher holds its lock through shutdown and replacement, waits for the owned kernel lease, then starts and verifies the new runtime against the same journal and identity. It never kills a PID found in a pointer. Downgrades and unknown version ordering are refused. Interrupted upgrades recover the same saved installation.
 
-The tray / menu bar should expose Open Dashboard, connection state and service
-settings. Closing the visible UI is distinct from explicitly stopping an owned
-background service. Stopping or upgrading must respect ongoing effects, locks and
-saved receipts. Do not terminate a different installation or another user's BAT.
+Expired/revoked credentials, invalid manifests, changed identity or missing ready-state data are recovery failures. They do not cause automatic credential reissue, deletion of history or replacement ownership. Reinstallation reuses preserved application data; deliberately deleting that data is outside ordinary reopen/upgrade behavior.
 
-On login, start only the saved, owned installation and selected connections.
-Reconnect with backoff; make unavailable hosts and account expiry visible. Neither
-offline operation nor an expired credential permits creating a new owner or
-switching to an unrelated service. Existing manual resources remain read-only.
+Explicit desktop Quit follows the existing Fleet shutdown guards and leaves the independent central service running. Stopping the managed service is separate and requires its own verified owner and safe-stop checks.
 
-Uninstall / reinstall and upgrade preserve data unless the user explicitly chooses
-a reviewed deletion. New software must recover the same IDs and history. A browser
-and Tauri connected together must observe one set of operations and permissions.
+## Evidence and delivery boundary
 
-## Current implementation gap
+Candidate source and fixture locations:
 
-The current packages include the Tauri client and configured native Fleet support,
-but no provisioned Python central runtime. Native initial setup still asks for an
-endpoint and actor. Windows central portability needs actual file locking, private
-storage / ACL and reparse protection, atomic artifact publication and ownership;
-removing `fcntl` imports or disabling security checks is not a port. Mac client
-packaging and Keychain fixtures do not prove the complete managed installation.
+| Boundary | Source / automated fixture |
+| --- | --- |
+| Runtime ownership, identity, restart, upgrade and refusal | `managed_runtime.py`; `tests/test_managed_runtime.py` |
+| Private storage and Windows portability | `platform_files.py`, `windows_files.py`; `tests/test_platform_files.py`, `tests/test_windows_central.py` |
+| Guided setup, read-only probes and revision recovery | `managed_setup.py`; `tests/test_managed_setup.py` |
+| Browser handoff and shared setup | `browser_sessions.py`; `tests/test_browser_sessions.py`, `desktop/tests/managed-setup-browser-integration.mjs` |
+| Bundled integrity, empty child PATH and concurrent clients | `desktop/scripts/build-managed-runtime.py`, `desktop/tests/managed-runtime-fixture.py` |
+| Native installation/login lifecycle | `desktop/src-tauri/src/managed.rs`, `managed_login.rs`; platform jobs in `.github/workflows/desktop.yml` |
 
-This is installation engineering still to do, not a user prerequisite to normalize
-in the product introduction. Existing manual deployment remains documented as the
-development-trial / operator path while the normal installation is completed.
+The final [candidate checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) are still running. Package fixtures use controlled temporary resources; a successful job is evidence for its source commit and platform, not every user environment.
 
-## Exit criteria
+The owner explicitly excluded formal signing, Mac notarization, production update channels and Linux persistent native credential enrollment from this delivery. Full human execution of the 46-item real-environment acceptance matrix is user-owned and is not an outstanding agent task. Exclusion does not mean these capabilities or checks were completed. Unknown native BAT merge acknowledgements preserve original work under the [merge contract](worktree-merge.md); its separate human-adjudication API is not a delivery gate.
 
-On the same fixed candidate, validate Windows, Apple Silicon and Intel Mac from a
-clean user profile with no Python / uv, central config or token:
-
-- Install, initialize the owned service and open an authenticated Dashboard without
-  entering an actor, editing a config file or copying a long-lived token.
-- Select / authorize BAT access and a repository, then dispatch a traceable managed
-  session; absence of BAT configuration is a guided state, not a false ready result.
-- Close the UI, reopen through the tray and browser, restart the client, and log in
-  again: same central identity, data and work, without a second service owner.
-- Disconnect the network and restart central mid-operation: recover the original
-  work without duplicate starts or effects; retain uncertain evidence.
-- Exercise occupied ports, invalid manifests, failed initialization, expired
-  credentials and interrupted upgrades without overwriting unrelated installations.
-- Preserve credentials, history and saved operation identities through upgrade and
-  the documented reinstall path; verify cleanup of test-owned installations.
-
-Packaging, native fixtures and real user-host acceptance remain distinct evidence.
-See [the acceptance matrix](../product/acceptance-v2.md) and
-[shared frontend lifecycle](shared-frontend.md).
+See [first use](../getting-started.md), [implementation status](../product/implementation-status.md), [acceptance reference](../product/acceptance-v2.md) and [shared frontend lifecycle](shared-frontend.md).
