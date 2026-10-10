@@ -7,8 +7,9 @@ the current user and SYSTEM; existing objects are inspected, never adopted by
 rewriting their ACL. Artifact publication is an atomic handle-relative rename
 without replacement, followed by read-only sealing and digest verification.
 
-API references: Microsoft Learn NtCreateFile (winternl.h), GetSecurityInfo
-(aclapi.h), LockFileEx and SetFileInformationByHandle (fileapi.h).
+API references: Microsoft Learn NtCreateFile (winternl.h), NtSetInformationFile
+and FILE_RENAME_INFORMATION (ntifs.h), GetSecurityInfo (aclapi.h), LockFileEx
+and SetFileInformationByHandle (fileapi.h).
 """
 
 from __future__ import annotations
@@ -95,6 +96,8 @@ _security = _bind(advapi, "GetSecurityInfo", [w.HANDLE, c.c_int, w.DWORD, c.POIN
 _ace = _bind(advapi, "GetAce", [VOID, w.DWORD, c.POINTER(VOID)])
 _create = _bind(ntdll, "NtCreateFile", [c.POINTER(w.HANDLE), w.DWORD, c.POINTER(ObjectAttributes),
                 c.POINTER(IoStatus), VOID, w.ULONG, w.ULONG, w.ULONG, w.ULONG, VOID, w.ULONG], c.c_long)
+_nt_set_info = _bind(ntdll, "NtSetInformationFile", [w.HANDLE, c.POINTER(IoStatus), VOID,
+                                                    w.ULONG, c.c_int], c.c_long)
 _dos_error = _bind(ntdll, "RtlNtStatusToDosError", [c.c_long], w.ULONG)
 
 
@@ -182,8 +185,10 @@ def _open(name, *, parent=None, directory=False, create=False, exclusive=False,
     sd = _descriptor() if create else None
     attributes = ObjectAttributes(c.sizeof(ObjectAttributes), parent, c.pointer(unicode), 0x40, sd, None)
     handle, status = w.HANDLE(), IoStatus()
-    # READ_CONTROL, SYNCHRONIZE, FILE_READ_ATTRIBUTES and read/list access.
-    access = 0x00120081 | (0x00000116 if writable else 0) | (0x00010000 if delete else 0)
+    # A pinned directory needs traverse + attributes, not list-data access.
+    # The rename target's internal open must coexist with this directory handle.
+    access = (0x001200A0 if directory else 0x00120081)
+    access |= (0x00000116 if writable else 0) | (0x00010000 if delete else 0)
     if attributes_only:
         access = 0x00120180  # READ_CONTROL, SYNCHRONIZE, READ/WRITE_ATTRIBUTES
     options = 0x00200000 | 0x20 | (1 if directory else 0x40) | (2 if writable else 0)
@@ -299,13 +304,18 @@ def unlock(fd):
 def _rename(handle, destination, name, *, replace=False):
     _component(name)
     encoded = name.encode("utf-16-le")
-    size = RenameInfo.name.offset + len(encoded)
-    buffer = c.create_string_buffer(max(size, c.sizeof(RenameInfo)))
+    size = c.sizeof(RenameInfo) + len(encoded)
+    buffer = c.create_string_buffer(size)
     info = c.cast(buffer, c.POINTER(RenameInfo)).contents
     info.replace, info.root, info.length = replace, destination.handle, len(encoded)
     c.memmove(c.addressof(buffer) + RenameInfo.name.offset, encoded, len(encoded))
-    if not _set_info(handle, 3, buffer, size):  # FileRenameInfo
-        _error()
+    # The Win32 FileRenameInfo wrapper rewrites relative names before calling
+    # NT, breaking a non-null RootDirectory. Call the native API directly so
+    # only the verified directory handle and this single component are used.
+    status = IoStatus()
+    result = _nt_set_info(handle, c.byref(status), buffer, size, 10)  # FileRenameInformation
+    if result < 0:
+        _error(_dos_error(result))
 
 
 def seal_file(parent, name):
