@@ -31,7 +31,11 @@ export function managedSetupPanel({h, t, api, guard, namespace, errorBox, opStat
     if (!secret) node.value = typeof saved[name] === "string" ? saved[name] : "";
     node.addEventListener("input", () => {
       if (!alive()) return;
-      if (!secret) {saved[name] = node.value; try {persist();} catch (error) {message.replaceChildren(errorBox(error));}}
+      if (!secret) {
+        saved[name] = node.value;
+        if (["url", "fingerprint", "profile_id"].includes(name)) {saved.import_profile_id = ""; profile.value = "";}
+        try {persist();} catch (error) {message.replaceChildren(errorBox(error));}
+      }
       unsaved.hidden = false;
     });
     fields.set(name, node);
@@ -139,11 +143,12 @@ export function managedSetupPanel({h, t, api, guard, namespace, errorBox, opStat
         const staged = await api("POST", "/managed/setup/secrets", {kind: kind === "host" ? "bat" : "github", value: tokenField.value});
         guard(); secretRef = staged.secret_ref; tokenField.value = "";
       }
-      const params = kind === "host" ? {url: value("url"), fingerprint: value("fingerprint"),
-        profile_id: value("profile_id") || "default", writes: checked("writes"), orchestrate: checked("orchestrate"),
+      const imported = kind === "host" && !secretRef && saved.import_profile_id;
+      const params = kind === "host" ? {...(imported ? {import_profile_id: imported} :
+        {url: value("url"), fingerprint: value("fingerprint"), profile_id: value("profile_id") || "default"}),
+        writes: checked("writes"), orchestrate: checked("orchestrate"),
         managed_roots: value("managed_roots").split(/\r?\n|;/).map(item => item.trim()).filter(Boolean),
-        ...(value("ssh_alias") ? {ssh_alias: value("ssh_alias")} : {}),
-        ...(!secretRef && saved.import_profile_id ? {import_profile_id: saved.import_profile_id} : {})}
+        ...(value("ssh_alias") ? {ssh_alias: value("ssh_alias")} : {})}
         : {host: value("repository_host"), workspace_id: value("workspace_id"), remote_url: value("remote_url"),
           allow_integrate: checked("allow_integrate"), allow_merge: checked("allow_merge"), allow_pr_update: checked("allow_pr_update")};
       if (secretRef) params.secret_ref = secretRef;
@@ -153,7 +158,7 @@ export function managedSetupPanel({h, t, api, guard, namespace, errorBox, opStat
       persist(); await sendOriginal(); await refresh();
     } catch (error) {
       if (alive() && saved.intent && !saved.intent.operation_id &&
-          ["CONFIGURATION_CHANGED", "SETUP_BUSY", "PRECONDITION_REQUIRED"].includes(error.code)) {
+          (error.admissionRefused || ["CONFIGURATION_CHANGED", "SETUP_BUSY", "PRECONDITION_REQUIRED"].includes(error.code))) {
         saved.intent.refused = error.code; persist();
       }
       showError(error);

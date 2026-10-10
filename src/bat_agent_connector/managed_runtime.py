@@ -240,6 +240,8 @@ async def serve(raw):
         doc.update(identity, state="ready", runtime_version=__version__)
         _write(root / MANIFEST, doc)
         daemon.managed_installation = {**doc, "data_dir": root}
+        from . import managed_setup
+        managed_setup.install(daemon)
         from .browser_sessions import BrowserSessions
         daemon.api.browser_sessions = BrowserSessions(daemon, root, doc["installation_id"])
 

@@ -173,7 +173,11 @@ async function api(method, path, body, key) {
   const epoch = state.epoch;
   const { status, data } = await connectorRequest(method, path, body, key, state.token);
   if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while the request was in flight");
-  if (status < 200 || status >= 300) throw new ApiError(status, data.error?.code, data.error?.message);
+  if (status < 200 || status >= 300) {
+    const error = new ApiError(status, data.error?.code, data.error?.message);
+    error.admissionRefused = data.error?.admission_refused === true;
+    throw error;
+  }
   return data;
 }
 function errorBox(e) {
