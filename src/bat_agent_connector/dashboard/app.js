@@ -3731,6 +3731,16 @@ var terminal$7 = (value) => [
 	"failed",
 	"cancelled"
 ].includes(value?.status);
+var admissionRefusals$3 = {
+	INVALID_PARAMS: 422,
+	INVALID_TARGET: 422,
+	NAME_TAKEN: 409,
+	PROJECT_NOT_FOUND: 404,
+	WORK_ITEM_NOT_FOUND: 404,
+	PROJECT_ARCHIVED: 409,
+	WORK_ITEM_ARCHIVED: 409,
+	WRONG_PROJECT: 409
+};
 function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId = null, onCreated, errorBox, opStatus }) {
 	const project = kind === "project", action = project ? "project.create" : "work_item.create";
 	const target = project ? {} : { project_id: projectId }, key = `batc.create.${namespace}.${kind}.${projectId || "root"}`;
@@ -3865,6 +3875,7 @@ function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId =
 		busy = true;
 		update();
 		status.replaceChildren();
+		let firstAttempt = false;
 		try {
 			guard();
 			if (!saved.intent) {
@@ -3883,6 +3894,7 @@ function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId =
 				};
 				localStorage.setItem(key, JSON.stringify(next));
 				saved = next;
+				firstAttempt = true;
 			}
 			const intent = saved.intent;
 			const result = intent.operation_id ? await api("GET", `/operations/${intent.operation_id}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
@@ -3890,14 +3902,8 @@ function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId =
 		} catch (error) {
 			try {
 				guard();
-				if (saved.intent && !saved.intent.operation_id && [
-					400,
-					401,
-					403,
-					404,
-					422
-				].includes(error.status)) {
-					saved.intent.refused = true;
+				if (firstAttempt && saved.intent && !saved.intent.operation_id && Object.hasOwn(admissionRefusals$3, error.code) && admissionRefusals$3[error.code] === error.status) {
+					saved.intent.initialAdmissionRefused = true;
 					persist();
 				}
 				status.replaceChildren(errorBox(error));
@@ -3920,7 +3926,7 @@ function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId =
 		hidden: true,
 		onclick: () => {
 			guard();
-			if (busy || !(terminal$7(operation) || saved.intent?.refused)) return;
+			if (busy || !(terminal$7(operation) || saved.intent?.initialAdmissionRefused)) return;
 			try {
 				const next = {
 					version: 1,
@@ -3947,9 +3953,9 @@ function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId =
 	}, scope, compact, advanced, h("div", { class: "actions" }, create, review, unsaved), status, receipt);
 	function update() {
 		for (const input of fields.values()) input.disabled = !allowed || !permitted() || busy || !!saved.intent || damaged;
-		create.disabled = !allowed || !permitted() || busy || damaged || !!saved.intent?.refused || !!saved.intent && terminal$7(operation);
+		create.disabled = !allowed || !permitted() || busy || damaged || !!saved.intent?.initialAdmissionRefused || !!saved.intent && terminal$7(operation);
 		create.textContent = t(saved.intent ? "create_check_original" : project ? "add_project" : "add_item");
-		review.hidden = !(saved.intent?.refused || saved.intent && terminal$7(operation) && operation.status !== "succeeded");
+		review.hidden = !(saved.intent?.initialAdmissionRefused || saved.intent && terminal$7(operation) && operation.status !== "succeeded");
 		review.disabled = busy || !allowed || !permitted();
 	}
 	if (damaged) status.replaceChildren(h("p", { class: "error" }, t("create_invalid_draft")));
