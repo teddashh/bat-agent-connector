@@ -17,7 +17,11 @@ page headings 20px and section headings 16px. Supporting orchestration text is 1
 Reuse `.panel` (14px padding, 10px radius, 1px border), `.capture-fields` (8px gap,
 wrapping 220px field basis), `.actions` (8px gap) and the primary/secondary/danger
 button variants (8px radius, 8px 14px padding). One primary submission per form.
-Use the existing 1100px main container; long instruction forms may narrow to 820px.
+Authenticated views use a persistent 260px project/work sidebar (230px below 1200px)
+and a flexible content area. The selected session puts conversation and reply first,
+with a 280px work/results inspector beside it at 1200px and above. Narrower screens
+place the inspector below the conversation; below 800px a button expands the tree.
+Connection-only screens retain the 1100px container; long forms may narrow to 820px.
 No new shadows or floating layers. Place status and recovery beside the original
 request. Exact IDs and literal inputs must wrap, never disappear behind ellipsis.
 

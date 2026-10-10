@@ -97,7 +97,10 @@ try {
   const delivered = await control({action: 'prepare-delivery', operations});
   for (const [index, page] of [web, desktop].entries()) {
     await page.goto(origin+'/dashboard/#/project/'+project.project_id);
-    const work = page.locator('[data-project-work="'+operations[index]+'"]');
+    await page.locator('.workspace-tree a[href="#/work/'+project.project_id+'/execution/'+operations[index]+'"]').click();
+    await expect(page.locator('.workspace-conversation')).toBeVisible();
+    await expect(page.locator('.workspace-nav')).toBeVisible();
+    const work = page.locator('[data-workspace-result] [data-project-work="'+operations[index]+'"]');
     await expect(work).toContainText('Result unverified');
     await expect(work).not.toContainText('done');
     await work.getByRole('link', {name: 'Review result and add to PR'}).click();
@@ -119,7 +122,7 @@ try {
   await control({action: 'verify-delivery', results: delivered.results});
   assert.equal(await desktop.evaluate(() => JSON.stringify({...localStorage, ...sessionStorage}).includes('batc.dashboard.token')), false);
   assert.deepEqual(errors, []);
-  console.log('Real central project creation/dispatch/delivery passed: a new project selects its configured repository in the UI; HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR using a pasted PR link with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
+  console.log('Real central project tree/conversation/creation/dispatch/delivery passed: a new project selects its configured repository in the UI; HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR using a pasted PR link with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
 } finally {
   await browser.close();
   if (child.exitCode === null && child.signalCode === null) child.stdin.end(JSON.stringify({action: 'stop'})+'\n');

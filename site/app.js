@@ -44,5 +44,5 @@
     });
   }
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
-  showView('attention');
+  showView('workspace');
 })();

@@ -258,7 +258,7 @@ for (const locale of ["en-US", "zh-TW"]) for (const width of [390, 768, 1440]) {
           commit_sha: "c".repeat(40), branch: "fixture", captured_at: 1, excerpt_messages: 0, dirty: 0}]}};
       });
       await page.goto("/dashboard/#/session/demo/session-1");
-      await page.locator("summary").first().click();
+      await page.locator(".workspace-evidence > summary").click();
       await page.locator("button.secondary").filter({hasText: locale === "en-US" ? "Start agent work from this version" : "從此版本建立 agent 工作"}).click();
       const note = page.locator("[data-confinement-note]");
       await expect(note).toContainText("acceptEdits");

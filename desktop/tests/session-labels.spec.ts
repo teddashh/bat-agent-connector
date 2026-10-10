@@ -91,9 +91,9 @@ for(const native of [false,true]){
 test('loaded session search matches labels while preserving title and grouping',async({page})=>{
  const state=await labelsFixture(page,false,{metadata:{version:1,labels:['Need-review','A','B']}});
  await page.goto('/dashboard/#/sessions');await expect(page.locator('.session-entry')).toHaveCount(1);
- await page.locator('input[type=search]').fill('need-review');await expect(page.locator('.session-entry')).toHaveCount(1);
+ await page.locator('#main input[type=search]').fill('need-review');await expect(page.locator('.session-entry')).toHaveCount(1);
  await expect(page.locator('.session-entry')).toContainText('Review the shared dashboard');await expect(page.locator('.session-entry')).toContainText('+1');
- await page.locator('input[type=search]').fill('not-loaded');await expect(page.locator('.session-entry')).toHaveCount(0);expect(state.posts).toHaveLength(0);
+ await page.locator('#main input[type=search]').fill('not-loaded');await expect(page.locator('.session-entry')).toHaveCount(0);expect(state.posts).toHaveLength(0);
 });
 for(const locale of ['en-US','zh-TW'])for(const width of [390,768,1440])test(`labels layout ${locale} ${width}`,async({page})=>{
  await page.addInitScript(language=>Object.defineProperty(navigator,'language',{value:language}),locale);

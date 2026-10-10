@@ -1,6 +1,15 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    workspace_navigation: "專案與工作", workspace_search: "搜尋已載入的專案與工作", workspace_manage: "新增／管理專案",
+    workspace_all_sessions: "所有工作階段", workspace_tools: "管理工具", workspace_connection: "連線 / Fleet",
+    workspace_expand: "展開 {name}", workspace_collapse: "收合 {name}", workspace_needs_you: "待你處理",
+    workspace_expand_load: "展開以載入工作", workspace_no_work: "尚未建立工作", workspace_no_match: "已載入的工作沒有符合項目。",
+    workspace_stale: "工作樹尚未更新，保留上次讀取的資料。", workspace_work_details: "工作與成果",
+    workspace_result: "成果與交付", workspace_result_empty: "尚無明確關聯的成果。可從下方保留 checkpoint。",
+    workspace_work_missing: "目前專案資料中找不到這筆工作，請重新整理工作樹。",
+    workspace_refresh: "重新讀取工作樹",
+
     connection_details: "連線詳細資訊與設定檔",
     delivery_repository_input: "儲存庫或 GitHub PR 網址",
     needs_manage_access: "目前帳號可以查看，但沒有編輯專案的權限。請向管理員取得具有專案管理權限的帳號，再到「連線」更換憑證。",
@@ -767,6 +776,14 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    workspace_navigation: "Projects and work", workspace_search: "Search loaded projects and work", workspace_manage: "Add / manage projects",
+    workspace_all_sessions: "All sessions", workspace_tools: "Tools", workspace_connection: "Connection / Fleet",
+    workspace_expand: "Expand {name}", workspace_collapse: "Collapse {name}", workspace_needs_you: "Needs you",
+    workspace_expand_load: "Expand to load work", workspace_no_work: "No work yet", workspace_no_match: "No matching loaded work.",
+    workspace_stale: "The tree could not refresh. Last observed work is retained.", workspace_work_details: "Work and results",
+    workspace_result: "Results and delivery", workspace_result_empty: "No linked result yet. You can record a checkpoint below.",
+    workspace_work_missing: "This work is no longer in the current project response. Refresh the work tree.",
+    workspace_refresh: "Refresh work tree",
     connection_details: "Connection details and configuration file",
     delivery_repository_input: "Repository or GitHub PR URL",
     needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",

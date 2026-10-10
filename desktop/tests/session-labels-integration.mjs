@@ -28,7 +28,7 @@ try{
  await panel.getByRole('button',{name:'Review current version and prepare change'}).click();await panel.getByRole('textbox').fill('Final labels');
  await panel.getByRole('button',{name:'Save labels',exact:true}).click();await expect(panel).toContainText('This label change was saved');
  await control({action:'verify',labels:['Final labels'],version:3});assert.notEqual(posts[2].key,posts[0].key);assert.equal(posts[2].body.preconditions.expected_version,2);
- await page.goto(`http://127.0.0.1:${fixture.port}/dashboard/#/sessions`);await page.locator('input[type=search]').fill('Final labels');
+ await page.goto(`http://127.0.0.1:${fixture.port}/dashboard/#/sessions`);await page.locator('#main input[type=search]').fill('Final labels');
  await expect(page.locator('.session-entry')).toHaveCount(1);assert.deepEqual(errors,[]);
  console.log('A03 real central labels passed: manual source bytes/HEAD/index/refs unchanged, zero BAT mutations, original key replay after later edit/reload, CAS version and loaded-list search.');
 }finally{
