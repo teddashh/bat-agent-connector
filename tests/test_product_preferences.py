@@ -79,6 +79,36 @@ async def test_host_failure_retains_explicit_stale_usage_without_zero_balance(da
     assert "PRIVATE HOST ERROR" not in json.dumps(stale)
 
 
+async def test_reconfigured_host_never_inherits_the_previous_source_cache(daemon, monkeypatch):
+    async def invoke(channel, params):
+        if channel == "agent:usage-snapshot":
+            return {"claude": {"provider": "claude", "fiveHour": {"utilization": .4},
+                               "accountEmail": "prior@example.test", "fetchedAt": time.time() * 1000}}
+        return []
+    client = daemon.fleet.client("h1")
+    monkeypatch.setattr(client, "invoke", invoke)
+    first = await preferences.read(daemon.ops, PERSON, "h1")
+    assert first["usage"]["providers"][0]["account_email"] == "prior@example.test"
+    assert "_source_binding" not in json.dumps(first)
+    daemon.fleet.config.host("h1").profile_id = "different-profile"
+    async def offline(*args):
+        raise OSError("unavailable")
+    monkeypatch.setattr(client, "invoke", offline)
+    changed = await preferences.read(daemon.ops, PERSON, "h1")
+    assert changed["usage"]["status"] == "unavailable" and changed["usage"]["providers"] == []
+    assert "prior@example.test" not in json.dumps(changed)
+
+
+async def test_source_change_during_observation_cannot_publish_under_new_host(daemon, monkeypatch):
+    async def racing(channel, params):
+        daemon.fleet.config.host("h1").profile_id = "changed-during-read"
+        return [{"id": "claude-code", "name": "Old source"}]
+    monkeypatch.setattr(daemon.fleet.client("h1"), "invoke", racing)
+    value = await preferences._observe(daemon.ops, "h1", "agents", "", "agent:list-presets", {}, preferences._agents)
+    assert value["status"] == "unavailable" and value["reason"] == "host_binding_changed"
+    assert not daemon.ops.db.execute("SELECT 1 FROM product_host_observations").fetchone()
+
+
 async def test_model_preferences_are_rotation_stable_but_scope_isolated(daemon):
     op, _ = daemon.ops.create(PERSON, action="preferences.models.update", target={"host": "h1"},
         params={"initial_agent": "codex"}, preconditions={"expected_revision": 0}, idempotency_key="personal")

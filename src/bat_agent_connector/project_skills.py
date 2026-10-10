@@ -15,7 +15,7 @@ import shlex
 import time
 from pathlib import Path
 
-from . import service, work_items
+from . import catalog_sources, service, work_items
 from .operations import ActionDef, OperationError
 
 HELPER = Path(__file__).with_name("skills_host_helper.py").read_text()
@@ -121,40 +121,51 @@ def _normalize(raw):
 
 async def _catalog(ops, project_id, host, workspace_id, *, refresh=False):
     _binding(ops, project_id, host, workspace_id)
+    binding = catalog_sources.host_binding(ops, host, skills=True)
     cached = ops.db.execute("SELECT * FROM project_skill_catalogs WHERE host=? AND workspace_id=?", (host, workspace_id)).fetchone()
+    cached_value = catalog_sources.cached_document(cached, binding)
+    if cached_value is None:
+        cached = None
     base = {"source": "host_workspace", "status": "unavailable", "skills": [], "complete": False,
             "stale": False, "catalog_digest": None, "observed_at": None, "reason": None}
     try:
         document = await asyncio.wait_for(service._workspace(ops.context["fleet"].client(host)), 10)
+        if catalog_sources.host_binding(ops, host, skills=True) != binding:
+            raise ValueError("host_binding_changed")
         matches = [row for row in document.get("workspaces", []) if isinstance(row, dict) and row.get("id") == workspace_id]
         if len(matches) != 1 or not isinstance(matches[0].get("folderPath"), str):
             raise ValueError("workspace_unavailable")
         folder = matches[0]["folderPath"]
-        if not folder.startswith("/") or ".." in folder.split("/"):
-            raise ValueError("skill_host_platform_unavailable")
         if cached and cached["folder"] != folder:
             cached = None  # never show a previous workspace binding as the new folder's catalog
+        if not folder.startswith("/") or ".." in folder.split("/"):
+            raise ValueError("skill_host_platform_unavailable")
         now = time.time()
         if cached and not refresh and now - cached["observed_at"] < 30:
-            return {**base, **json.loads(cached["document"]), "status": "available", "observed_at": cached["observed_at"]}
+            return {**base, **cached_value, "status": "available", "observed_at": cached["observed_at"]}
         adapter = ops.context.get("skill_host")
         if adapter is None:
             artifact_host = ops.context.get("artifact_host")
             adapter = SkillHost(getattr(artifact_host, "aliases", {}))
         raw = await adapter.scan(host, folder)
+        if catalog_sources.host_binding(ops, host, skills=True) != binding:
+            raise ValueError("host_binding_changed")
         value = _normalize(raw)
         value["catalog_digest"] = hashlib.sha256(json.dumps({"host": host, "workspace_id": workspace_id,
-            "folder": folder, "catalog": value["catalog_digest"]}, sort_keys=True).encode()).hexdigest()
+            "folder": folder, "source_binding": binding, "catalog": value["catalog_digest"]}, sort_keys=True).encode()).hexdigest()
         ops.db.execute("""INSERT INTO project_skill_catalogs VALUES(?,?,?,?,?,?)
             ON CONFLICT(host,workspace_id) DO UPDATE SET folder=excluded.folder,digest=excluded.digest,
                 document=excluded.document,observed_at=excluded.observed_at""",
-            (host, workspace_id, folder, value["catalog_digest"], json.dumps(value, sort_keys=True), now))
+            (host, workspace_id, folder, value["catalog_digest"],
+             json.dumps({**value, "_source_binding": binding}, sort_keys=True), now))
         return {**base, **value, "status": "available", "observed_at": now}
     except Exception as exc:  # noqa: BLE001 - never publish remote paths/errors/credentials
         reason = str(exc) if isinstance(exc, ValueError) and str(exc) in {
-            "workspace_unavailable", "skill_adapter_unavailable", "skill_host_platform_unavailable"} else "skill_inventory_unavailable"
+            "workspace_unavailable", "skill_adapter_unavailable", "skill_host_platform_unavailable", "host_binding_changed"} else "skill_inventory_unavailable"
+        if catalog_sources.host_binding(ops, host, skills=True) != binding:
+            cached, reason = None, "host_binding_changed"
         if cached:
-            return {**base, **json.loads(cached["document"]), "status": "available", "stale": True,
+            return {**base, **cached_value, "status": "available", "stale": True,
                     "observed_at": cached["observed_at"], "reason": reason}
         return {**base, "reason": reason}
 
@@ -213,9 +224,10 @@ def _admit(ops, principal, target, params, pre):
     saved = _check(ops, target, params, pre)
     row = ops.db.execute("SELECT * FROM project_skill_catalogs WHERE host=? AND workspace_id=?",
                          (params["host"], params["workspace_id"])).fetchone()
-    if row is None or time.time() - row["observed_at"] > 300:
+    cached = catalog_sources.cached_document(row, catalog_sources.host_binding(ops, params["host"], skills=True))
+    if cached is None or time.time() - row["observed_at"] > 300:
         raise OperationError("SKILL_CATALOG_CHANGED", "read the current host skill catalog before saving", 409)
-    _validate_catalog({**json.loads(row["document"]), "status": "available", "stale": False}, saved, params, pre)
+    _validate_catalog({**cached, "status": "available", "stale": False}, saved, params, pre)
 
 
 async def _run(ctx):

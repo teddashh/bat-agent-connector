@@ -101,6 +101,37 @@ async def test_unavailable_catalog_does_not_adopt_arbitrary_paths(context):
         await project_skills.read(daemon.ops, api_auth.Principal("none", frozenset()), project, "h1", workspace["id"])
 
 
+async def test_skill_cache_and_review_are_invalidated_when_host_binding_changes(context):
+    daemon, project, workspace, host = context
+    value = await project_skills.read(daemon.ops, PERSON, project, "h1", workspace["id"])
+    assert "_source_binding" not in json.dumps(value)
+    daemon.fleet.config.host("h1").profile_id = "new-profile"
+    with pytest.raises(OperationError, match="SKILL_CATALOG_CHANGED"):
+        daemon.ops.create(PERSON, action="project.skills.update", target={"project_id": project}, params={
+            "host": "h1", "workspace_id": workspace["id"], "selected": [REF]},
+            preconditions={"expected_revision": 0, "expected_catalog_digest": value["catalog"]["catalog_digest"]},
+            idempotency_key="old-host-catalog")
+    host.offline = True
+    changed = await project_skills.read(daemon.ops, PERSON, project, "h1", workspace["id"])
+    assert changed["catalog"]["status"] == "unavailable" and changed["catalog"]["skills"] == []
+    host.offline = False
+    refreshed = await project_skills.read(daemon.ops, PERSON, project, "h1", workspace["id"])
+    assert refreshed["catalog"]["catalog_digest"] != value["catalog"]["catalog_digest"]
+
+
+async def test_skill_host_change_during_scan_does_not_cache_old_source(context, monkeypatch):
+    daemon, project, workspace, host = context
+    original = host.scan
+    async def racing(*args):
+        document = await original(*args)
+        daemon.fleet.config.host("h1").profile_id = "changed-during-scan"
+        return document
+    monkeypatch.setattr(host, "scan", racing)
+    value = await project_skills.read(daemon.ops, PERSON, project, "h1", workspace["id"])
+    assert value["catalog"]["status"] == "unavailable" and value["catalog"]["reason"] == "host_binding_changed"
+    assert not daemon.ops.db.execute("SELECT 1 FROM project_skill_catalogs").fetchone()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="helper runs on the explicitly selected POSIX BAT host")
 def test_read_only_helper_binds_supporting_files_and_rejects_links(tmp_path):
     root = tmp_path / "workspace"
