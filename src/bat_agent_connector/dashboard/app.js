@@ -13148,7 +13148,12 @@ async function viewManagedSettings(main) {
 	});
 	main.append(setup.box);
 	await setup.load();
-	guard();
+	try {
+		guard();
+	} catch (error) {
+		setup.dispose();
+		throw error;
+	}
 	const fleetRoot = h("div");
 	main.append(fleetRoot);
 	let disposeFleet;
@@ -15158,7 +15163,8 @@ async function route() {
 		teardown = null;
 	}
 	freshPage();
-	const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+	let [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+	if (name === "home" && state.token && state.caps?.managed_installation && !state.caps.hosts?.length) name = "settings";
 	mountWorkspace(name);
 	const main = document.getElementById("main");
 	main.replaceChildren();

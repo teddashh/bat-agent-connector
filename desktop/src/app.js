@@ -2145,7 +2145,7 @@ async function viewManagedSettings(main) {
     onConfigured: async () => {const caps = await api("GET", "/capabilities"); guard(); state.caps = caps;}});
   main.append(setup.box);
   await setup.load();
-  guard();
+  try {guard();} catch (error) {setup.dispose(); throw error;}
   const fleetRoot = h("div"); main.append(fleetRoot);
   let disposeFleet;
   if (nativeDesktop) {
@@ -3340,7 +3340,8 @@ async function route() {
   state.viewReady = false;
   if (teardown) { teardown(); teardown = null; }
   freshPage();
-  const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+  let [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+  if (name === "home" && state.token && state.caps?.managed_installation && !state.caps.hosts?.length) name = "settings";
   mountWorkspace(name);
   const main = document.getElementById("main");
   main.replaceChildren();
