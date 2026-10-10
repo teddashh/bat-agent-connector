@@ -3,7 +3,7 @@ const refs = value => Array.isArray(value) && value.length <= 20 && value.every(
 const record = value => value && refs(value.selected) && Number.isInteger(value.revision) && value.revision >= 0 && digest(value.digest);
 const key = (host, workspace) => JSON.stringify([host, workspace]);
 const same = (a, b) => a.skill_id === b.skill_id && a.digest === b.digest;
-export function projectSkillsPanel({h, t, api, caps, guard, submit, projectId, storageKey, onEvents}) {
+export function projectSkillsPanel({h, t, api, caps, guard, submit, projectId, storageKey, onEvents, errorBox}) {
   let saved = {host: '', workspace: '', drafts: {}};
   try {const raw = JSON.parse(localStorage.getItem(storageKey)); if (raw && typeof raw.host === 'string' && typeof raw.workspace === 'string' && raw.drafts && typeof raw.drafts === 'object' && !Array.isArray(raw.drafts)) saved = raw;} catch { /* empty draft */ }
   let doc = null, draft = null, busy = false, discovery = 0, serial = 0, discoveredHost = '', discoveryReady = false;
@@ -103,7 +103,7 @@ export function projectSkillsPanel({h, t, api, caps, guard, submit, projectId, s
       saved.drafts[draftKey] = draft;
       if (draft.revision !== next.selection.revision || draft.digest !== next.catalog.catalog_digest) status.textContent = t('skills_conflict');
       render();
-    } catch (error) {try {guard(); if (request === serial) status.textContent = `${t('models_not_refreshed')} ${error.message || error}`;} catch { /* retired */ }}
+    } catch (error) {try {guard(); if (request === serial) {errorBox?.(error); status.textContent = `${t('models_not_refreshed')} ${error.message || error}`;}} catch { /* retired */ }}
   }
   async function discover(force = false) {
     if (!saved.host) return;

@@ -486,3 +486,6 @@ body.workspace-resizing, body.workspace-resizing * { cursor: col-resize !importa
   .workspace-resizer::after { left: 21px; }
 }
 .project-skills, .model-preferences, .result-sources { min-width: 0; overflow-wrap: anywhere; }
+
+.model-choice { min-width: 0; overflow-wrap: anywhere; }
+.model-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

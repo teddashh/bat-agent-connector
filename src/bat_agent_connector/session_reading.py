@@ -13,7 +13,7 @@ from collections import Counter
 
 from . import dashboard_sync
 from .operations import ActionDef, OpContext, OperationError
-from .summarize import summarize_message
+from .summarize import is_tool, summarize_message
 
 
 def schema(journal):
@@ -42,20 +42,34 @@ def schema(journal):
             PRIMARY KEY(principal_id,host,session_id))""")
 
 
-def index_messages(messages, *, complete):
+def index_messages(messages, *, complete, include_tools=False):
     """Called with source messages, before the response's text/size truncation."""
     visible = [summary for message in messages
                if (summary := summarize_message(message, include_tools=False, max_chars=2**31)) is not None]
     counts = Counter(summary.get("id") for summary in visible if isinstance(summary.get("id"), str))
+    # Tool details do not enter human read counts. They do occupy positions in
+    # an include_tools page, so anchors need offsets for the requested view.
+    offsets = {}
+    offset = 0
+    for message in reversed(messages):
+        if is_tool(message):
+            if include_tools:
+                offset += 1
+            continue
+        if summarize_message(message, include_tools=False, max_chars=50) is not None:
+            mid = message.get("id")
+            if isinstance(mid, str):
+                offsets[mid] = offset
+            offset += 1
     index = []
-    for offset, summary in enumerate(reversed(visible)):
+    for summary in reversed(visible):
         mid = summary.get("id")
         if not isinstance(mid, str) or not mid or len(mid) > 512 or counts[mid] != 1:
             complete = False
             continue
         revision = hashlib.sha256(json.dumps(summary, sort_keys=True, ensure_ascii=False,
                                              separators=(",", ":")).encode()).hexdigest()
-        index.append({"id": mid, "revision": revision, "page_offset": offset,
+        index.append({"id": mid, "revision": revision, "page_offset": offsets[mid],
                       "text": summary["text"]})
     return {"messages": index, "complete": bool(complete)}
 
@@ -116,13 +130,19 @@ def observe(journal, principal, response, *, generation=None):
         indexed = {message["id"]: message for message in snapshot["messages"]}
         for message in response["messages"]:
             source = indexed.get(message.get("id"))
-            if source:
+            if source and message.get("role") != "tool":
                 marked = journal.db.execute("""SELECT 1 FROM session_message_reads
                     WHERE principal_id=? AND host=? AND session_id=? AND message_id=? AND revision=?""",
                     (pid, host, sid, source["id"], source["revision"])).fetchone()
                 message["reading"] = {"revision": source["revision"], "unread": not bool(marked),
                                       "can_mark": message.get("text") == source["text"]}
     response["reading"] = reading(journal, principal, host, sid)
+    if snapshot is not None and response["reading"]["position"]:
+        position = response["reading"]["position"]
+        source = indexed.get(position["message_id"])
+        # The page offset belongs to this response's include_tools mode, even
+        # if a newer concurrent observer used a different transcript filter.
+        position["page_offset"] = source["page_offset"] if source else None
     return response
 
 

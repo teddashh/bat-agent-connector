@@ -1236,7 +1236,7 @@ async function viewSession(main, host, sid, context = null) {
   const loadMessages = async (offset = messageOffset, latest = false) => {
     if (offset == null) return;
     const request = ++messageRequest;
-    const get = offset => api("GET", `${path}/messages?last_n=30&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
+    const get = offset => api("GET", `${path}/messages?last_n=30&include_tools=true&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
     let read = await get(offset); assertView(connection);
     if (request !== messageRequest) return;
     const restore = firstMessages && readingSupported ? read.reading?.position : null;
@@ -2751,7 +2751,7 @@ async function viewWorkItem(main, wid) {
   kind.onchange = () => { ref.placeholder = t("link_ref_" + kind.value); };
   kind.onchange();
   const results = state.caps?.features?.work_item_results?.version === 1 ? resultSourcesPanel({h, t, api,
-    guard: () => assertView(connection), workItemId: wid, linkTarget, onEvents}) : null;
+    guard: () => assertView(connection), workItemId: wid, linkTarget, onEvents, errorBox}) : null;
   main.append(manageNote() || "", notice, reading, results?.box || "", panel);
   let displayedItem = null, renderQueue = Promise.resolve();
   const showReading = (w, progress) => {
@@ -3413,13 +3413,13 @@ async function route() {
   if (name === "settings" && state.caps?.features?.host_preferences?.version === 1) {
     const connection = {epoch: state.epoch, namespace: state.namespace, generation};
     preferences = modelPreferencesPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
-      storageKey: `batc.model-preferences.${connection.namespace}`, onEvents});
+      storageKey: `batc.model-preferences.${connection.namespace}`, onEvents, errorBox});
     main.append(preferences.box);
   }
   if (name === "project" && state.caps?.features?.project_skills?.version === 1) {
     const connection = {epoch: state.epoch, namespace: state.namespace, generation};
     skills = projectSkillsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
-      projectId: rest[0], storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`, onEvents});
+      projectId: rest[0], storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`, onEvents, errorBox});
     main.append(skills.box);
   }
   teardown = () => {off?.(); preferences?.dispose(); skills?.dispose();};

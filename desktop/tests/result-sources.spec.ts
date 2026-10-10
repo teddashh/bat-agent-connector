@@ -3,10 +3,11 @@ import {attentionFixture, mountAttention} from './attention-fixture.ts';
 for (const native of [false, true]) test(`explicit result lineage, partial children and unknown consumption remain distinct (${native ? 'IPC' : 'Web'})`, async ({page}) => {
   const f = attentionFixture(), [parent, child, accepted] = f.data.items, errors: string[] = [];
   const summary = (item: any) => ({...item, links: [], result_artifacts: [], links_truncated: false, artifacts_truncated: false});
-  let failed = false;
+  let failed = false, sourceReads = 0;
   const dispatch = async (input: any) => {
     const url = new URL(input.path, 'http://fixture'), path = url.pathname;
     if (path.endsWith('/result-sources')) {
+      sourceReads++;
       if (failed) return {status: 503, data: {error: {code: 'UNAVAILABLE', message: 'Result source unavailable'}}};
       const artifact = {artifact_id: 'art_'+'a'.repeat(32), revision: 2, digest: 'd'.repeat(64), display_name: 'Child report', state: 'ready', available: true,
         source_operation_id: 'op_'+'a'.repeat(32), recorded_consumers: [{owner_kind: 'work_item', owner_id: parent.work_item_id, role: 'input'}], live_consumers: 'unknown'};
@@ -35,6 +36,11 @@ for (const native of [false, true]) test(`explicit result lineage, partial child
   await expect(panel.locator('[data-result-child]')).toHaveCount(2); await expect(panel.getByRole('button', {name: 'Load more child work', exact: true})).toBeHidden();
   failed = true; await panel.getByRole('button', {name: 'Refresh result sources', exact: true}).click();
   await expect(panel).toContainText('retaining the last observation'); await expect(panel.getByRole('link', {name: 'Child report', exact: true})).toBeVisible();
+  const beforeEvent = sourceReads; f.data.cursor = 1;
+  await expect.poll(() => sourceReads).toBeGreaterThan(beforeEvent);
+  expect(f.data.reads.some(path => path.startsWith('/events?after=1'))).toBe(false);
+  failed = false;
+  await expect.poll(() => f.data.reads.some(path => path.startsWith('/events?after=1')), {timeout: 15000}).toBe(true);
   // Original text remains verbatim behind its compact summary.
   const original = page.locator('#main details').filter({has: page.locator('summary', {hasText: 'Request'})}).last();
   await original.locator('summary').click(); await expect(original.locator('.pre')).toHaveText(parent.request);
