@@ -32,7 +32,7 @@ Connector 經 SSH git 自己建立的 worktree（checkpoint 的 `batc-cp-…`、
 
 Reviewer 的 session 建立紀錄不證明共享 worktree 的建立者。Registry root walk 若停在沒有 connector marker 的 reviewer（例如只有 task_id、缺 lead_session_id 的舊列），maker 為 `unknown`，BAT 的 rehydrate／merge／remove 同樣回 `NOT_A_BAT_WORKTREE` 並說明 creation root 無法證明；managed_roots 不繞過此限制。Policy 不為 raw CLI 啟動 daemon 或猜 journal 路徑。Observation 可用自己 journal 的 lead 證據保存身分，但不能代替 mutation grant；已證明的共享 carrier 與 session 動作沿用原規則。
 
-`legacy_shared_clone` 的 worktree 仍在人工 clone 內，共用它的 refs 與物件庫（見 git-worktree(1)），不是完整隔離。只有 `managed_clone` 符合計畫 §07 的獨立 clone。位於人工資料夾的 connector session 是 §24 說的 legacy boundary：保留觀測與歷史，全部唯讀（包括 stop），由 Ted 在 BAT 處理。
+`legacy_shared_clone` 的 worktree 仍在人工 clone 內，共用它的 refs 與物件庫（見 git-worktree(1)），不是完整隔離。只有 `managed_clone` 符合計畫 §07 的獨立 clone。位於人工資料夾的 connector session 是 §24 說的 legacy boundary：保留觀測與歷史，全部唯讀（包括 stop），由操作者在 BAT 處理。
 
 ## 寫入前即時核對
 

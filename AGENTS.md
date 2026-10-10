@@ -46,7 +46,7 @@ read-only checkpoint continuation. Do not revive excluded work from the older pl
 actions use their established operation/scopes authorization; do not add redundant chat
 confirmation to an already authorized UI action.
 
-## Local test temporary data (Castle1 memory rule, 2026-10-09)
+## Local test temporary data
 
 - Never put pytest basetemps, fixtures, SQLite/Git scratch or other test data in
   `/dev/shm` or any tmpfs. Leftover RAM-backed fixtures contributed to a host-wide OOM.

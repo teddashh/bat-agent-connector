@@ -33,7 +33,7 @@ dry-run 預覽保留。完整錯誤與 recovery 合約見 [session-permissions.m
 | 主體 | 取得方式 | 權限 |
 |---|---|---|
 | `local-admin` | daemon 的 `task-admin.token`（0600） | 全部 |
-| API token | `batc api-token issue --actor ted-dashboard --scope observe --scope operate` | 發行時指定的 scopes |
+| API token | `batc api-token issue --actor operator-dashboard --scope observe --scope operate` | 發行時指定的 scopes |
 
 Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅動 managed session）、`start`（開新的 managed agent session，例如 `checkpoint.continue`）、`manage`（專案、工作項目與連結）、`approve`（確認工作項目完成；與 `manage` 分開，回報完成的 agent 不能自己簽核，見 [work-items.md](work-items.md)）、`merge`、`deploy`、`integrate`（PR metadata 更新與把成果推送到 head 分支；兩個 action 分開，metadata 另需 repo allow_pr_update，見 [delivery.md](delivery.md)／[integration.md](integration.md)）、`cleanup`（reviewed resource cleanup／release）、`cleanup_discard`（只丟棄未提交內容；person-controlled，agents 不要求，Hermes／Grokbot tokens 不給）。Journal 只存 token 的 SHA-256。操作的 actor 一律取自 token；request body 或 MCP 參數自報的名字沒有授權效果。冪等鍵的唯一性以 actor 為範圍：同 actor、同 key、同內容回原 operation；同 key 不同內容回 409。
 
@@ -261,7 +261,7 @@ Restore、reviewed task cleanup、TaskDaemon tombstone backfill 在 Part B；clo
 
 Task-bound operation 受理時固定 task `control_version`；session target 另固定 host／session／role，存於 `external_refs.admission_binding`（server admission binding，不是 caller precondition）。省略 `preconditions.control_version` 也不能跨 pause／resume 或換 session 執行：第一個 effect 前以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` failed，零 frame／command／task write。request hash 與 caller preconditions 不變；同 key 仍重讀原成功或拒絕。pause／resume 不覆寫較新 incarnation；已成功 receipt／未知 frame readback 沿用原恢復。升級前無 binding 的 operation 保留原 execution-time binding。詳見[盤點與儲存規則](operations-unification.md)。
 
-原 task／continuation／pause／resume／stage／observed verification／request-Ted／reconcile 的 local effect 與 operation step receipt 同交易提交，不另建 task 狀態表。pause 先保存 paused／control_version，abort 再記獨立 step；等待 task lock 或 verifier 不延後 pause 的持久化。RPC 最多等 30 秒；未完成時以 operation ID 回查，pause 可回已保存的 task snapshot。reconcile capability 只存 hash，消耗與回執原子提交；已消耗的 capability 只能用原 key 重讀自己的 operation，不能建立新控制。
+原 task／continuation／pause／resume／stage／observed verification／request-user／reconcile 的 local effect 與 operation step receipt 同交易提交，不另建 task 狀態表。pause 先保存 paused／control_version，abort 再記獨立 step；等待 task lock 或 verifier 不延後 pause 的持久化。RPC 最多等 30 秒；未完成時以 operation ID 回查，pause 可回已保存的 task snapshot。reconcile capability 只存 hash，消耗與回執原子提交；已消耗的 capability 只能用原 key 重讀自己的 operation，不能建立新控制。
 
 task command receipt succeeded 時，`external_refs.task_id`／`command_id`／`control_version` 已與 receipt 同交易保存，版本來自 command 的 dispatch binding；prepared operator command 也適用。舊缺 refs 的 receipt 在 operation 恢復／讀回前修復 link，不重跑 effect 或派送 frame；standalone operation 不寫 task refs。
 

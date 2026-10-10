@@ -13,8 +13,7 @@
 
 ## 原始需求與後續澄清
 
-已核對產品負責人提供的[原始對話](https://chatgpt.com/share/6ac857db-524c-83ea-a8d1-6d484fea09b9)
-中的使用者需求及關鍵架構討論。核心是：使用者在 BAT desktop/mobile 開發，Hermes／Grokbot
+以下整理產品需求與架構決策。核心是：使用者在 BAT desktop/mobile 開發，Hermes／Grokbot
 經 Connector 派工，Dashboard 統一呈現專案、工作、sessions、worktrees、成果與歷史，並能直接
 執行同一套中央管理操作。Fleet 負責 client 的連線與啟動；Project Hub 提供可重用的管理規則
 與介面。人工資源永久唯讀，Agent 在獨立 managed clone/worktree 開工，成果經 Git／共同 PR 整合。

@@ -61,7 +61,7 @@ Git commit 作為來源，不要求 artifact adapter，也不把個別 artifact 
 1. 讀 PR（daemon 的 GitHub token，只讀）。PR 已關閉、head 在 fork、head 分支是 base、預設分支或 `integrate.protected_refs` 中的分支時，直接回帶 `blocking` 的預覽，不碰主機。
 2. `prepare`：建立整合區；以主機憑證 `ls-remote` PR 分支與 `refs/pull/<n>/head`；逐一讀來源的 tip、以 SHA 從記錄的位置 fetch（本機路徑優先），釘在 `refs/batc/pv/<12 hex>/src/<seq>`；最後 fetch PR head 並做 `push --dry-run`。
 3. `analyze`：每個來源的 merge base、會進 PR 的 commit（最多列 200 個，另給總數）、檔案、PR 那邊改過的檔案；從 PR head 開始依序模擬 fast-forward、merge 或 pick。第一個衝突之後的來源標 `not_predicted`。
-4. 每個 commit 標 `own`（來源自己的工作）、`from_seq_N`（另一個已選來源的工作）或 `foreign`。例如 agent 分支從 Ted 尚未推送的 checkpoint commit 開始，只選 agent 成果時那個 commit 也會進來，預覽標 `foreign` 並警告 `BRINGS_FOREIGN_COMMITS`。這是「不悄悄多加來源」的做法：每個會進 PR 的 commit 都列出來。
+4. 每個 commit 標 `own`（來源自己的工作）、`from_seq_N`（另一個已選來源的工作）或 `foreign`。例如 agent 分支從 操作者 尚未推送的 checkpoint commit 開始，只選 agent 成果時那個 commit 也會進來，預覽標 `foreign` 並警告 `BRINGS_FOREIGN_COMMITS`。這是「不悄悄多加來源」的做法：每個會進 PR 的 commit 都列出來。
 
 `blocking`（不能 apply）：`PR_CLOSED`、`PR_HEAD_IN_FORK`、`TARGET_REF_FORBIDDEN`、`INTEGRATION_IN_PROGRESS`、`MERGE_IN_PROGRESS`、`REMOTE_REF_MISSING`、`REMOTE_IDENTITY_MISMATCH`（主機的遠端與 GitHub 對 PR head 說法不同：`remote_url` 指到別的 repository，或 GitHub 還沒更新）、`PUSH_ACCESS_DENIED`、`SOURCE_MISSING_REF`、`SOURCE_UNAVAILABLE`、`SOURCE_UNRELATED`、`PICK_*`、`LFS_UNSUPPORTED`、`NOTHING_TO_INTEGRATE`。預計衝突不擋：apply 會停在那裡。
 
@@ -117,8 +117,8 @@ Receipt 記 `location_class`（`human_checkout`、`managed_clone`、`remote`）�
 
 Daemon 的 `[github]` token 只用來讀 PR（Pull requests read、Metadata read），不送到主機，不放進 URL 或腳本。每個 git 網路操作都在 BAT 主機上以 SSH alias 的使用者、用那個使用者對 `remote_url` 的 git 憑證執行（SSH key、deploy key、credential helper）。所以：
 
-- GitHub 把推送記在那個憑證的帳號，不是 GitHub App，也不一定是 Ted；operation 另外記錄 API actor 與 `pushed_via: {host, remote_url, credential: "host"}`。
-- Connector 無法縮小那個憑證。若它是 Ted 的個人 key 或管理員，connector 的推送靠上面的檢查不會強推或刪分支，但同一 OS 使用者下的 agent session 也能用它推送；agent 自己的推送會以 `REMOTE_MOVED` 出現，而不是被阻擋。建議用 machine user 或每個 repository 的可寫 deploy key（沒有 admin 或 bypass），並以分支保護擋強推與刪除。
+- GitHub 把推送記在那個憑證的帳號，不是 GitHub App，也不一定是 操作者；operation 另外記錄 API actor 與 `pushed_via: {host, remote_url, credential: "host"}`。
+- Connector 無法縮小那個憑證。若它是操作者的個人 key 或管理員，connector 的推送靠上面的檢查不會強推或刪分支，但同一 OS 使用者下的 agent session 也能用它推送；agent 自己的推送會以 `REMOTE_MOVED` 出現，而不是被阻擋。建議用 machine user 或每個 repository 的可寫 deploy key（沒有 admin 或 bypass），並以分支保護擋強推與刪除。
 - 憑證必須不需互動（`GIT_TERMINAL_PROMPT=0`、BatchMode）。預覽的 `push --dry-run` 在按鈕啟用前證明能推送；`integrate.hosts` 指定哪些主機可以推送這個 repository，因為不同主機的憑證可能不同。
 - 用真實帳號推送會觸發 PR 的 workflows（GITHUB_TOKEN 的推送不會），分支保護也可能撤銷舊的 approval。
 

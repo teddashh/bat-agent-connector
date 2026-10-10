@@ -2,7 +2,7 @@
 
 接續 [前輪整合](2026-10-08-tauri-v2.md)；追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)。
 產品負責人澄清 v1/v2 是同一產品、不同 UI 設計修訂，共用功能 backlog。Tauri 介面、中央 Python authority、人工唯讀、排除 Hub importer 的既定決策保留。
-最新 exact-head CI、合併與 private installer pin 證據在 #55 關聯 PR，不能把以下個別分支結果當整組 full。
+最新 exact-head CI、合併與 外部安裝版本 證據在 #55 關聯 PR，不能把以下個別分支結果當整組 full。
 
 ## 已整合來源
 
@@ -39,4 +39,4 @@ Desktop CI 現在跑 `test:central/cleanup/artifacts/delivery/observation/captur
 3. 固定下一候選 code/skill/installer pins，維持唯一 owner。既有 installer 可做 verify-only/mock 驗證；本輪沒有真安裝、host/provider writes。
 4. Windows installed/WebView/tray/credentials、逐 host confinement、同 RC 的 46 項 I/L 驗收仍缺；Linux production gate #53 保留。
 
-原 checkout 與 Claude worktrees 保留。新工作線在 `~/agent-work/bac-v2/continuation`、`ops-controls`、`capture-ui`、`remove-guard`；installer pin 工作線另在 `installer-next`。共用核心由主協調整合，full local tests 使用原共用 lock。Bot quota 不當乾淨 verdict；本輪使用獨立 Codex peer review。
+共用核心由單一整合者處理，完整本機測試依序執行；本輪使用獨立 peer review。

@@ -283,7 +283,7 @@ Backfill 事件只在 resource history 或明確 `kind=history.backfilled` 的 e
 
 ## Provenance 與 actor evidence
 
-每個 event 回以下 `context`；鍵必須存在，不知道的單值用 null 並在 `unknown_fields` 列原因，陣列用空陣列。Dashboard 顯示「unknown／來源未證實」與現有證據，不能把 null 默認成 Ted 或 Hermes。事件發生者與看見事件的人分開。
+每個 event 回以下 `context`；鍵必須存在，不知道的單值用 null 並在 `unknown_fields` 列原因，陣列用空陣列。Dashboard 顯示「unknown／來源未證實」與現有證據，不能把 null 默認成 操作者 或 Hermes。事件發生者與看見事件的人分開。
 
 | 欄位 | 來源與規則 |
 |---|---|
@@ -494,7 +494,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B02；§11 | `test_b02_unchanged_field_freshness_polls_emit_no_events`：連續相同失敗／成功、僅 field_observed_at／last_activity_ms 前進都不寫事件。`test_b02_field_evidence_only_change_and_old_digest_upgrade`：僅 evidence enum 改變寫 update，fields_stale 保持 false；舊 digest 首輪相同 poll 不誤發。 |
 | B02；§10、§11 | `test_b02_cursor_catchup_sse_resume_and_hidden_backfill`：分頁 gap catch-up、Last-Event-ID resume 不重複、backfill 不進 live feed、超前 cursor 422。 |
 | B02；§11、§19（Part B） | `test_b02_dashboard_reopen_and_sse_gap_without_duplicates`（待第二步）：瀏覽器 baseline/reopen、frame 碎片/重疊/去重、token 更換、filters/草稿及 typing hold；Playwright 驗證。 |
-| B03；§08、§11 | `test_b03_unknown_human_claim_is_not_api_actor_or_git_author`、`test_b03_rpc_admin_identity_is_not_claimed_human`：自報 Ted 保持 claim，RPC admin 是 local-admin；Git author 不升為 API actor。 |
+| B03；§08、§11 | `test_b03_unknown_human_claim_is_not_api_actor_or_git_author`、`test_b03_rpc_admin_identity_is_not_claimed_human`：自報 操作者 保持 claim，RPC admin 是 local-admin；Git author 不升為 API actor。 |
 | B02、B03；§11 | `test_b03_states_unknown_no_tab_and_field_times`：meta null／失敗、無 tab、journal-only null、離線與 gone 分軸；失敗不刷新上一個 activity 時間。Main 沒有可證明 session 終止的正式 journal source，因此 lifecycle 保持 unknown，不用 gone／turn abort 推論 ended。 |
 | B03；§08、§11 | `test_b03_backfill_hidden_idempotent_and_unknown_boundaries`、`test_b03_migration_failure_rolls_back_and_restart_recovers`、`test_b03_backfilled_occurrence_time_filters_are_not_migration_time`：舊 journal 回填、全交易失敗回滾、重啟不重複、未知 range 邊界、原發生時間與隱藏 cursor。 |
 | B03；§08、§11 | `test_b03_version_one_journal_runs_observation_backfill_once`：版本 1 → 2 回填一次；重開及已為 2 的 journal 不執行；新 journal 為 2，不重複回填。 |
@@ -505,7 +505,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B03；§08、§11 | `test_b03_version_one_closure_reconstructs_the_final_command`：真正沒有 relation 事件的版本 1 task 從兩個 commands 重建 closed revision，ended_at=null。`test_b03_legacy_closure_event_cannot_erase_its_reconstructed_command`：舊 relation.closed 的 null 不覆蓋已證明的最後 command，原 core event body 保留；既有 projection failure 測試持續保證核心寫入與 gap flag。 |
 | B01、B03；§08、§10、§11、§16 | `test_b01_b03_delivered_merge_history_uses_only_explicit_refs`：真實 fake GitHub merge/verify steps、session refs、worktree refs、無來源時不造關聯；PR title/body 不進事件摘要。`test_b01_delivery_preview_late_binding_respects_history_as_of`：晚到的 preview binding 不改舊游標結果。 |
 | B03；§08、§10、§11、§16 | `test_b03_merge_receipt_history_keeps_moved_base_shas_without_commit_messages`：queue 受理後 base 前進，保存 actual merged/onto SHA、額外 commits 數量/parents，不回 commit message；後續 mutable refs 不改舊 receipt/context。 |
-| B03；§08、§10、§11、§15 | `test_b03_metadata_settlement_history_has_codes_without_pr_text`：not_applied/conflict 回執各一事件、不重送 PATCH、不將背景觀測歸為 Ted。`test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text`：版本 1 已有 delivery tables/documents，回填一次至 2、重開無寫入、原 documents 保留、原時間與未知 actor 保留。 |
+| B03；§08、§10、§11、§15 | `test_b03_metadata_settlement_history_has_codes_without_pr_text`：not_applied/conflict 回執各一事件、不重送 PATCH、不將背景觀測歸為 操作者。`test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text`：版本 1 已有 delivery tables/documents，回填一次至 2、重開無寫入、原 documents 保留、原時間與未知 actor 保留。 |
 | B03、C07；§08、§09、§10、§11、§15 | `test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text`：acknowledged PATCH 的 conflict settlement 可從 operation events 與明確來源 session history 讀到，保留 code、排除 PR text；live/backfill 兩路徑驗證，重複 insert 保留原回執、不追加事件，重開不重複回填。既有 `test_metadata_acknowledged_write_conflict_settles_and_releases_pr` 保持全部 delivery assertions。 |
 | B01、B03；§08、§11 | `test_projection_failure_keeps_core_write_and_flags_event`：task state 與 operation step 的投影例外只回滾 savepoint，核心寫入及外部 step 成功；history 顯示 projection_error，無部分 resource／relation rows。 |
 | B01、B03；§08、§10、§11 | `test_b01_b03_relation_history_keeps_roles_and_strips_free_text`：lead/reviewer 共用 session，execution/session history 的 opened/bound/closed 都保留 role；live 與版本 1 重播各驗證，nested source/result versions 的 role 保留，備註/prompt/commit message 仍移除，重開不追加事件。 |
