@@ -74,6 +74,7 @@ input, select, textarea { font: inherit; color: var(--text); background: var(--p
   border-radius: 8px; padding: 7px 10px; max-width: 100%; min-width: 0; }
 .connection-token { width: min(100%, 28rem); }
 .connection-token input { display: block; width: 100%; }
+.connection-controls { align-items: end; }
 .delivery-controls { align-items: end; }
 .delivery-controls label { display: grid; gap: 4px; min-width: 0; }
 .delivery-controls label:first-child { flex: 1 1 260px; }

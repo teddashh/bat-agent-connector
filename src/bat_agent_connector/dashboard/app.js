@@ -11610,7 +11610,7 @@ function viewSettings(main) {
 		scopes: state.caps.scopes.join(", ")
 	});
 	else if (state.connectionError) info.replaceChildren(errorBox(state.connectionError));
-	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("div", { class: "filters" }, h("label", { class: "connection-token" }, t("token"), input), h("button", {
+	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("div", { class: "filters connection-controls" }, h("label", { class: "connection-token" }, t("token"), input), h("button", {
 		class: "primary",
 		onclick: async () => {
 			disconnect();
@@ -11822,7 +11822,7 @@ async function viewNativeSettings(main) {
 		if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
 		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
 		if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
-		else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
+		else if (!status.credential_available && !status.configuration_setup) info.append(h("p", {}, t("desktop_credential_missing")));
 		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
 		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
 		enroll.hidden = status.enrollment_supported !== true;
@@ -11905,7 +11905,7 @@ async function change(out, action, target, params, pre, scope) {
 	return null;
 }
 function manageNote() {
-	return may("manage") ? null : h("p", { class: "note" }, t(nativeDesktop ? "needs_manage_access" : "needs_manage_scope"));
+	return may("manage") ? null : h("p", { class: "note" }, t("needs_manage_access"));
 }
 function indent(el, depth) {
 	el.style.setProperty("--depth", String(depth));
