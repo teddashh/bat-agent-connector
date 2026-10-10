@@ -105,6 +105,10 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 
 [Windows 使用與資源指南](docs/windows.zh-TW.md) · [NSIS 驗證包](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet 設定範例](desktop/fleet.example.json) · [Rust Fleet 原始碼](desktop/fleet-core/README.md)
 
+新的 Windows Fleet 安裝可直接使用原生 Rust backend 與[公開設定範本](docs/design/fleet-configuration.md)。
+填入自己的主機、SSH alias 與 BAT profiles 即可配置，不需要維護者的機隊資料或私有 Kit checkout。
+既有安裝仍可選用 PowerShell 相容 backend。
+
 ## 平台與安裝包
 
 這版原始碼提供以下平台的打包流程。CI 與安裝 fixture 證據須核對精確來源 commit；原始碼實作、套件建置成功與使用者實際環境，是不同的證據。
