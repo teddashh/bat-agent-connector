@@ -1,7 +1,6 @@
 """Windows equivalent of pytest-disktmp, with an explicit disk basetemp and cleanup."""
 
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -19,9 +18,15 @@ try:
     raise SystemExit(result.returncode)
 finally:
     def remove_sealed_fixture(function, path, exception):
-        if not isinstance(exception, PermissionError):
+        owned = Path(path)
+        if not isinstance(exception, PermissionError) or not owned.is_relative_to(temporary) or owned.is_symlink() or not owned.is_file():
             raise exception
-        # Only this disposable test tree contains intentionally sealed artifacts.
-        Path(path).chmod(stat.S_IWRITE | stat.S_IREAD)
-        function(path)
+        from bat_agent_connector import platform_files
+        # Use the same verified-handle deletion exercised by the cleanup fixture;
+        # Win32 path deletion can still refuse sealed artifacts after chmod.
+        parent = platform_files.native.open_dir(owned.parent)
+        try:
+            platform_files.native._remove_child(parent.handle, owned.parent, owned.name, directory=False)
+        finally:
+            parent.close()
     shutil.rmtree(temporary, onexc=remove_sealed_fixture)
