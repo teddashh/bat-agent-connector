@@ -182,7 +182,9 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 
 /* Attachment rows use the existing compact form and row styles. */
 .attachments { margin-block: 12px; }
+.attachments.drag-over, textarea.drag-over { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: 6px; }
 .attachments input[type="file"] { width: 100%; }
+.attachment-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); flex-shrink: 0; }
 .attachment-list .grow { overflow-wrap: anywhere; min-width: 0; }
 .attachment-list select { max-width: 100px; }
 

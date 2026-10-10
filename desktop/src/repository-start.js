@@ -101,8 +101,9 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   }
   const showError = e => {if (current()) status.replaceChildren(errorBox(e));};
   const selected = () => ({target: saved.target, source_ref: branchRef(saved.source_ref)});
+  const effectivePrompt = () => saved.prompt.trim() ? saved.prompt : (attachments?.refs().length ? t('dispatch_inspect_images') : saved.prompt);
   const request = () => ({action: 'repository.continue', target: saved.target,
-    params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: saved.prompt,
+    params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: effectivePrompt(),
       ...(saved.title ? {title: saved.title} : {}), ...(saved.model && expanded() ? {model: saved.model} : {}),
       ...(attachments?.refs().length ? {artifacts: attachments.refs()} : {}), ...(project ? {project_id: project} : {}),
       ...(repairSeed ? {work_item_id: repairSeed.work_item_id} : {})},
