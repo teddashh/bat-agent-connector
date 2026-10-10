@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import platform_files
+from ._bounded import capture
 from .config import state_dir
 
 
@@ -177,7 +178,7 @@ class ObservedVerifier:
                                                     stdout=asyncio.subprocess.PIPE,
                                                     stderr=asyncio.subprocess.DEVNULL)
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+            stdout, _ = await asyncio.wait_for(capture(proc, 4096), timeout)
         except BaseException:
             if proc.returncode is None:
                 proc.kill()
@@ -277,9 +278,10 @@ class ObservedVerifier:
                                                           stdout=asyncio.subprocess.PIPE,
                                                           stderr=asyncio.subprocess.DEVNULL)
             try:
-                out, _ = await asyncio.wait_for(killer.communicate(), 30)
-            except asyncio.TimeoutError:
-                killer.kill()
+                out, _ = await asyncio.wait_for(capture(killer, 4096), 30)
+            except (asyncio.TimeoutError, ValueError):
+                if killer.returncode is None:
+                    killer.kill()
                 await killer.wait()
                 out = b""
             if killer.returncode != 0 or out.strip() != b"gone":

@@ -92,6 +92,7 @@ def test_importer_never_copies_tokens(tmp_path):
     (pdir / "remote-tokens.enc.json").write_text(
         json.dumps({"enc": False, "data": json.dumps({"tokens": {"box-a": "SUPERSECRETTOKEN"}})})
     )
+    (pdir / "remote-tokens.enc.json").chmod(0o600)
     text = render_hosts_toml(read_bat_profiles(pdir), profiles_dir=str(pdir), rename={"box-a": "a1"})
     assert "SUPERSECRETTOKEN" not in text and 'token_ref = "bat-profile:box-a"' in text
     cfg = parse_config(tomllib.loads(text))
@@ -104,6 +105,7 @@ def test_importer_never_copies_tokens(tmp_path):
     {"enc": False, "data": '["damaged"]'}, {"enc": False, "data": {"tokens": ["damaged"]}}])
 def test_damaged_bat_profile_tokens_report_unavailable(tmp_path, document):
     (tmp_path / "remote-tokens.enc.json").write_text(json.dumps(document))
+    (tmp_path / "remote-tokens.enc.json").chmod(0o600)
     config = parse_config({"hosts": {"fixture": {"url": "wss://127.0.0.1:1/", "fingerprint": "AA" * 32,
         "token_ref": "bat-profile:fixture", "bat_profiles_dir": str(tmp_path)}}})
     host = config.host("fixture")
