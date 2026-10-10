@@ -47,6 +47,8 @@ export const nativeFilesControl = (transferId: string, action: string) => invoke
 export const nativeFilesSave = (reference: unknown) => invoke<any>("native_files_save", {reference});
 export const nativeFilesPreview = (reference: unknown) => invoke<any>("native_files_preview", {reference});
 export const nativeConnect = () => invoke<any>("connector_connect");
+export const managedControl = (input: {action: "status" | "open_browser"} | {action: "set_login"; enabled: boolean}) =>
+  invoke<any>("managed_control", {input});
 export const nativeDisconnect = () => invoke<void>("connector_disconnect");
 export const nativeEnroll = () => invoke<any | null>("connector_enroll", {
   locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
