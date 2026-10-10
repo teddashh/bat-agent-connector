@@ -30,7 +30,8 @@ from .config import DEFAULT_BAT_PROFILES_DIR, normalize_fingerprint, parse_confi
 from .errors import ConfigError, TokenUnavailable
 from .github import GitHubClient
 from .operations import RERUN, TERMINAL, ActionDef, OperationError, Uncertain
-from .redact import register_secret
+from .redact import redact, redact_secrets, register_secret
+from .task_verifier import parse_settings
 
 MAX_CONFIG = 1024 * 1024
 SECRET_REF = re.compile(r"setup_[0-9a-f]{32}")
@@ -182,6 +183,7 @@ def state(daemon, principal):
         client = daemon.fleet._clients.get(name)
         hosts.append({"name": name, "url": host.url, "fingerprint": host.fingerprint,
             "profile_id": host.profile_id, "writes": host.writes, "orchestrate": host.orchestrate,
+            "shared_clone_worktrees": host.shared_clone_worktrees,
             "managed_roots": list(host.managed_roots), "connected": bool(client and client.connected),
             "token_available": host.token_available(),
             "ssh_alias": document.get("managed_setup", {}).get("ssh_hosts", {}).get(name)})
@@ -189,7 +191,10 @@ def state(daemon, principal):
         for host, workspace in (repo.sync.bindings if repo.sync else ())], "allow_merge": repo.allow_merge,
         "allow_pr_update": repo.allow_pr_update, "allow_integrate": repo.integrate is not None}
         for repo in daemon.fleet.config.github.repos.values()]
+    verification = _verification(document)
     return {"revision": revision, "hosts": hosts, "repositories": repos, "profiles": profiles,
+            "verification": {"commands": {name: list(argv) for name, argv in verification.commands.items()},
+                             "timeout_s": verification.timeout_s},
             "profiles_error": profiles_error, "busy": _busy(daemon)}
 
 
@@ -255,7 +260,7 @@ def _candidate(daemon, action, target, params, *, expired=False):
         name = target.get("host")
         if set(target) != {"host"} or not isinstance(name, str) or not HOST.fullmatch(name):
             raise _error("INVALID_TARGET", "Choose a stable logical host name")
-        allowed = {"url", "fingerprint", "profile_id", "secret_ref", "import_profile_id", "writes", "orchestrate", "managed_roots", "ssh_alias"}
+        allowed = {"url", "fingerprint", "profile_id", "secret_ref", "import_profile_id", "writes", "orchestrate", "managed_roots", "ssh_alias", "shared_clone_worktrees"}
         if set(params) - allowed:
             raise _error("INVALID_PARAMS", "Only reviewed host connection and permission fields are accepted")
         existing = document.setdefault("hosts", {}).get(name, {})
@@ -280,7 +285,7 @@ def _candidate(daemon, action, target, params, *, expired=False):
                          or normalize_fingerprint(existing["fingerprint"]) != host["fingerprint"]
                          or existing.get("profile_id", "default") != host["profile_id"]):
             raise _error("HOST_IDENTITY_CHANGED", "Use a new host name when changing its endpoint, trust or profile", 409)
-        for key in ("writes", "orchestrate"):
+        for key in ("writes", "orchestrate", "shared_clone_worktrees"):
             value = params.get(key, host.get(key, False))
             if type(value) is not bool:
                 raise _error("INVALID_PARAMS", "Host permission choices must be booleans")
@@ -295,7 +300,7 @@ def _candidate(daemon, action, target, params, *, expired=False):
                 raise _error("INVALID_PARAMS", "SSH alias must name an existing trusted SSH configuration entry")
             document.setdefault("managed_setup", {}).setdefault("ssh_hosts", {})[name] = alias
         document["hosts"][name] = host
-    else:
+    elif action == "setup.repository":
         repository = target.get("repository")
         if set(target) != {"repository"} or not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
             raise _error("INVALID_TARGET", "Repository must be an exact owner/name")
@@ -337,8 +342,16 @@ def _candidate(daemon, action, target, params, *, expired=False):
                 integrate["hosts"].append(host)
         elif params.get("allow_integrate") is False and repo.get("integrate"):
             raise _error("EXISTING_INTEGRATION", "Guided binding cannot remove an existing integration policy", 409)
+    elif action == "setup.verification":
+        if target or set(params) != {"commands", "timeout_s"}:
+            raise _error("INVALID_PARAMS", "Verification setup accepts reviewed commands and timeout_s")
+        document.setdefault("managed_setup", {})["verification"] = copy.deepcopy(params)
+        _verification(document)
+    else:
+        raise _error("INVALID_PARAMS", "Unsupported managed setup action")
     try:
         _aliases(document)
+        _verification(document)
         config = parse_config(document, path)
         encoded = _encode(document)
         if len(encoded) > MAX_CONFIG or _encode(tomllib.loads(encoded.decode())) != encoded:
@@ -430,6 +443,25 @@ def _aliases(document):
     return aliases
 
 
+def _verification(document):
+    metadata = document.get("managed_setup", {})
+    raw = metadata.get("verification", {}) if isinstance(metadata, dict) else None
+    if not isinstance(raw, dict) or set(raw) - {"commands", "timeout_s"}:
+        raise _error("INVALID_CONFIGURATION", "Invalid managed verification settings")
+    commands, timeout = raw.get("commands", {}), raw.get("timeout_s", 600)
+    if (not isinstance(commands, dict) or len(commands) > 200 or type(timeout) is not int or not 1 <= timeout <= 3600):
+        raise _error("INVALID_PARAMS", "Verification requires at most 200 named commands and a 1–3600 second timeout")
+    for project, argv in commands.items():
+        _text(project, "task project", 256)
+        if (not isinstance(argv, list) or not 1 <= len(argv) <= 64
+                or any(not isinstance(arg, str) or not arg or len(arg) > 4096
+                       or any(ord(char) < 32 for char in arg) for arg in argv)
+                or sum(map(len, argv)) > 16000 or argv[0].startswith("-")
+                or redact_secrets(redact(json.dumps(argv))) != json.dumps(argv)):
+            raise _error("INVALID_PARAMS", "Commands must be bounded explicit argv arrays without credentials or control characters")
+    return parse_settings({"verification": {"commands": commands, "timeout_s": timeout}})
+
+
 def _activate(daemon, config, document, revision=None):
     if revision and daemon.ops.context.get("managed_setup_active_revision") == revision:
         return []
@@ -438,6 +470,9 @@ def _activate(daemon, config, document, revision=None):
     settings = daemon.adapter.verifier.settings
     aliases = {**settings.ssh_hosts, **_aliases(document)}
     settings = dataclasses.replace(settings, ssh_hosts=aliases)
+    if "verification" in document.get("managed_setup", {}):
+        verification = _verification(document)
+        settings = dataclasses.replace(settings, commands=verification.commands, timeout_s=verification.timeout_s)
     runner = SshGitRunner(aliases)
     artifact = ArtifactHost(aliases, daemon.ops.context["artifact_host"].timeout_s)
     try:
@@ -455,6 +490,8 @@ def _activate(daemon, config, document, revision=None):
     daemon.ops.context["github_config"] = config.github
     daemon.ops.context["github"] = github
     daemon.adapter.verifier.settings = settings
+    daemon.verification_timeout_default_s = max(1, settings.timeout_s)
+    daemon.verification_timeout_s = daemon.verification_timeout_default_s
     daemon.ops.context["git_runner"] = runner
     daemon.ops.context["artifact_host"] = artifact
     for fleet in (daemon.fleet, daemon.inventory.fleet):
@@ -493,8 +530,12 @@ async def _run(ctx):
                     proof = await _probe_host(config, ctx.target["host"])
                     if ctx.params.get("ssh_alias"):
                         await _probe_ssh(ctx.params["ssh_alias"])
-                else:
+                elif ctx.op["action"] == "setup.repository":
                     proof = await _probe_repository(config, ctx.target["repository"], ctx.params["host"], ctx.params["workspace_id"])
+                else:
+                    # Saving a command never executes it; task ownership and the
+                    # existing observed-verification gates govern its later run.
+                    proof = {"verification_configured": True}
             except OperationError:
                 raise
             except Exception:
@@ -521,7 +562,9 @@ async def _run(ctx):
 ACTIONS = [ActionDef("setup.host", "manage", "Configure a verified BAT connection for this installation", _run,
                     _admit("setup.host"), target_keys=("host",), authorize_existing=_authorize_existing),
            ActionDef("setup.repository", "manage", "Bind a verified GitHub repository and BAT workspace", _run,
-                    _admit("setup.repository"), target_keys=("repository",), authorize_existing=_authorize_existing)]
+                    _admit("setup.repository"), target_keys=("repository",), authorize_existing=_authorize_existing),
+           ActionDef("setup.verification", "manage", "Configure explicit verification commands for task projects", _run,
+                    _admit("setup.verification"), target_keys=(), authorize_existing=_authorize_existing)]
 
 
 def install(daemon):
