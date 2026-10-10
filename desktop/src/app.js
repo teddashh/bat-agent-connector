@@ -1,4 +1,6 @@
 import {workspaceNavigation} from "./workspace-nav.js";
+import {managedSetupPanel} from "./managed-setup.js";
+import {managedControl} from "./transport/index.ts";
 import {restoreBrowserSession, browserSessionToken, forgetBrowserSession} from "./transport/index.ts";
 import {setupSidebarResizer, setupMobileSessionLayout} from "./workspace-layout.js";
 import {attentionView} from "./attention.js";
@@ -2095,6 +2097,7 @@ function mergeRecovery(op) {
 }
 
 function viewSettings(main) {
+  if (state.caps?.managed_installation) return viewManagedSettings(main);
   if (nativeDesktop) return viewNativeSettings(main);
   if (state.token === browserSessionToken) {
     main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel"},
@@ -2124,6 +2127,47 @@ function viewSettings(main) {
       h("button", { class: "secondary", onclick: () => { disconnect(); route(); } }, t("disconnect"))),
     h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
   return mountTailscale(main, {h, t});
+}
+
+async function viewManagedSettings(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const guard = () => assertView(connection);
+  const status = h("div", {role: "status"});
+  const local = h("section", {class: "panel"}, h("h2", {}, t("managed_browser_connected")),
+    h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
+    h("p", {class: "muted"}, t("managed_background_help")), status);
+  main.append(h("h1", {}, t("nav_settings")), local);
+  const setup = managedSetupPanel({h, t, api, guard, namespace: state.namespace, errorBox, opStatus,
+    onConfigured: async () => {const caps = await api("GET", "/capabilities"); guard(); state.caps = caps;}});
+  main.append(setup.box);
+  await setup.load();
+  guard();
+  const fleetRoot = h("div"); main.append(fleetRoot);
+  let disposeFleet;
+  if (nativeDesktop) {
+    const login = h("input", {type: "checkbox", disabled: true});
+    const open = h("button", {class: "secondary", onclick: async () => {
+      open.disabled = true;
+      try {guard(); await managedControl({action: "open_browser"}); guard(); status.replaceChildren();}
+      catch (error) {if (connection.generation === generation) status.replaceChildren(errorBox(error));}
+      finally {open.disabled = false;}
+    }}, t("managed_open_browser"));
+    local.append(h("div", {class: "actions"}, open, h("label", {}, login, " ", t("managed_start_login"))));
+    try {const state = await managedControl({action: "status"}); guard(); login.checked = !!state.login_enabled; login.disabled = false;}
+    catch (error) {status.replaceChildren(errorBox(error));}
+    login.addEventListener("change", async () => {
+      const wanted = login.checked; login.disabled = true;
+      try {guard(); const result = await managedControl({action: "set_login", enabled: wanted}); guard(); login.checked = !!result.login_enabled;}
+      catch (error) {if (connection.generation === generation) {login.checked = !wanted; status.replaceChildren(errorBox(error));}}
+      finally {login.disabled = false;}
+    });
+    disposeFleet = await mountFleet(fleetRoot, {h, t});
+  } else {
+    local.append(h("p", {class: "muted"}, t("managed_browser_help")),
+      h("button", {class: "secondary", onclick: () => {disconnect(); route();}}, t("disconnect")));
+  }
+  const disposeTailscale = mountTailscale(fleetRoot, {h, t});
+  return () => {setup.dispose(); disposeFleet?.(); disposeTailscale();};
 }
 
 // Credential dialogs and protected storage stay native. A transition invalidates old async
