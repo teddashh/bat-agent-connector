@@ -11,7 +11,7 @@ import stat
 
 import pytest
 
-from bat_agent_connector import confinement, lifecycle, orchestrate, registry
+from bat_agent_connector import confinement, lifecycle, orchestrate, platform_files, registry
 from bat_agent_connector.fleet import Fleet
 from bat_agent_connector.task_journal import Journal
 from tests.conftest import make_config
@@ -58,9 +58,8 @@ def _crash_reservation(entry, ready, release=None, replaces=None):
 
 def _seed_unsent(status):
     path = registry.registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"sessions": [{"host": "h1", "session_id": SID,
-                                             "status": status, "start_sent": False}]}))
+    platform_files.atomic_write(path, json.dumps({"sessions": [{"host": "h1", "session_id": SID,
+                                             "status": status, "start_sent": False}]}).encode())
 
 
 async def _join(process):
